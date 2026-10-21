@@ -10,6 +10,8 @@
 
 #include <nx/runtime.h>
 
+#include "kernel.h"
+
 #include "platform.h"
 
 namespace nx {
@@ -184,8 +186,11 @@ void call(CPU& c, uint64_t t) {
         if (g_trace) log("hle %s", th.name.c_str());
         const char* prev = t_missing_name;
         t_missing_name = th.name.c_str();
+        KThread* kt = self_thread();
+        if (kt) kt->hle.store(t_missing_name, std::memory_order_relaxed);
         th.fn(c);
         t_missing_name = prev;
+        if (kt) kt->hle.store(prev, std::memory_order_relaxed);
         return;
     }
     fatal("call to %llx (%s), lr %s", (unsigned long long)t, describe(t).c_str(), describe(c.x[30]).c_str());

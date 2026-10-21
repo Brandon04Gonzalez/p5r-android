@@ -16,22 +16,44 @@ namespace nx::nvn {
 
 namespace {
 
-constexpr uint64_t kFormatTable = 0xd34198;  // in sdk (SDK 16.2)
+constexpr uint64_t kFormatTable = 0xd34198;  // in sdk (SDK 16.2: Wonder)
 constexpr uint32_t kFormatCount = 0xd0;
+constexpr uint32_t kFormatEntry = 0x30;
 
 struct FormatInfo {
     uint32_t block_w = 1, block_h = 1, bytes = 4;
 };
 
+// The table moves with the SDK (P5R's 13.3.2 has it at sdk+0xcd0d90; 0xd34198 is past the end of that module, and
+// every format came out 1x1, 4 bytes). It is found by its entries: R8 (0x1) 1x1 of 1 byte, BC3 (0x44) 4x4 of 16,
+// ASTC 12x12 (0x86) 12x12. Wonder's offset is tried first.
+bool format_table_at(const LoadedModule& m, uint64_t off) {
+    if (off + uint64_t(kFormatCount) * kFormatEntry > m.size) return false;
+    auto word = [&](uint32_t format, int k) {
+        return reinterpret_cast<const uint32_t*>(m.base + off + uint64_t(format) * kFormatEntry)[k];
+    };
+    return (word(0x1, 2) & 0xFFFF) == 0x0101 && (word(0x1, 4) & 0xFF) == 1 && (word(0x44, 2) & 0xFFFF) == 0x0404 &&
+           (word(0x44, 4) & 0xFF) == 16 && (word(0x86, 2) & 0xFFFF) == 0x0C0C;
+}
+
+uint64_t format_table() {
+    const LoadedModule* m = module_at(find_symbol("nvnBootstrapLoader"));
+    if (!m) return 0;
+    if (format_table_at(*m, kFormatTable)) return m->base + kFormatTable;
+    for (uint64_t off = 0; off + uint64_t(kFormatCount) * kFormatEntry <= m->size; off += 4)
+        if (format_table_at(*m, off)) {
+            log("nvn: format table at %s", describe(m->base + off).c_str());
+            return m->base + off;
+        }
+    log("nvn: format table not found: every format taken as 1x1, 4 bytes");
+    return 0;
+}
+
 FormatInfo format_info(uint32_t format) {
-    static uint64_t sdk = [] {
-        uint64_t loader = find_symbol("nvnBootstrapLoader");
-        const LoadedModule* m = module_at(loader);
-        return m ? m->base : 0;
-    }();
+    static const uint64_t table = format_table();
     FormatInfo f;
-    if (!sdk || format >= kFormatCount) return f;
-    const uint32_t* e = reinterpret_cast<const uint32_t*>(sdk + kFormatTable + uint64_t(format) * 0x30);
+    if (!table || format >= kFormatCount) return f;
+    const uint32_t* e = reinterpret_cast<const uint32_t*>(table + uint64_t(format) * kFormatEntry);
     uint32_t bw = e[2] & 0xFF, bh = (e[2] >> 8) & 0xFF, bytes = e[4] & 0xFF;
     if (bw && bh && bytes) f = {bw, bh, bytes};
     return f;

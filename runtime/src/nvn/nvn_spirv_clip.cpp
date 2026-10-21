@@ -125,7 +125,7 @@ bool depth_remap() {
 }
 
 void clip_z_module(const ShaderInfo* s, std::vector<uint32_t>& code) {
-    if (!depth_remap()) return;
+    if (!depth_remap() || !clip_z_minus_one()) return;  // depth mode 1 (P5R): already 0..w
     std::vector<uint32_t> clipped;
     if (patch_clip_z(code, clipped))
         code.swap(clipped);

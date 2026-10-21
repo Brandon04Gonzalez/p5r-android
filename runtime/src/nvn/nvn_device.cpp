@@ -1,5 +1,6 @@
 // NVN device (docs/NVN.md, phases N2-N3). Values come from what the game checks and from the SDK's own NVN driver
 // (recompiled in sdk; NX_NVN_REAL=1 records where each of its procs lives, see nvn_trace.cpp).
+#include <atomic>
 #include <map>
 
 #include <nx/runtime.h>
@@ -7,6 +8,8 @@
 namespace nx {
 
 namespace {
+
+std::atomic<uint32_t> g_depth_mode{0};  // NVNdepthMode: 0 NEAR_IS_MINUS_W (NVN's default), 1 NEAR_IS_ZERO
 
 // nvnDeviceGetInteger(const NVNdevice*, NVNdeviceInfo pname, int* value).
 // Read out of the SDK 16.2 driver (sdk+451090: a jump table over pname 0..0x62, constants inline or from a second
@@ -122,8 +125,43 @@ void nvnDeviceGetInteger(CPU& c) {
     if (c.x[2]) st<int32_t>(c.x[2], it == kDeviceInfo.end() ? 0 : it->second);
 }
 
+// NVNboolean nvnDeviceRegisterFastClear{Color,Colori,Colorui,Depth}(device, value(s), format): the driver keeps a
+// small table of clear values its compression can clear for free. Only a hint; Vulkan clears the same either way.
+// P5R treats false as a fatal device error (main+1025248).
+void nvnDeviceRegisterFastClear(CPU& c) { c.x[0] = 1; }
+
+// nvnDeviceSetDepthMode(device, NVNdepthMode) / Get: P5R sets NEAR_IS_ZERO (1) before making anything, so clip z is
+// 0..w as in Vulkan and the pipelines leave it alone (nvn_pipeline.cpp). Wonder never calls it.
+void nvnDeviceSetDepthMode(CPU& c) {
+    uint32_t mode = uint32_t(c.x[1]);
+    if (g_depth_mode.exchange(mode) != mode) log("nvn: depth mode %u (%s)", mode, mode ? "clip z 0..w" : "clip z -w..w");
+}
+void nvnDeviceGetDepthMode(CPU& c) { c.x[0] = g_depth_mode.load(); }
+
+// nvnDeviceSetWindowOriginMode(device, NVNwindowOriginMode) / Get: the replay always draws with NVN's upper-left
+// origin (1; a negative-height viewport, nvn_draw.cpp), what Wonder and P5R use. Lower-left (0) would be upside down.
+std::atomic<uint32_t> g_origin_mode{1};
+void nvnDeviceSetWindowOriginMode(CPU& c) {
+    uint32_t mode = uint32_t(c.x[1]);
+    g_origin_mode = mode;
+    if (mode != 1) log("nvn: window origin mode %u: only upper-left (1) is drawn right", mode);
+}
+void nvnDeviceGetWindowOriginMode(CPU& c) { c.x[0] = g_origin_mode.load(); }
+
 }  // namespace
 
+namespace nvn {
+bool clip_z_minus_one() { return g_depth_mode.load(std::memory_order_relaxed) == 0; }
+}  // namespace nvn
+
 NX_HLE("nvnDeviceGetInteger", nvnDeviceGetInteger);
+NX_HLE("nvnDeviceRegisterFastClearColor", nvnDeviceRegisterFastClear);
+NX_HLE("nvnDeviceRegisterFastClearColori", nvnDeviceRegisterFastClear);
+NX_HLE("nvnDeviceRegisterFastClearColorui", nvnDeviceRegisterFastClear);
+NX_HLE("nvnDeviceRegisterFastClearDepth", nvnDeviceRegisterFastClear);
+NX_HLE("nvnDeviceSetDepthMode", nvnDeviceSetDepthMode);
+NX_HLE("nvnDeviceGetDepthMode", nvnDeviceGetDepthMode);
+NX_HLE("nvnDeviceSetWindowOriginMode", nvnDeviceSetWindowOriginMode);
+NX_HLE("nvnDeviceGetWindowOriginMode", nvnDeviceGetWindowOriginMode);
 
 }  // namespace nx

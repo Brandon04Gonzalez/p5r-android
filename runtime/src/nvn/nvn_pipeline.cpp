@@ -814,7 +814,7 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
     VkPipelineViewportStateCreateInfo& vp = B.vp;
     vp = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO};
     vp.viewportCount = vp.scissorCount = 1;
-    if (vk_depth_clip_control() && !depth_remap()) vp.pNext = &clip;
+    if (vk_depth_clip_control() && !depth_remap() && clip_z_minus_one()) vp.pNext = &clip;
 
     VkPipelineRasterizationStateCreateInfo& rs = B.rs;
     rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};

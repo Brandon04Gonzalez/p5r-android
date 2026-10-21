@@ -202,6 +202,23 @@ void ShowControllerSupport(CPU& c) {                     // (ControllerSupportRe
 }
 void noop(CPU& c) { c.x[0] = 0; }
 
+// TouchScreenState<N>: {int64 samplingNumber; int32 count; int32 reserved; TouchState touches[N]}. No touches.
+void GetTouchScreenState(CPU& c) {
+    st<int64_t>(c.x[0], int64_t(g_sampling));
+    st<int32_t>(c.x[0] + 8, 0);
+}
+
+// SixAxisSensorState (0x5c bytes used): deltaTime, samplingNumber, acceleration, angularVelocity, angle (Float3 each),
+// direction (3 x Float3), attributes. A controller at rest: no motion, identity orientation.
+void GetSixAxisSensorState(CPU& c) {
+    const uint64_t s = c.x[0];
+    for (uint64_t k = 0; k < 0x5c; k += 4) st<uint32_t>(s + k, 0);
+    st<int64_t>(s + 8, int64_t(g_sampling));
+    st<float>(s + 0x34, 1.0f);  // direction.x = (1, 0, 0)
+    st<float>(s + 0x44, 1.0f);  // direction.y = (0, 1, 0)
+    st<float>(s + 0x54, 1.0f);  // direction.z = (0, 0, 1)
+}
+
 }  // namespace
 
 NX_HLE("_ZN2nn3hid14InitializeNpadEv", noop);
@@ -238,5 +255,12 @@ NX_HLE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14Vib
 NX_HLE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", noop);
 NX_HLE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", noop);
 NX_HLE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", zero);
+// SDK 13 (Persona 5 Royal)
+NX_HLE("_ZN2nn3hid21InitializeTouchScreenEv", noop);
+NX_HLE("_ZN2nn3hid19GetTouchScreenStateILm16EEEvPNS0_16TouchScreenStateIXT_EEE", GetTouchScreenState);
+NX_HLE("_ZN2nn3hid21GetSixAxisSensorStateEPNS0_18SixAxisSensorStateERKNS0_19SixAxisSensorHandleE", GetSixAxisSensorState);
+NX_HLE("_ZN2nn3hid17StopSixAxisSensorERKNS0_19SixAxisSensorHandleE", noop);
+NX_HLE("_ZN2nn3hid34ResetSixAxisSensorFusionParametersERKNS0_19SixAxisSensorHandleE", noop);
+NX_HLE("_ZN2nn3hid28SetNpadJoyAssignmentModeDualERKj", noop);
 
 }  // namespace nx

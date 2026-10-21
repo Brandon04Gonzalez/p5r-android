@@ -32,7 +32,13 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
         case Cmd::SetDepthRange:
             s.depth_near = c.f[0], s.depth_far = c.f[1];
             break;
-        case Cmd::BindProgram: s.program = c.a[0]; break;
+        case Cmd::BindProgram: {
+            s.program = c.a[0];
+            const uint32_t bits = c.mask ? c.mask : (1u << kStages) - 1;  // NVN_SHADER_STAGE_*_BIT, 1 << stage
+            for (int k = 0; k < kStages; k++)
+                if (bits & (1u << k)) s.stage_programs[k] = c.a[0];
+            break;
+        }
         case Cmd::BindUniformBuffer:
             if (c.i[0] >= 0 && c.i[0] < kStages && c.i[1] >= 0 && c.i[1] < 18) s.uniforms[c.i[0]][c.i[1]] = {c.a[0], c.a[1]};
             break;

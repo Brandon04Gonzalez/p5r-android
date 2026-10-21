@@ -6,6 +6,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <tuple>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -148,7 +149,9 @@ static void dump_threads() {
             if (next <= fp) break;
             fp = next;
         }
-        log("threads: %llx %s", (unsigned long long)t->id, chain.c_str());
+        // x0..x2 as the thread left them: for one blocked in a call, what it waits on (a mutex, an event, a handle).
+        log("threads: %llx (handle %x) %s  [x0 %llx x1 %llx x2 %llx]", (unsigned long long)t->id, t->handle, chain.c_str(),
+            (unsigned long long)t->ctx.x[0], (unsigned long long)t->ctx.x[1], (unsigned long long)t->ctx.x[2]);
     }
 }
 
@@ -156,7 +159,7 @@ static void stall_sampler(void*) {
     static const char* dump_env = std::getenv("NX_THREAD_DUMP_AT");
     uint64_t dump_at = dump_env ? plat::monotonic_ns() + uint64_t(std::atof(dump_env) * 1e9) : 0;
     uint64_t last_frame = 0, since = plat::monotonic_ns();
-    std::map<std::pair<uint64_t, uint64_t>, uint32_t> hits;  // (thread id, guest lr) -> samples
+    std::map<std::tuple<uint64_t, uint64_t, const char*>, uint32_t> hits;  // (thread id, guest lr, HLE) -> samples
     for (;;) {
         plat::sleep_ns(5'000'000);
         uint64_t f = g_frame, now = plat::monotonic_ns();
@@ -166,15 +169,20 @@ static void stall_sampler(void*) {
             if (last_frame && ms > 100 && !hits.empty()) {
                 log("stall: %llu ms without a frame after frame %llu; where the threads were:", (unsigned long long)ms,
                     (unsigned long long)last_frame);
-                std::map<uint64_t, std::pair<uint64_t, uint32_t>> top;  // thread -> (lr, samples)
+                struct Top {
+                    uint64_t lr = 0;
+                    const char* hle = nullptr;
+                    uint32_t n = 0;
+                };
+                std::map<uint64_t, Top> top;  // thread -> most frequent place
                 std::map<uint64_t, uint32_t> total;
                 for (auto& [k, n] : hits) {
-                    total[k.first] += n;
-                    if (n > top[k.first].second) top[k.first] = {k.second, n};
+                    total[std::get<0>(k)] += n;
+                    if (n > top[std::get<0>(k)].n) top[std::get<0>(k)] = {std::get<1>(k), std::get<2>(k), n};
                 }
                 for (auto& [id, t] : top)
-                    log("  thread %llx: %s (%u of %u samples)", (unsigned long long)id, describe(t.first).c_str(),
-                        t.second, total[id]);
+                    log("  thread %llx: %s%s%s (%u of %u samples)", (unsigned long long)id, describe(t.lr).c_str(),
+                        t.hle ? " in hle:" : "", t.hle ? t.hle : "", t.n, total[id]);
             }
             hits.clear();
             last_frame = f;
@@ -184,7 +192,8 @@ static void stall_sampler(void*) {
         if (!f || now - since < 60'000'000) continue;
         std::lock_guard al(g_all_lock);
         for (auto& w : g_all)
-            if (auto t = w.lock(); t && t->started && !t->exited) hits[{t->id, t->ctx.x[30]}]++;
+            if (auto t = w.lock(); t && t->started && !t->exited)
+                hits[{t->id, t->ctx.x[30], t->hle.load(std::memory_order_relaxed)}]++;
     }
 }
 

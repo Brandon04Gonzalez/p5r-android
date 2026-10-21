@@ -1,6 +1,7 @@
 // Kernel objects shared by kernel.cpp and ipc.cpp.
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <memory>
 #include <vector>
@@ -29,6 +30,7 @@ struct KThread : KObject {
     uint64_t last_tick_call = 0;  // nn::os::GetSystemTick back-off
     uint32_t tick_spins = 0;
     int prio = 44, core = 0;
+    std::atomic<const char*> hle{nullptr};  // the HLE function it is in (for the stall report), null in guest code
     bool started = false, exited = false, cancel = false;
     // wait state (under the kernel lock)
     bool wake = false;

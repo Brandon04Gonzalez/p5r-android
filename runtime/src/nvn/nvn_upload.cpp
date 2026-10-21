@@ -292,4 +292,64 @@ void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_
                              copies.data());
 }
 
+bool upload_region(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint32_t level, uint32_t layer0,
+                   const int32_t region[6], const uint8_t* src) {
+    uint32_t bw = 1, bh = 1, bytes = 4;
+    format_block(t.format, bw, bh, bytes);
+    const bool is3d = img.view_type == VK_IMAGE_VIEW_TYPE_3D;
+    level = std::min(level, img.levels - 1);
+    const uint32_t lw = std::max(1u, img.width >> level), lh = std::max(1u, img.height >> level);
+    const uint32_t x = uint32_t(std::max(region[0], 0)), y = uint32_t(std::max(region[1], 0));
+    const uint32_t z = uint32_t(std::max(region[2], 0));
+    // The source is laid out for the region as given; what lies past the level's edge is not copied.
+    const uint32_t w = uint32_t(std::max(region[3], 1)), h = uint32_t(std::max(region[4], 1));
+    const uint32_t d = uint32_t(std::max(region[5], 1));
+    if (x >= lw || y >= lh) return true;
+    const uint64_t blocks = uint64_t((w + bw - 1) / bw) * ((h + bh - 1) / bh) * d;
+    const uint32_t host_bytes = vk_block_bytes(img.format) ? vk_block_bytes(img.format) : bytes;
+    const bool widen = t.format == 0x3f && img.format == VK_FORMAT_R16G16B16A16_SFLOAT && !img.alpha_from_r;
+    Upload u;
+    uint32_t texel_w = bw, texel_h = bh;  // the staged data's block, in texels
+    if (bc_host_decode(t.format)) {
+        uint32_t tb = bc_decoded_bytes(t.format);
+        u = texture_stage(uint64_t(w) * h * d * tb);
+        bc_decode(t.format, src, w, h, d, u.ptr);
+        texel_w = texel_h = 1;
+    } else if (astc_decoded(t.format)) {
+        u = texture_stage(uint64_t(w) * h * d * 4);
+        astc_decode_image(src, w, h, d, bw, bh, t.format >= 0x87, u.ptr);
+        texel_w = texel_h = 1;
+    } else if (widen) {
+        u = texture_stage(blocks * 8);
+        widen_r11g11b10(src, u.ptr, blocks);
+    } else if (img.alpha_from_r) {  // R8 -> RGBA8 (255, 255, 255, R)
+        u = texture_stage(blocks * 4);
+        uint32_t* out = reinterpret_cast<uint32_t*>(u.ptr);
+        for (uint64_t k = 0; k < blocks; k++) out[k] = 0x00FFFFFFu | (uint32_t(src[k]) << 24);
+    } else if (host_bytes == bytes) {
+        u = texture_stage(blocks * bytes);
+        std::memcpy(u.ptr, src, blocks * bytes);
+    } else {
+        static std::set<uint32_t> logged;
+        if (logged.insert(t.format).second)
+            log("nvn/vk: buffer-to-texture copy into format %#x (%u bytes per block, host %u): not replayed", t.format,
+                bytes, host_bytes);
+        return false;
+    }
+    VkBufferImageCopy r{};
+    r.bufferOffset = u.offset;
+    r.bufferRowLength = (w + texel_w - 1) / texel_w * texel_w;
+    r.bufferImageHeight = (h + texel_h - 1) / texel_h * texel_h;
+    VkImageAspectFlags aspect = img.aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)
+                                    ? VkImageAspectFlags(VK_IMAGE_ASPECT_DEPTH_BIT)
+                                    : img.aspect;
+    uint32_t layer = is3d ? 0 : std::min(z + layer0, img.layers - 1);
+    r.imageSubresource = {aspect, level, layer, is3d ? 1u : std::min(d, img.layers - layer)};
+    r.imageOffset = {int32_t(x), int32_t(y), is3d ? int32_t(z) : 0};
+    r.imageExtent = {std::min(w, lw - x), std::min(h, lh - y), is3d ? d : 1u};
+    transition(cb, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    p_vkCmdCopyBufferToImage(cb, u.buffer, img.image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &r);
+    return true;
+}
+
 }  // namespace nx::nvn

@@ -90,7 +90,9 @@ namespace SpirvHarness
             int start = BitConverter.ToInt32(ctrl, 0x708);
             int constSize = BitConverter.ToInt32(ctrl, 0x6fc);
             int constOff = BitConverter.ToInt32(ctrl, 0x700);
-            bool compute = BitConverter.ToUInt32(code, 0) == ComputeMagic;
+            // P5R also has compute blocks with no NVN header at all: program start 0 and a work-group size.
+            bool compute = BitConverter.ToUInt32(code, 0) == ComputeMagic ||
+                           (start == 0 && BitConverter.ToUInt32(ctrl, 0x748) != 0);
             // SPH word 0 bits 10..13: 1 vertex, 5 pixel (only these exist in Wonder). Used here for binding ranges only;
             // the translator reads the SPH itself.
             int sphType = compute ? 0 : (BitConverter.ToInt32(code, start) >> 10) & 0xf;

@@ -232,6 +232,8 @@ std::shared_ptr<CmdList> submit_command_list(uint64_t handle);  // command_list(
 void submit_lists_reset();  // at each submit's start (draw_begin_submit)
 
 void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list);  // nvn_copy.cpp: texture copies
+void replay_buffer_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list);    // buffer -> texture
+void replay_clear_texture(VkCommandBuffer cb, const Cmd& c, const CmdList& list);  // nvnCommandBufferClearTexture
 void forget_image_views(const GpuImage& img);
 // nvn_debug.cpp: NX_SNAP_DRAWS mid-frame snapshots of colour target 0.
 bool debug_snap_wanted(uint64_t draw);

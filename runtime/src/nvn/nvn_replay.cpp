@@ -81,6 +81,14 @@ void replay_list(VkCommandBuffer cb, Targets& st, const CmdList& list, int depth
                 replay_copy(cb, c, list);
                 if (gpu_profile_on()) gpu_profile_mark(cb, "outside passes (clears, uploads, copies)");
                 break;
+            case Cmd::CopyBufferToTexture:
+            case Cmd::ClearTexture:
+                draw_end_rendering(cb, 5);
+                if (c.op == Cmd::CopyBufferToTexture)
+                    replay_buffer_copy(cb, c, list);
+                else
+                    replay_clear_texture(cb, c, list);
+                break;
             default:
                 draw_command(cb, c, list, st);
                 // NX_PIPELINED: after the submit's last dispatch the rest goes into a second command buffer.

@@ -197,12 +197,27 @@ void begin_rendering(VkCommandBuffer cb, const Targets& t) {
 
 uint64_t g_dump_draws = 0, g_dump_request = 0;
 
+// The graphics stages bound now: one program for all of them (its own list), or a vertex and a fragment program
+// bound separately (their stages gathered in `out`).
+const std::vector<const ShaderInfo*>* bound_graphics_shaders(std::vector<const ShaderInfo*>& out) {
+    const uint64_t pv = g_state.stage_programs[0], pf = g_state.stage_programs[1];
+    if (pv == pf) return program_shaders(pv);
+    out.clear();
+    if (const auto* sh = program_shaders(pv))
+        for (const ShaderInfo* s : *sh)
+            if (s->stage == ShaderStage::Vertex) out.push_back(s);
+    if (const auto* sh = program_shaders(pf))
+        for (const ShaderInfo* s : *sh)
+            if (s->stage == ShaderStage::Fragment) out.push_back(s);
+    return &out;
+}
+
 // DispatchCompute: the bound program's compute stage over (x, y, z) groups, outside render passes, then a barrier
 // so what it wrote is visible to what follows.
 void dispatch(VkCommandBuffer cb, const Cmd& c) {
     static const bool off = std::getenv("NX_NO_COMPUTE") != nullptr;  // debug: skip compute dispatches
     if (off) return;
-    const auto* shaders = program_shaders(g_state.program);
+    const auto* shaders = program_shaders(g_state.stage_programs[5]);
     const ShaderInfo* cs = nullptr;
     if (shaders)
         for (const ShaderInfo* s : *shaders)
@@ -258,7 +273,8 @@ void vertex_read_barrier(VkCommandBuffer cb, const ShaderInfo* vs) {
 bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, const Cmd& c) {
     g_stats.total++;
     if (g_state.rasterizer_discard || !g_state.render_enable) return false;  // nothing reaches the targets
-    const auto* shaders = program_shaders(g_state.program);
+    static thread_local std::vector<const ShaderInfo*> combined;
+    const auto* shaders = bound_graphics_shaders(combined);
     if (!shaders || shaders->empty()) {
         g_stats.no_program++;
         return false;

@@ -16,7 +16,10 @@ struct Range {
 };
 
 struct State {
-    uint64_t program = 0;
+    uint64_t program = 0;  // the last program bound
+    // BindProgram(cmd, program, stageBits) binds a program to the stages of its mask only: Wonder binds one program
+    // for all stages, Persona 5 Royal one program per stage (a vertex-only and a fragment-only program).
+    uint64_t stage_programs[kStages] = {};
     Range uniforms[kStages][18], storage[kStages][16], vertex_buffers[16];
     uint64_t textures[kStages][32] = {};  // NVN texture handles by sampler binding
     uint64_t images[kStages][16] = {};    // NVN image handles by image binding (BindImage)

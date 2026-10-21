@@ -7,10 +7,12 @@
 // Copies within one image (another level or layer, or another rectangle of the same one: blur chains, mips, atlases;
 // textures over one storage share an image since #36) are replayed with the image in GENERAL, as Vulkan allows when
 // the regions do not overlap; overlapping ones are dropped (G10). NX_COPY_NO_SAME_IMAGE=1: all dropped, the old way.
+// P5R also fills textures from buffers and clears them outside passes (CopyBufferToTexture, ClearTexture, below).
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
+#include "nvn_draw_state.h"
 #include "nvn_pipeline.h"
 #include "nvn_vk.h"
 
@@ -38,6 +40,60 @@ void CopyTextureToTexture(CPU& c) {
     Cmd cmd{Cmd::CopyTextureToTexture};
     cmd.a[0] = c.x[1], cmd.a[1] = c.x[4];
     record(c.x[0], cmd, &info, sizeof info);
+}
+
+// nvnCommandBufferCopyBufferToTexture(cmd, NVNbufferAddress src, const NVNtexture* dst, const NVNtextureView* dstView,
+// const NVNcopyRegion* dstRegion, int flags): how P5R loads every texture (a staging buffer it reuses after waiting
+// for the copy, on a command buffer of its own). The source is tightly packed (P5R never sets a copy stride). Its
+// bytes are read when replayed, as the GPU would, and go to the image like nvnTextureWriteTexels data: the texture's
+// guest memory never gets them, so the image is not uploaded from there again.
+struct BufferCopyInfo {
+    ViewInfo dst_view;
+    int32_t dst[6] = {};
+    uint32_t flags = 0;
+};
+
+void CopyBufferToTexture(CPU& c) {
+    BufferCopyInfo info;
+    info.dst_view = read_view(c, c.x[3]);
+    for (int k = 0; k < 6; k++) info.dst[k] = c.x[4] ? ld<int32_t>(c.x[4] + 4ull * k) : 0;
+    info.flags = uint32_t(c.x[5]);
+    Cmd cmd{Cmd::CopyBufferToTexture};
+    cmd.a[0] = c.x[1], cmd.a[1] = c.x[2];
+    record(c.x[0], cmd, &info, sizeof info);
+}
+
+// nvnCommandBufferClearTexture(cmd, const NVNtexture*, const NVNtextureView*, const NVNcopyRegion*, const float* color,
+// int mask): a colour texture (or a rectangle of it) cleared outside any pass. Mask bits 0..3: r, g, b, a.
+struct ClearTextureInfo {
+    ViewInfo view;
+    int32_t region[6] = {};
+};
+
+void ClearTexture(CPU& c) {
+    ClearTextureInfo info;
+    info.view = read_view(c, c.x[2]);
+    for (int k = 0; k < 6; k++) info.region[k] = c.x[3] ? ld<int32_t>(c.x[3] + 4ull * k) : 0;
+    Cmd cmd{Cmd::ClearTexture};
+    cmd.a[0] = c.x[1];
+    for (int k = 0; k < 4; k++) cmd.f[k] = c.x[4] ? ld<float>(c.x[4] + 4ull * k) : 0.0f;
+    cmd.mask = uint32_t(c.x[5]);
+    record(c.x[0], cmd, &info, sizeof info);
+}
+
+// The image of a texture a copy or clear is about to fill. One never uploaded is cleared, not untiled from its guest
+// memory first: the GPU writes such textures, so that memory holds nothing of them here.
+GpuImage* fill_target(VkCommandBuffer cb, uint64_t texture) {
+    Texture* t = get<Texture>(texture);
+    GpuImage* img = t ? image_of(texture) : nullptr;
+    if (!img) return nullptr;
+    if (!img->uploaded && !img->rendered && !t->dirty && !t->has_writes.load(std::memory_order_acquire))
+        clear_image(cb, *img), img->uploaded = true;
+    return ensure_contents(cb, texture);
+}
+
+void sampled_layout(VkCommandBuffer cb, GpuImage& img) {
+    transition(cb, img, img.rendered ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
 }
 
 bool compressed(VkFormat f) {
@@ -148,6 +204,58 @@ void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
     dst->rendered = true;  // GPU-written from now on
 }
 
+void replay_buffer_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
+    if (c.blob >= list.blobs.size() || list.blobs[c.blob].size() != sizeof(BufferCopyInfo)) return;
+    BufferCopyInfo info;
+    std::memcpy(&info, list.blobs[c.blob].data(), sizeof info);
+    static uint64_t copies = 0, failed = 0;
+    Texture* t = get<Texture>(c.a[1]);
+    const uint8_t* src = replay::guest_bytes(c.a[0]);
+    GpuImage* img = t && src ? fill_target(cb, c.a[1]) : nullptr;
+    if (!img || !upload_region(cb, *t, *img, info.dst_view.base_level, info.dst_view.min_layer, info.dst, src)) {
+        if (++failed <= 10)
+            log("nvn: buffer-to-texture copy %llx -> %llx not replayed (%s)", (unsigned long long)c.a[0],
+                (unsigned long long)c.a[1], !t ? "unknown texture" : !src ? "unknown buffer address" : "no image or format");
+        return;
+    }
+    img->texels = true;
+    sampled_layout(cb, *img);
+    if (++copies == 1 || copies % 1000 == 0)
+        log("nvn: %llu buffer-to-texture copies (%llu not replayed); this one %ux%u f%#x level %u, %dx%dx%d at %d,%d,%d",
+            (unsigned long long)copies, (unsigned long long)failed, t->width, t->height, t->format,
+            info.dst_view.base_level, info.dst[3], info.dst[4], info.dst[5], info.dst[0], info.dst[1], info.dst[2]);
+}
+
+void replay_clear_texture(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
+    if (c.blob >= list.blobs.size() || list.blobs[c.blob].size() != sizeof(ClearTextureInfo)) return;
+    ClearTextureInfo info;
+    std::memcpy(&info, list.blobs[c.blob].data(), sizeof info);
+    Texture* t = get<Texture>(c.a[0]);
+    GpuImage* img = t ? fill_target(cb, c.a[0]) : nullptr;
+    if (!img) return;
+    uint32_t level = std::min(info.view.base_level, img->levels - 1);
+    uint32_t lw = std::max(1u, img->width >> level), lh = std::max(1u, img->height >> level);
+    const int32_t* r = info.region;
+    bool whole = r[0] <= 0 && r[1] <= 0 && r[0] + r[3] >= int32_t(lw) && r[1] + r[4] >= int32_t(lh);
+    static int logged = 0;
+    if (img->aspect != VK_IMAGE_ASPECT_COLOR_BIT || compressed(img->format) || !whole || (c.mask & 15) != 15) {
+        if (logged++ < 10)
+            log("nvn: texture clear not replayed: %llx %ux%u f%#x level %u, rect %d,%d %dx%d, mask %x",
+                (unsigned long long)c.a[0], img->width, img->height, t->format, level, r[0], r[1], r[3], r[4], c.mask);
+        return;
+    }
+    bool is3d = img->view_type == VK_IMAGE_VIEW_TYPE_3D;
+    uint32_t layer = is3d ? 0 : std::min(uint32_t(std::max(r[2], 0)) + info.view.min_layer, img->layers - 1);
+    VkImageSubresourceRange range{img->aspect, level, 1, layer, is3d ? 1u : std::clamp<uint32_t>(uint32_t(r[5]), 1, img->layers - layer)};
+    VkClearColorValue v{{c.f[0], c.f[1], c.f[2], c.f[3]}};
+    transition(cb, *img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+    p_vkCmdClearColorImage(cb, img->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+    img->texels = true;
+    sampled_layout(cb, *img);
+}
+
 NX_HLE("nvnCommandBufferCopyTextureToTexture", CopyTextureToTexture);
+NX_HLE("nvnCommandBufferCopyBufferToTexture", CopyBufferToTexture);
+NX_HLE("nvnCommandBufferClearTexture", ClearTexture);
 
 }  // namespace nx::nvn

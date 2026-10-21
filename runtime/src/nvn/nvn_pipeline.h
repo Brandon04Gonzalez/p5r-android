@@ -89,6 +89,9 @@ bool warm_load(std::vector<WarmRec>& out);
 void warm_record(const PipelineKey& canonical);  // a pipeline this session built; saved with the cache
 void pipeline_warm_step();
 bool depth_remap();  // NX_CLIP_Z_PATCH: clip z -w..w mapped in the vertex shaders, not by VK_EXT_depth_clip_control
+// nvnDeviceSetDepthMode (nvn_device.cpp): NVN_DEPTH_MODE_NEAR_IS_ZERO (1, P5R) puts clip z in 0..w as Vulkan does, and
+// then nothing maps it. The default, NEAR_IS_MINUS_W (0, Wonder), is -w..w.
+bool clip_z_minus_one();
 bool patch_clip_z(const std::vector<uint32_t>& in, std::vector<uint32_t>& out);  // nvn_spirv_clip.cpp
 void clip_z_module(const ShaderInfo* s, std::vector<uint32_t>& code);             // patch_clip_z if depth_remap
 
@@ -134,6 +137,12 @@ GpuImage* ensure_contents(VkCommandBuffer cb, uint64_t texture);
 void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_t lo = 0, uint64_t hi = UINT64_MAX);
 // Every level and layer to zero (colour; magenta with `magenta`), depth and stencil to 0. Leaves TRANSFER_DST.
 void clear_image(VkCommandBuffer cb, GpuImage& img, bool magenta = false);
+// nvn_upload.cpp, for nvnCommandBufferCopyBufferToTexture: `src` holds the tightly packed blocks of `region` ({x, y, z,
+// width, height, depth}; z and depth are layers unless the image is 3D) of `level`, converted as upload_texture
+// converts a whole texture and copied into the image. False when the format's host layout is not known. Leaves
+// TRANSFER_DST.
+bool upload_region(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint32_t level, uint32_t layer0,
+                   const int32_t region[6], const uint8_t* src);
 // A single level and layer of an image, for rendering to.
 void sampled_ready_log();
 void check_linear_content(Texture& t);  // nvn_sampler.cpp
