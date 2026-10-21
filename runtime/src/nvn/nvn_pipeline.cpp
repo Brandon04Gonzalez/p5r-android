@@ -1028,9 +1028,11 @@ GpuImage* ensure_contents(VkCommandBuffer cb, uint64_t texture) {
     // A render target (COMPRESSIBLE, flag 0x8) the GPU never wrote through this image: its guest memory never holds
     // GPU output here (another target over the same memory left only stale data), so it starts cleared, not uploaded
     // (G3 cause 2, docs/nvn/DEBUG.md #50). NX_RT_UPLOAD=1: uploaded as before; NX_ALIAS_MAGENTA=1: cleared magenta.
+    // Not a pitch-linear one: the CPU writes those (P5R's video frames, NV12 planes as linear render targets over the
+    // decoder's output memory, came out cleared: green).
     static const bool rt_upload = std::getenv("NX_RT_UPLOAD") != nullptr;
     static const bool magenta = std::getenv("NX_ALIAS_MAGENTA") != nullptr;
-    if (upload && !rt_upload && (t->flags & 0x8) && !img->uploaded && !img->texels && !dirty) {
+    if (upload && !rt_upload && (t->flags & 0x8) && !t->stride && !img->uploaded && !img->texels && !dirty) {
         if (!t->has_writes.load(std::memory_order_acquire)) {
             clear_image(cb, *img, magenta);
             img->uploaded = true;
