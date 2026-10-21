@@ -12,8 +12,10 @@
 // Objects: Decoder (0x10, the game's operator new) holds our vtable and an id; Buffer (0x40) +0 offset, +4 size,
 // +0x18 capacity, +0x28 base; MediaData (8 bytes) points at a host-side map of values.
 //
-// No VP9 decoding yet: each input frame comes out as an output frame of the same timestamp, black (NV12 Y 16,
-// UV 128), so a video plays black for its length and the game goes on (games/p5r/PROGRESO.md: AMediaCodec next).
+// Decoding: on Android the device's own VP9 decoder (AMediaCodec, ByteBuffer mode, polled from the calls above: the
+// feeder's sends, the event thread's acquires and the consumer's releases), its pictures converted to tight NV12.
+// Elsewhere, or when the device has no VP9 decoder, each input frame comes out as a black frame (NV12 Y 16, UV 128)
+// of the same timestamp, so a video plays black for its length and the game goes on.
 #include <algorithm>
 #include <array>
 #include <cstring>
@@ -24,6 +26,11 @@
 #include <string>
 #include <unordered_map>
 #include <vector>
+
+#if defined(__ANDROID__)
+#include <media/NdkMediaCodec.h>
+#include <media/NdkMediaFormat.h>
+#endif
 
 #include <nx/runtime.h>
 
@@ -125,9 +132,22 @@ struct Decoder {
         bool busy = false;
     } outputs[kOutputs];
     std::deque<int> ready;                              // outputs to acquire
-    std::deque<std::pair<int64_t, uint32_t>> pending;  // decoded with every output slot busy
+    std::deque<std::pair<int64_t, uint32_t>> pending;  // black frames made with every output slot busy
+    std::vector<uint8_t> frames[kOutputs];              // a slot's decoded picture (tight NV12); empty: black
     bool started = false, format_sent = false;
-    uint64_t frames_in = 0, frames_out = 0;
+    uint64_t frames_in = 0, frames_out = 0, decoded = 0;
+#if defined(__ANDROID__)
+    AMediaCodec* codec = nullptr;
+    struct Input {
+        std::vector<uint8_t> data;
+        int64_t pts;
+        uint32_t flags;
+    };
+    std::deque<Input> to_codec;  // sent by the game, not yet taken by the codec
+    int32_t color = 0, codec_stride = 0, codec_rows = 0, crop_left = 0, crop_top = 0;
+    bool eos_sent = false;   // the game's end of stream went to the codec
+    bool codec_eos = false;  // the end-of-stream picture came out
+#endif
 
     // CriVpdSwitch puts its UV texture right after width x height bytes of Y, whatever offsets we report: rows of
     // exactly the width, no padding.
@@ -135,14 +155,19 @@ struct Decoder {
     int32_t rows() const { return height; }
     uint64_t nv12_size() const { return uint64_t(stride()) * rows() * 3 / 2; }
 
-    // A decoded frame into a free output slot (or the pending queue when all are taken).
-    void emit(int64_t pts, uint32_t flags) {
+    int free_slot() const {
         for (int k = 0; k < kOutputs; k++)
-            if (!outputs[k].busy) {
-                outputs[k] = {pts, flags, true};
-                ready.push_back(k);
-                return;
-            }
+            if (!outputs[k].busy) return k;
+        return -1;
+    }
+    // A black frame into a free output slot (or the pending queue when all are taken).
+    void emit(int64_t pts, uint32_t flags) {
+        if (int k = free_slot(); k >= 0) {
+            outputs[k] = {pts, flags, true};
+            frames[k].clear();
+            ready.push_back(k);
+            return;
+        }
         pending.emplace_back(pts, flags);
     }
     void reset_queues() {
@@ -150,8 +175,130 @@ struct Decoder {
         for (int k = 0; k < kInputs; k++) free_inputs.push_back(k);
         for (auto& o : outputs) o = {};
         ready.clear(), pending.clear();
+#if defined(__ANDROID__)
+        to_codec.clear();
+        eos_sent = codec_eos = false;
+#endif
     }
 };
+
+#if defined(__ANDROID__)
+constexpr int32_t kColorI420 = 19, kColorQcom32m = 0x7FA30C04;
+
+// The codec's picture (color format `color`, rows of `stride` bytes, `rows` rows per plane) into tight NV12 of the
+// video's size, from the crop origin. I420 is interleaved; every other format is taken as semi-planar (NV12 and the
+// Qualcomm/MediaTek variants with aligned strides, which is what ByteBuffer decoders hand out).
+void to_nv12(const Decoder& d, const uint8_t* src, size_t size, std::vector<uint8_t>& out) {
+    const int32_t w = d.width, h = d.height;
+    int32_t stride = d.codec_stride > 0 ? d.codec_stride : w, rows = d.codec_rows > 0 ? d.codec_rows : h;
+    if (d.color == kColorQcom32m && d.codec_stride <= 0) stride = (w + 127) & ~127, rows = (h + 31) & ~31;
+    out.resize(size_t(w) * h * 3 / 2);
+    const size_t y0 = size_t(d.crop_top) * stride + d.crop_left;
+    for (int32_t r = 0; r < h; r++) {
+        size_t at = y0 + size_t(r) * stride;
+        if (at + w > size) return;
+        std::memcpy(out.data() + size_t(r) * w, src + at, size_t(w));
+    }
+    uint8_t* uv = out.data() + size_t(w) * h;
+    const size_t chroma = size_t(stride) * rows;
+    if (d.color == kColorI420) {
+        const size_t cs = size_t(stride) / 2, plane = cs * (size_t(rows) / 2);
+        for (int32_t r = 0; r < h / 2; r++) {
+            size_t at = chroma + size_t(d.crop_top / 2 + r) * cs + d.crop_left / 2;
+            if (at + plane + w / 2 > size) return;
+            for (int32_t x = 0; x < w / 2; x++)
+                uv[size_t(r) * w + 2 * x] = src[at + x], uv[size_t(r) * w + 2 * x + 1] = src[at + plane + x];
+        }
+        return;
+    }
+    for (int32_t r = 0; r < h / 2; r++) {
+        size_t at = chroma + size_t(d.crop_top / 2 + r) * stride + (d.crop_left & ~1);
+        if (at + w > size) return;
+        std::memcpy(uv + size_t(r) * w, src + at, size_t(w));
+    }
+}
+
+void read_codec_format(Decoder& d) {
+    AMediaFormat* f = AMediaCodec_getOutputFormat(d.codec);
+    if (!f) return;
+    AMediaFormat_getInt32(f, "color-format", &d.color);
+    AMediaFormat_getInt32(f, "stride", &d.codec_stride);
+    AMediaFormat_getInt32(f, "slice-height", &d.codec_rows);
+    int32_t l = 0, t = 0, r = 0, b = 0;
+    if (AMediaFormat_getRect(f, "crop", &l, &t, &r, &b)) d.crop_left = l, d.crop_top = t;
+    log("movie: codec output: color format %#x, stride %d, slice height %d, crop at %d,%d (%s)", d.color,
+        d.codec_stride, d.codec_rows, d.crop_left, d.crop_top, AMediaFormat_toString(f));
+    AMediaFormat_delete(f);
+}
+
+// Feeds the codec what it will take, then takes its pictures into free output slots (waiting up to `wait_us` for the
+// first). True when an output became ready.
+bool pump(Decoder& d, int64_t wait_us) {
+    if (!d.codec) return false;
+    while (!d.to_codec.empty()) {
+        ssize_t i = AMediaCodec_dequeueInputBuffer(d.codec, 0);
+        if (i < 0) break;
+        size_t cap = 0;
+        uint8_t* buf = AMediaCodec_getInputBuffer(d.codec, size_t(i), &cap);
+        Decoder::Input& in = d.to_codec.front();
+        size_t n = buf ? std::min(cap, in.data.size()) : 0;
+        if (n) std::memcpy(buf, in.data.data(), n);
+        AMediaCodec_queueInputBuffer(d.codec, size_t(i), 0, n, uint64_t(in.pts),
+                                     (in.flags & kEndOfStream) ? AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM : 0);
+        d.to_codec.pop_front();
+    }
+    bool any = false;
+    for (int slot; (slot = d.free_slot()) >= 0;) {
+        AMediaCodecBufferInfo info{};
+        ssize_t o = AMediaCodec_dequeueOutputBuffer(d.codec, &info, any ? 0 : wait_us);
+        if (o == AMEDIACODEC_INFO_OUTPUT_FORMAT_CHANGED) {
+            read_codec_format(d);
+            continue;
+        }
+        if (o == AMEDIACODEC_INFO_OUTPUT_BUFFERS_CHANGED) continue;
+        if (o < 0) break;
+        size_t size = 0;
+        uint8_t* buf = AMediaCodec_getOutputBuffer(d.codec, size_t(o), &size);
+        if (buf && info.size > 0)
+            to_nv12(d, buf + info.offset, size_t(info.size), d.frames[slot]);
+        else
+            d.frames[slot].clear();
+        AMediaCodec_releaseOutputBuffer(d.codec, size_t(o), false);
+        const bool eos = info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM;
+        d.codec_eos |= eos;
+        d.outputs[slot] = {info.presentationTimeUs, eos ? kEndOfStream : 0u, true};
+        d.ready.push_back(slot);
+        d.decoded += info.size > 0;
+        any = true;
+    }
+    return any;
+}
+
+// The device's VP9 decoder, configured for the video (null: none, black frames).
+AMediaCodec* make_codec(const Decoder& d) {
+    AMediaCodec* c = AMediaCodec_createDecoderByType("video/x-vnd.on2.vp9");
+    if (!c) return nullptr;
+    AMediaFormat* f = AMediaFormat_new();
+    AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, "video/x-vnd.on2.vp9");
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, d.width);
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, d.height);
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, d.max_input);
+    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7F420888);  // COLOR_FormatYUV420Flexible
+    media_status_t st = AMediaCodec_configure(c, f, nullptr, nullptr, 0);
+    AMediaFormat_delete(f);
+    if (st != AMEDIA_OK) {
+        log("movie: the VP9 decoder refused %dx%d (%d): black frames", d.width, d.height, int(st));
+        AMediaCodec_delete(c);
+        return nullptr;
+    }
+    char* name = nullptr;
+    if (AMediaCodec_getName(c, &name) == AMEDIA_OK && name) {
+        log("movie: VP9 decoder %s", name);
+        AMediaCodec_releaseName(c, name);
+    }
+    return c;
+}
+#endif
 
 std::mutex g_lock;
 std::unordered_map<uint64_t, std::unique_ptr<Decoder>> g_decoders;
@@ -177,7 +324,12 @@ void signal_all(CPU& c, const std::vector<uint64_t>& events) {
 // D2 (+0x00) and D0 (+0x08): the deleting one frees the object with the game's operator delete.
 void DecoderDtor(CPU& c) {
     std::lock_guard lk(g_lock);
-    g_decoders.erase(ld<uint64_t>(c.x[0] + 8));
+    auto it = g_decoders.find(ld<uint64_t>(c.x[0] + 8));
+    if (it == g_decoders.end()) return;
+#if defined(__ANDROID__)
+    if (it->second->codec) AMediaCodec_delete(it->second->codec);
+#endif
+    g_decoders.erase(it);
 }
 void DecoderDeletingDtor(CPU& c) {
     const uint64_t self = c.x[0];
@@ -199,6 +351,9 @@ void DecoderConfigure(CPU& c) {
     md_get(c.x[1], "max-input-size", d->max_input);
     if (d->max_input <= 0) d->max_input = 2 << 20;
     log("movie: decoder configured %dx%d, input buffers of %d bytes", d->width, d->height, d->max_input);
+#if defined(__ANDROID__)
+    if (!d->codec && d->width > 0 && d->height > 0) d->codec = make_codec(*d);
+#endif
     c.x[0] = 0;
 }
 
@@ -239,6 +394,13 @@ void DecoderStart(CPU& c) {
             d->reset_queues();
             d->started = true;
             input_event = d->events[kInputAvailable];
+#if defined(__ANDROID__)
+            if (d->codec && AMediaCodec_start(d->codec) != AMEDIA_OK) {
+                log("movie: the VP9 decoder did not start: black frames");
+                AMediaCodec_delete(d->codec);
+                d->codec = nullptr;
+            }
+#endif
         }
     }
     signal(c, input_event);
@@ -247,8 +409,11 @@ void DecoderStart(CPU& c) {
 void DecoderStop(CPU& c) {
     std::lock_guard lk(g_lock);
     if (Decoder* d = decoder(c.x[0])) {
-        log("movie: decoder stopped after %llu frames in, %llu out", (unsigned long long)d->frames_in,
-            (unsigned long long)d->frames_out);
+        log("movie: decoder stopped after %llu frames in, %llu out (%llu decoded)", (unsigned long long)d->frames_in,
+            (unsigned long long)d->frames_out, (unsigned long long)d->decoded);
+#if defined(__ANDROID__)
+        if (d->codec && d->started) AMediaCodec_stop(d->codec);
+#endif
         d->started = false;
         d->reset_queues();
     }
@@ -259,6 +424,9 @@ void DecoderFlush(CPU& c) {
     {
         std::lock_guard lk(g_lock);
         if (Decoder* d = decoder(c.x[0])) {
+#if defined(__ANDROID__)
+            if (d->codec && d->started) AMediaCodec_flush(d->codec);
+#endif
             d->reset_queues();
             d->format_sent = false;
             input_event = d->started ? d->events[kInputAvailable] : 0;
@@ -307,10 +475,25 @@ void DecoderSendInputBufferForDecode(CPU& c) {
         const uint32_t flags = uint32_t(c.x[5]);
         if (d->frames_in++ == 0)
             log("movie: first input frame, %d bytes, pts %lld, flags %#x", int(c.x[3]), (long long)pts, flags);
-        d->emit(pts, flags & kEndOfStream);
+        bool output = true;
+#if defined(__ANDROID__)
+        if (d->codec) {
+            // The bytes are the game's (its input buffer goes back at once): copied for the codec. A picture usually
+            // comes out a frame or two later; at the end of the stream everything still inside is waited for.
+            const uint8_t* src = d->inputs[index].data() + std::max<int64_t>(0, int64_t(c.x[2]));
+            size_t n = std::min<size_t>(size_t(std::max<int64_t>(0, int64_t(c.x[3]))),
+                                        d->inputs[index].size() - std::min<size_t>(d->inputs[index].size(), size_t(c.x[2])));
+            d->to_codec.push_back({std::vector<uint8_t>(src, src + n), pts, flags & kEndOfStream});
+            d->eos_sent |= (flags & kEndOfStream) != 0;
+            output = pump(*d, 4000);
+            for (int k = 0; (flags & kEndOfStream) && !d->codec_eos && k < 100 && d->free_slot() >= 0; k++)
+                output |= pump(*d, 20000);
+        } else
+#endif
+            d->emit(pts, flags & kEndOfStream);
         d->free_inputs.push_back(index);
         if (!d->format_sent) d->format_sent = true, events.push_back(d->events[kFormatChanged]);
-        events.push_back(d->events[kOutputAvailable]);
+        if (output) events.push_back(d->events[kOutputAvailable]);
         events.push_back(d->events[kInputAvailable]);
     }
     signal_all(c, events);
@@ -321,6 +504,9 @@ void DecoderSendInputBufferForDecode(CPU& c) {
 void DecoderAcquireOutputBufferIndex(CPU& c) {
     std::lock_guard lk(g_lock);
     Decoder* d = decoder(c.x[0]);
+#if defined(__ANDROID__)
+    if (d && d->ready.empty()) pump(*d, 0);
+#endif
     if (!d || d->ready.empty()) return void(c.x[0] = kTryAgain);
     int index = d->ready.front();
     d->ready.pop_front();
@@ -351,7 +537,16 @@ void DecoderGetOutputBuffer(CPU& c) {
     if (!d || index < 0 || index >= kOutputs || !d->outputs[index].busy || !c.x[2]) return void(c.x[0] = kTryAgain);
     static bool said = false;
     if (!said) said = true, log("movie: output format %u (4: NV12), frame %dx%d", d->format, d->width, d->height);
-    fill_black(*d, c.x[2]);
+    const std::vector<uint8_t>& frame = d->frames[index];
+    uint8_t* base = reinterpret_cast<uint8_t*>(ld<uint64_t>(c.x[2] + kBufBase));
+    uint64_t cap = ld<uint64_t>(c.x[2] + kBufCapacity);
+    if (!frame.empty() && base && cap) {  // a decoded picture
+        std::memcpy(base, frame.data(), std::min<uint64_t>(cap, frame.size()));
+        st<int32_t>(c.x[2] + kBufOffset, 0);
+        st<int32_t>(c.x[2] + kBufSize, int32_t(std::min<uint64_t>(cap, frame.size())));
+    } else {
+        fill_black(*d, c.x[2]);
+    }
     d->frames_out++;
     c.x[0] = 0;
 }
@@ -387,6 +582,14 @@ void DecoderReleaseOutputBufferIndex(CPU& c) {
                 d->emit(pts, flags);
                 output_event = d->events[kOutputAvailable];
             }
+#if defined(__ANDROID__)
+            // A picture the codec held for want of a slot; after the end of stream, the last ones are waited for.
+            for (int k = 0; k < (d->eos_sent && !d->codec_eos ? 50 : 1) && d->codec; k++)
+                if (pump(*d, d->eos_sent && !d->codec_eos ? 20000 : 0)) {
+                    output_event = d->events[kOutputAvailable];
+                    break;
+                }
+#endif
         }
     }
     signal(c, output_event);

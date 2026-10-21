@@ -515,6 +515,34 @@ bool preserve_inf_nan(const std::vector<uint32_t>& in, std::vector<uint32_t>& ou
     return true;
 }
 
+// The translator declares fragment shader interlock (its host caps say the host has it: StaticGpuAccessor.cs) in
+// every graphics stage of P5R, but no block uses it (no OpBegin/EndInvocationInterlockEXT, no interlock execution
+// mode). Mobile GPUs lack VK_EXT_fragment_shader_interlock and the device never enables it: the OpCapability lines
+// (pixel, sample, shading-rate interlock) and their OpExtension go.
+bool strip_interlock(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    constexpr uint32_t OpExtension = 10, OpCapabilityOp = 17, OpFunction = 54;
+    if (in.size() < 5) return false;
+    out.assign(in.begin(), in.begin() + 5);
+    bool changed = false;
+    size_t i = 5;
+    for (; i < in.size(); ) {
+        uint32_t op = in[i] & 0xFFFF, len = in[i] >> 16;
+        if (!len || i + len > in.size()) return false;
+        if (op == OpFunction) break;  // past the declarations: the rest is copied as it is
+        bool drop = false;
+        if (op == OpCapabilityOp && len == 2) drop = in[i + 1] == 5363 || in[i + 1] == 5372 || in[i + 1] == 5378;
+        if (op == OpExtension && len >= 2)
+            drop = std::strcmp(reinterpret_cast<const char*>(&in[i + 1]), "SPV_EXT_fragment_shader_interlock") == 0;
+        if (drop)
+            changed = true;
+        else
+            out.insert(out.end(), in.begin() + long(i), in.begin() + long(i + len));
+        i += len;
+    }
+    out.insert(out.end(), in.begin() + long(i), in.end());
+    return changed;
+}
+
 uint32_t unwritten_inputs(const ShaderInfo* vs, const ShaderInfo* fs) {
     uint32_t mask = 0;
     if (!vs || !fs) return 0;
@@ -527,6 +555,7 @@ uint32_t unwritten_inputs(const ShaderInfo* vs, const ShaderInfo* fs) {
 
 std::vector<uint32_t> patched_spirv(const ShaderInfo* s, const uint8_t* kinds, uint32_t unwritten, bool* int_inputs) {
     std::vector<uint32_t> code = s->spirv, next;  // each pass reads `code` and leaves its result in `next`
+    if (strip_interlock(code, next)) code.swap(next);
     bool is_int = kinds && patch_int_inputs(code, kinds, next);
     if (is_int) code.swap(next);
     if (int_inputs) *int_inputs = is_int;

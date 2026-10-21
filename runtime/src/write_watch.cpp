@@ -13,6 +13,7 @@
 #include <atomic>
 #include <cstdint>
 #include <cstdlib>
+#include <mutex>
 
 #include "platform.h"
 
@@ -37,6 +38,11 @@ struct Watch {
 };
 constexpr int kWatches = 16;
 Watch g_watches[kWatches];
+// Add, remove and take one at a time. A take on the replay thread re-protected a range the game's thread had just
+// removed (its texture finalized): the pages stayed read-only with no watch, and the game's next store into them
+// was a crash (P5R's video frames: a texture over the same memory made and dropped every frame). The fault handler
+// takes no lock: remove makes the pages writable before it forgets the watch, so a fault still finds it.
+std::mutex g_watch_lock;
 
 uint64_t page_size() {
     static const uint64_t p = uint64_t(sysconf(_SC_PAGESIZE));
@@ -55,6 +61,7 @@ bool enabled() {
 
 bool write_watch_add(uint64_t addr, uint64_t size) {
     if (!enabled() || !addr || !size) return false;
+    std::lock_guard lk(g_watch_lock);
     uint64_t ps = page_size(), b = addr & ~(ps - 1), e = (addr + size + ps - 1) & ~(ps - 1);
     for (Watch& w : g_watches) {
         uint64_t expected = 0;
@@ -71,6 +78,7 @@ bool write_watch_add(uint64_t addr, uint64_t size) {
 }
 
 void write_watch_remove(uint64_t addr) {
+    std::lock_guard lk(g_watch_lock);
     for (Watch& w : g_watches)
         if (w.addr == addr) {
             mprotect(reinterpret_cast<void*>(w.begin.load()), w.end - w.begin, PROT_READ | PROT_WRITE);
@@ -81,6 +89,7 @@ void write_watch_remove(uint64_t addr) {
 
 bool write_watch_take(uint64_t addr, uint64_t* lo, uint64_t* hi) {
     if (lo) *lo = 0, *hi = UINT64_MAX;  // unknown: all of it
+    std::lock_guard lk(g_watch_lock);
     for (Watch& w : g_watches)
         if (w.addr == addr) {
             mprotect(reinterpret_cast<void*>(w.begin.load()), w.end - w.begin, PROT_READ);

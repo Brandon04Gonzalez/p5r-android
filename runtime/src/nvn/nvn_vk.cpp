@@ -52,6 +52,7 @@ VkSurfaceTransformFlagBitsKHR g_sc_transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT
 VkFormat g_sc_format = VK_FORMAT_B8G8R8A8_UNORM;
 VkSemaphore g_acquired = VK_NULL_HANDLE, g_rendered = VK_NULL_HANDLE;
 VkBool32 g_depth_clip_control = VK_FALSE;
+bool g_dynamic_rendering = true;  // vkCmdBeginRendering (core 1.3); else render pass objects
 bool g_integrated = false;
 bool g_require_sg32 = false;  // compute pipelines are made with a required subgroup size of 32 (Maxwell's warp)  // the chosen GPU is an integrated one (unified memory, the GPU is the long side)
 VkPhysicalDeviceFeatures g_features{};  // the core features enabled (vk_features())
@@ -188,8 +189,14 @@ bool init() {
         void* pNext = nullptr;
         VkBool32 fields[15] = {};
     } fport;
-    features.pNext = &f13;
-    void** tail = &f13.pNext;
+    // A Vulkan 1.1 or 1.2 device (Adreno 610, PowerVR BXM: the mid-range phones P5R targets) knows no 1.3 feature
+    // struct: none is chained, and without dynamic rendering the passes are render pass objects (nvn_renderpass.cpp).
+    const bool v13 = props.apiVersion >= VK_API_VERSION_1_3;
+    features.pNext = v13 ? &f13 : nullptr;
+    void** tail = v13 ? &f13.pNext : &features.pNext;
+    // Core 1.1: the translated vertex shaders that read the draw's base vertex/instance declare DrawParameters.
+    VkPhysicalDeviceShaderDrawParametersFeatures fdraw{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES};
+    *tail = &fdraw, tail = &fdraw.pNext;
     if (has_extension(dext, "VK_EXT_index_type_uint8")) {
         dexts.push_back("VK_EXT_index_type_uint8");
         *tail = &fu8, tail = &fu8.pNext;
@@ -207,7 +214,7 @@ bool init() {
         // compiler chooses; where the size can be pinned (core 1.3 subgroup size control), compute pipelines pin 32.
         VkPhysicalDeviceSubgroupSizeControlProperties sgc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_PROPERTIES};
         VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
-        p2.pNext = &sgc;
+        p2.pNext = v13 ? &sgc : nullptr;
         p_vkGetPhysicalDeviceProperties2(g_physical, &p2);
         const char* e = std::getenv("NX_SUBGROUP32");
         bool can = f13.subgroupSizeControl && sgc.minSubgroupSize <= 32 && sgc.maxSubgroupSize >= 32 &&
@@ -217,6 +224,10 @@ bool init() {
             g_require_sg32 ? "pinned to 32" : "left to the driver");
     }
     g_depth_clip_control = fclip.depthClipControl;
+    g_dynamic_rendering = v13 && f13.dynamicRendering;
+    if (!g_dynamic_rendering)
+        log("nvn/vk: Vulkan %u.%u device without dynamic rendering: render pass objects", VK_API_VERSION_MAJOR(props.apiVersion),
+            VK_API_VERSION_MINOR(props.apiVersion));
     g_features = features.features;
     // NX_ASTC_DECODE=1|linear|srgb: the CPU decoder even where the GPU has ASTC (to compare the two on one GPU).
     set_astc_native(g_features.textureCompressionASTC_LDR);
@@ -409,6 +420,7 @@ VkPhysicalDevice vk_physical() { return g_physical; }
 VkQueue vk_queue() { return g_queue; }
 uint32_t vk_queue_family() { return g_family; }
 bool vk_depth_clip_control() { return g_depth_clip_control; }
+bool vk_dynamic_rendering() { return g_dynamic_rendering; }
 const VkPhysicalDeviceFeatures& vk_features() { return g_features; }
 bool gpu_is_integrated() { return g_integrated; }
 bool gpu_require_subgroup32() { return g_require_sg32; }

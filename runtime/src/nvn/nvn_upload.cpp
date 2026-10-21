@@ -139,6 +139,9 @@ bool vk_1d_images() {
 void clear_image(VkCommandBuffer cb, GpuImage& img, bool magenta) {
     transition(cb, img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
     VkImageSubresourceRange r{img.aspect, 0, img.levels, 0, img.layers};
+    // A block-compressed image (BC, ETC2, ASTC) cannot be cleared (VUID-vkCmdClearColorImage-image-00007): NVIDIA
+    // let it pass, the Adreno 610 driver faulted the GPU at the first submit. It is left as it is, ready for copies.
+    if (img.format >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && img.format <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK) return;
     if (img.aspect == VK_IMAGE_ASPECT_COLOR_BIT) {
         VkClearColorValue v{};
         if (magenta) v = {{1.0f, 0.0f, 1.0f, 1.0f}};

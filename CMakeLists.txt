@@ -73,9 +73,11 @@ foreach(mod main sdk)
     target_include_directories(game_${mod} PRIVATE runtime/include "${NX_GEN_DIR}/${mod}")
     if(ANDROID)
         # Hidden visibility: calls between recompiled functions are direct, not through the PLT.
-        # armv8.2-a+crypto: cpu.h's AES/SHA paths need __ARM_FEATURE_AES/SHA2 (the NDK default armv8-a has neither).
+        # armv8-a+crypto: cpu.h's AES/SHA paths need __ARM_FEATURE_AES/SHA2 (the NDK default armv8-a has neither).
+        # Not armv8.2-a: Cortex-A53/A73 phones (Snapdragon 685) are ARMv8.0 and its LSE atomics were SIGILL; the
+        # compiler's outline atomics still use LSE where the CPU has it.
         target_compile_options(game_${mod} PRIVATE -O2 -fPIC -fvisibility=hidden -fno-semantic-interposition
-                               -march=armv8.2-a+crypto)
+                               -march=armv8-a+crypto)
     elseif(APPLE)
         target_compile_options(game_${mod} PRIVATE -O2 -fvisibility=hidden)
     elseif(UNIX)
@@ -188,8 +190,8 @@ if(ANDROID)
     # Our ANativeActivity_onCreate (platform_android.cpp) runs first, on the UI thread, then calls the glue's.
     set_source_files_properties("${GLUE}/android_native_app_glue.c" PROPERTIES
         COMPILE_DEFINITIONS "ANativeActivity_onCreate=glue_ANativeActivity_onCreate")
-    target_link_libraries(${NX_GAME} PRIVATE game_main game_sdk android log aaudio)
-    target_compile_options(${NX_GAME} PRIVATE -fvisibility=hidden -fno-semantic-interposition -march=armv8.2-a+crypto)
+    target_link_libraries(${NX_GAME} PRIVATE game_main game_sdk android log aaudio mediandk)
+    target_compile_options(${NX_GAME} PRIVATE -fvisibility=hidden -fno-semantic-interposition -march=armv8-a+crypto)
     # The glue's ANativeActivity_onCreate must be exported. 16 KB page alignment: Android 15+ devices with 16 KB pages.
     target_link_options(${NX_GAME} PRIVATE -u ANativeActivity_onCreate -Wl,-z,max-page-size=16384)
 elseif(APPLE)

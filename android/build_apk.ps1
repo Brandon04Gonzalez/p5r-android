@@ -3,7 +3,11 @@
 param([string]$Game = "hades", [switch]$Install)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot
-$sdk = "C:\Android\sdk"
+# The SDK: ANDROID_HOME, else C:\Android\sdk, else Android Studio's default (%LOCALAPPDATA%\Android\Sdk).
+$sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } elseif (Test-Path "C:\Android\sdk") { "C:\Android\sdk" } else { "$env:LOCALAPPDATA\Android\Sdk" }
+# apksigner and d8 need a JDK: JAVA_HOME, else Android Studio's own.
+if (-not $env:JAVA_HOME -and (Test-Path "C:\Program Files\Android\Android Studio\jbr")) { $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr" }
+if ($env:JAVA_HOME) { $env:PATH = "$env:JAVA_HOME\bin;$env:PATH" }
 $ndk = "$sdk\ndk\28.2.13676358"
 $bt = "$sdk\build-tools\35.0.0"
 $jar = "$sdk\platforms\android-35\android.jar"

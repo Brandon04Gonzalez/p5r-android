@@ -101,10 +101,10 @@ VkRenderPass pass_for(uint32_t count, const VkFormat* colors, VkFormat depth, co
 }  // namespace
 
 bool render_pass_objects() {
-    static const bool on = [] {
+    static const bool on = [] {  // also on a device without dynamic rendering (before Vulkan 1.3; nvn_vk.cpp)
         const char* e = std::getenv("NX_RENDER_PASS_OBJECTS");
-        bool v = e && e[0] == '1';
-        if (v) log("nvn/vk: render pass and framebuffer objects instead of dynamic rendering (NX_RENDER_PASS_OBJECTS)");
+        bool v = (e && e[0] == '1') || !vk_dynamic_rendering();
+        if (v) log("nvn/vk: render pass and framebuffer objects instead of dynamic rendering");
         return v;
     }();
     return on;
