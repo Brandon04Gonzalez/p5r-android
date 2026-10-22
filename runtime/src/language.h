@@ -53,10 +53,25 @@ inline std::string language_read_file(const std::string& path) {
     return sp == std::string::npos ? s : s.substr(0, sp);
 }
 
-// The language the player configured: NX_LANGUAGE (config.txt on Android), else <data root>/language.txt, else en-US.
+// The device's language ("es-MX", "zh-TW", ...) as one of the console's: the language alone, as a console set to
+// it would hand a game that lacks the regional variant (Spanish is "es" everywhere: P5R has no es-419 text), except
+// Chinese, whose script the region decides. "" when unknown.
+inline std::string language_from_system(std::string sys) {
+    sys = language_lower_trimmed(sys);
+    if (sys.size() < 2) return "";
+    std::string lang = sys.substr(0, 2), region = sys.size() >= 5 ? sys.substr(3, 2) : "";
+    if (lang == "en") return "en-us";
+    if (lang == "zh") return region == "tw" || region == "hk" || region == "mo" ? "zh-hant" : "zh-hans";
+    if (lang == "pt" && region == "br") return "pt-br";
+    return lang;  // es, fr, de, it, ja, ko, nl, pt, ru: the table below knows them
+}
+
+// The language the player configured: NX_LANGUAGE (config.txt on Android), else <data root>/language.txt, else the
+// device's language, else en-US.
 inline uint64_t desired_language() {
     std::string value = language_lower_trimmed(plat::setting("language"));
     if (value.empty()) value = language_read_file(plat::data_root() + "/language.txt");
+    if (value.empty()) value = language_from_system(plat::system_language());
     struct Entry { const char* code; const char* names; };
     static const Entry kTable[] = {
         {"en-US", "en en-us english americanenglish ingles"},

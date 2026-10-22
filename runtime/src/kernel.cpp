@@ -337,22 +337,25 @@ static uint32_t svc_wait_synchronization(CPU& c, uint64_t handles, int32_t count
     };
     auto until = std::chrono::steady_clock::now() + std::chrono::nanoseconds(timeout < 0 ? 0 : timeout);
     KThread* self = t_self;
-    self->cancel = false;
+    // Like Horizon, a CancelSynchronization made before this wait cancels it: the flag is consumed here, not cleared
+    // on entry. nn::os's MultiWait wakes its waiter that way when a linked event is signalled, and a signal landing
+    // between its own check and this svc was lost (P5R's video decoder thread never saw its exit event; the game
+    // waited for that thread for ever).
     g_sync_waiters.push_back(self);
     struct Leave {
         KThread* t;
         ~Leave() { remove(g_sync_waiters, t); }
     } leave{self};
     for (;;) {
+        if (self->cancel) {
+            self->cancel = false;
+            return 0xEC01;
+        }
         int i = ready();
         if (i >= 0) {
             c.x[1] = uint32_t(i);
             objs[i]->consume();
             return 0;
-        }
-        if (self->cancel) {
-            self->cancel = false;
-            return 0xEC01;
         }
         if (timeout == 0) return 0xEA01;
         if (timeout < 0)

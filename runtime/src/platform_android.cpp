@@ -261,6 +261,18 @@ void log_line(const char* line) { __android_log_write(ANDROID_LOG_INFO, nx::game
 
 std::string data_root() { return g_root; }
 
+// The device's locale (Settings > System > Languages) as "es-MX".
+std::string system_language() {
+    if (!g_app || !g_app->config) return "";
+    char lang[2] = {}, country[2] = {};
+    AConfiguration_getLanguage(g_app->config, lang);
+    AConfiguration_getCountry(g_app->config, country);
+    if (!lang[0]) return "";
+    std::string s(lang, lang[1] ? 2 : 1);
+    if (country[0]) s += "-" + std::string(country, country[1] ? 2 : 1);
+    return s;
+}
+
 std::string setting(const std::string& key) {
     std::ifstream f(g_root + "/config.txt");
     std::string line;

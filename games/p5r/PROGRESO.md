@@ -4,10 +4,10 @@
 
 ## Estado en una línea
 
-**En PC (Windows, RTX 4060) el juego ya se ve y se puede manejar**: icono de carga "Take Your Heart", aviso de
-fotosensibilidad, diálogo de red THIEVES GUILD (responde a los botones), el **logo 3D de ATLUS renderizado en tiempo
-real**, el logo de ATLUS y el de P-STUDIO, en 720p y en 1080p. **Se cuelga al empezar el primer vídeo** (la intro):
-`nn::movie` no está implementado. Android aún no se ha compilado.
+**P5R ya corre en Android** (Lenovo Tab M11, Adreno 610, Vulkan 1.1) a **30 fps**: pantallas de arranque, diálogo
+THIEVES GUILD, logos, **vídeo de la intro decodificado por hardware** (VP9, `c2.qti.vp9.decoder`) y el **menú de
+título 3D**. En PC llega hasta la pantalla LOAD. Pendiente inmediato: **el vídeo no tiene sonido** y verificar en
+la tablet los últimos arreglos (ver "Sesión 3b").
 
 ## Cómo funciona el port
 
@@ -128,9 +128,32 @@ Notas de la sesión 3 (para no repetir trabajo):
 - `nvnCommandBufferSetPrimitiveRestart(cmd, 1, 0xffff)` sigue siendo un stub: si aparecen triángulos basura en
   strips, implementarlo (clave de pipeline + `primitiveRestartEnable`).
 
+### Sesión 3b (2026-10-21, tarde) — Android
+21. `nn::movie` HLE (`runtime/src/hle_movie.cpp`): decodificador con la API de CRI (eventos de entrada/salida,
+    `GetOutputBuffer` copia el frame en la memoria de CRI, NV12 compacto stride = ancho). En Android usa
+    `AMediaCodec` (VP9 por hardware); en PC frames negros. Texturas pitch-linear ya no se "limpian" (vídeo verde).
+22. Build Android: `games/p5r/AndroidManifest.xml`, `tools/build_android.cmd [-Install]`, `tools/run_android.ps1`
+    (escribe config.txt, lanza, copia nx.log a `private/p5r/runs/<n>`). Datos ya copiados a la tablet en
+    `/storage/emulated/0/Persona 5 Royal` (analysis, extract/romfs, spirv, config.txt).
+23. Arreglos para la tablet: `-march=armv8-a+crypto` (SIGILL en A53/A73), Vulkan < 1.3 sin structs 1.3 y con render
+    pass objects, `shaderDrawParameters`, quitar interlock del SPIR-V, no `vkCmdClearColorImage` en BC (fallo de GPU
+    Adreno), write-watch serializado, `CancelSynchronization` no se pierde (cuelgue al terminar el vídeo).
+24. **Idioma del dispositivo**: `language.h` usa `plat::system_language()` (Android: locale; Windows: idioma del
+    usuario) si no hay `language=`/`language.txt`. Español → `es`. Probado en PC (`am: desired language = es`).
+
+Sin verificar en la tablet (compilado solo en PC al cerrar la sesión): reintento del write-watch con rangos
+retirados (`write_watch.cpp`; el juego crasheaba al escribir frames de vídeo en `main+1017210`), el arreglo de
+`CancelSynchronization` (`kernel.cpp`) y el idioma. Para probar: `build_android.cmd -Install`, luego
+`run_android.ps1 -Name x -Seconds 25 -Keep` y pulsar A con `adb shell input keyevent --duration 250 KEYCODE_BUTTON_B`.
+Capa de validación Vulkan: `private/third_party/vvl` (se activa con `settings put global gpu_debug_*`; ya desactivada).
+
 ## Falta ❌ (por orden)
 
-1. **`nn::movie` HLE — lo siguiente**. El juego ya llega aquí: tras el logo de P-STUDIO llama a
+0. **Sonido del vídeo** (lo reportó el usuario): el audio de los USM lo decodifica CRI y sale por nn::audio
+   (`audio: device output (48 kHz stereo s16)` en Android). Mirar si suena el resto del juego (BGM del título); si
+   no suena nada, revisar `hle_audio.cpp` para SDK 13 (P5R) — Wonder usa AudioRenderer de SDK 16.
+
+1. ~~`nn::movie` HLE~~ hecho (puntos 21-23). El juego ya llega aquí: tras el logo de P-STUDIO llama a
    `movie::BufferC1`, `SetCoreMask`, `Set/GetThreadPriority` y `movie::Decoder::Decoder(type, format, mode, int)`
    (`main+12785d8`); como el import devuelve 0, crashea con dirección 0x18 (vtable nula). Primero un decodificador
    falso que devuelva frames NV12 negros con las marcas de tiempo correctas (para que el juego avance), luego

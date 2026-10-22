@@ -217,6 +217,16 @@ std::string setting(const std::string& key) {
     return v ? v : "";
 }
 
+// LANG ("es_MX.UTF-8") as "es-MX".
+std::string system_language() {
+    const char* l = std::getenv("LANG");
+    std::string s = l ? l : "";
+    s = s.substr(0, s.find_first_of(".@"));
+    for (char& ch : s)
+        if (ch == '_') ch = '-';
+    return s == "C" || s == "POSIX" ? "" : s;
+}
+
 // ---- window ---------------------------------------------------------------------------------------------------
 
 bool headless() {

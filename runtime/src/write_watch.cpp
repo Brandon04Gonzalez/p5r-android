@@ -43,6 +43,15 @@ Watch g_watches[kWatches];
 // was a crash (P5R's video frames: a texture over the same memory made and dropped every frame). The fault handler
 // takes no lock: remove makes the pages writable before it forgets the watch, so a fault still finds it.
 std::mutex g_watch_lock;
+// Ranges whose watch was removed lately. A store can fault on a watched page and reach the handler only after another
+// thread removed that watch (pages made writable, watch forgotten): the handler finds no watch, but the address is
+// in a retired range, so the store is retried instead of being a crash.
+struct Retired {
+    std::atomic<uint64_t> begin{0}, end{0};
+};
+constexpr uint32_t kRetired = 64;
+Retired g_retired[kRetired];
+std::atomic<uint32_t> g_retired_next{0};
 
 uint64_t page_size() {
     static const uint64_t p = uint64_t(sysconf(_SC_PAGESIZE));
@@ -82,6 +91,8 @@ void write_watch_remove(uint64_t addr) {
     for (Watch& w : g_watches)
         if (w.addr == addr) {
             mprotect(reinterpret_cast<void*>(w.begin.load()), w.end - w.begin, PROT_READ | PROT_WRITE);
+            Retired& r = g_retired[g_retired_next++ % kRetired];
+            r.begin = 0, r.end = w.end.load(), r.begin = w.begin.load();
             w.begin = w.end = 0;
             w.addr = 0;
         }
@@ -117,6 +128,9 @@ bool write_watch_fault(void* at) {
             for (uint64_t cur = w.hi; page + page_size() > cur && !w.hi.compare_exchange_weak(cur, page + page_size());) {}
             w.written = true, hit = true;
         }
+    if (!hit)
+        for (Retired& r : g_retired)
+            if (a >= r.begin && a < r.end) hit = true;
     if (hit) mprotect(reinterpret_cast<void*>(a & ~(page_size() - 1)), page_size(), PROT_READ | PROT_WRITE);
     return hit;
 }

@@ -78,6 +78,15 @@ std::string setting(const std::string& key) {
     const char* v = std::getenv(env.c_str());
     return v ? v : "";
 }
+
+// The user's locale ("es-MX").
+std::string system_language() {
+    wchar_t name[LOCALE_NAME_MAX_LENGTH] = {};
+    if (!GetUserDefaultLocaleName(name, LOCALE_NAME_MAX_LENGTH)) return "";
+    std::string s;
+    for (wchar_t* w = name; *w; w++) s += char(*w < 128 ? *w : '?');
+    return s;
+}
 int64_t current_thread_id() { return int64_t(GetCurrentThreadId()); }
 bool profile(const int64_t*, const uint64_t* const*, size_t, int, const std::string&) { return false; }
 
