@@ -190,8 +190,10 @@ Notas de la sesión 4:
   dirección pulsando A tras cada paso, gira cuando no hay corte de cámara y guarda una hoja de miniaturas en
   `private/p5r/shots/auto.png`. Así pasó el casino: lámparas → pasarela de cristal → letrero CASINO → **primera
   batalla (ganada con A; combate y pantalla VICTORY se ven bien)** → salón de suelo a cuadros → pasillo ("¡Venga,
-  corre!") → almacén de jaulas azul, donde el explorador dio vueltas 15 min sin encontrar la salida (hay una puerta
-  hacia el fondo; probar a mano).
+  corre!") → almacén de jaulas azul ("Área de personal"). Ahí el explorador se pierde: abrir el mapa con **R** (se ve
+  la salida, una flecha al sur del pasillo de jaulas, y dos puertas amarillas); la puerta doble del cuarto oeste no da
+  aviso de abrir. En la 2.ª partida automática volvió a ganar la batalla y a llegar aquí (el port aguanta ~40 min
+  seguidos sin fallos).
 - Combate en la tablet: se ve bien (efectos de fuego, VICTORY); los comandos con A (atacar) bastan para ganarlo.
 - Tirones de 100–350 ms al cargar escenas (informe `stall:` en el log): para la rama de optimización.
 
