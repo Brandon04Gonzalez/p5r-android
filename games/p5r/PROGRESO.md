@@ -7,7 +7,9 @@
 **P5R se juega en Android** (Lenovo Tab M11, Adreno 610, Vulkan 1.1) a **30 fps** con **controles táctiles**, **sonido**
 y **vídeos por hardware**: arranque, título 3D, Nueva partida, la película de apertura completa y el **casino jugable**
 (Joker se mueve, salta y escala; diálogos en español). Hay **launcher** con las opciones pedidas. Pendiente: terminar el
-casino (primera batalla), verificar el parche de 60 fps en juego, guardado, y rendimiento (rama de optimización).
+casino (primera batalla), el parche de 60 fps (aún sin efecto: opción marcada experimental) y el **rendimiento**: en la
+Adreno 610 el casino va a **~13 fps** (GPU ≈ 70–80 ms/frame). Las mejoras y mediciones están en la rama **`p5r-opt`**
+(`games/p5r/OPTIMIZACION.md`); el APK instalado en la tablet es el de esa rama.
 
 ## Cómo funciona el port
 
@@ -167,17 +169,23 @@ Capa de validación Vulkan: `private/third_party/vvl` (se activa con `settings p
     **contador de FPS desactivado** (defecto), controles táctiles sí/no, tamaño y opacidad de los botones.
 29. **Contador de FPS** (`NX_SHOW_FPS=1`): dibujado por el mismo shader (dígitos en `overlay.glsl`), arriba a la izquierda.
 30. **60 fps** (`NX_FPS_CAP=60`, `games/p5r/game.cpp`): un hilo reescribe el intervalo del motor según el cheat que viene
-    con el dump (`[[[[main+0x2327B60]+0x10]+0x60]+0x8]+0xF14` = 1). En los menús y la película esa cadena acaba en 0
-    (la estructura aún no existe); falta confirmar que se aplica en el campo.
+    con el dump (`[[[[main+0x2327B60]+0x10]+0x60]+0x8]+0xF14` = 1). **Aún sin efecto**: en menús, película y casino la
+    cadena acaba en 0 (`[X+0x60]` apunta a `X+0x68` y `[X+0x70]` = 0: un contenedor vacío que en la consola tendría un
+    elemento). Los 11 accesos a `+0xF14` del código de `main` son campos de cámara/CRI, no sirven para encontrarlo.
 31. Herramientas de prueba: `games/p5r/tools/tab.py` (capturas, botones, toques, stick/cámara con `input motionevent`),
     `private/p5r/newgame.sh` (de arrancar al casino), `explore.sh`, `sheet.py` (hoja de capturas tras cada movimiento).
 
 Notas de la sesión 4:
-- Menú de título: [Nueva partida] [Cargar partida] [??]; el cursor empieza en Cargar: IZQUIERDA + A = Nueva partida
-  (esperar ~6 s tras entrar al menú, si no se pierde la pulsación).
+- Menú de título: [Nueva partida] [Cargar partida] [??]; el cursor empieza en Cargar. `private/p5r/title_pick.py`
+  lo resuelve solo (detecta por color la pantalla de inicio, el menú, el resaltado y la lista CARGAR). Con el vídeo
+  arreglado la intro dura menos: una A de más abre CARGAR.
+- Guardado: `user/save/SYSTEM/SYSTEM.DAT` se escribe bien (datos de sistema). Las partidas, en el primer punto de
+  guardado de la historia (no alcanzado aún).
 - Casino: tras la primera lámpara, "Saltar hacia abajo" mirando a cámara en la viga de la pantalla roja; luego plataforma
   rosa → "Escalar" → agentes ("¡Ahí está!") → saltar a los pilares hexagonales → pasarela curva de cristal. Ahí me quedé
-  (no encontré el siguiente punto de acción; la cámara es fija).
+  (no encontré el siguiente punto de acción; la cámara es fija). En otra partida, desde los pilares hexagonales
+  ("0 1", "1 1" + A) Joker siguió por una pasarela rosa con diálogos del equipo por el auricular hasta una lámpara
+  redonda con pantallas (cámara fija, Joker casi fuera de cuadro). Ahí quedó.
 - Tirones de 100–350 ms al cargar escenas (informe `stall:` en el log): para la rama de optimización.
 
 ## Falta ❌ (por orden)
@@ -188,7 +196,8 @@ Notas de la sesión 4:
 4. Servicios IPC que pida P5R y Wonder no usaba (`bsd:u`, `ectx:aw`, varios `cmd ... not implemented`).
 5. **GPUs**: tabla de quirks por vendorID (Adreno 0x5143, Mali 0x13B5, Xclipse 0x144D, PowerVR 0x1010, Maleoon) y
    probar en el Moto G54 (PowerVR, pero solo 4,3 GB libres).
-6. Rendimiento (rama `p5r-opt`): tirones de carga, `NX_REPLAY_THREAD=1`, caché de pipelines.
+6. Rendimiento (rama `p5r-opt`, ver `OPTIMIZACION.md` allí): caché persistente de búferes de vértices (16–22 MB/frame
+   copiados), sombras (12 ms/frame), tirones de carga (pipelines).
 
 ### Dispositivos de prueba
 
