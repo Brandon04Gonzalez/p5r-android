@@ -13,7 +13,8 @@
 // +0x18 capacity, +0x28 base; MediaData (8 bytes) points at a host-side map of values.
 //
 // Decoding: on Android the device's own VP9 decoder (AMediaCodec, ByteBuffer mode, polled from the calls above: the
-// feeder's sends, the event thread's acquires and the consumer's releases), its pictures converted to tight NV12.
+// feeder's sends, the event thread's acquires and the consumer's releases, and every 2 ms by a guest thread of ours
+// that signals the output event), its pictures converted to tight NV12.
 // Elsewhere, or when the device has no VP9 decoder, each input frame comes out as a black frame (NV12 Y 16, UV 128)
 // of the same timestamp, so a video plays black for its length and the game goes on.
 #include <algorithm>
@@ -33,6 +34,8 @@
 #endif
 
 #include <nx/runtime.h>
+
+#include "platform.h"
 
 namespace nx {
 
@@ -385,6 +388,46 @@ void DecoderGetOutputFormat(CPU& c) {
     c.x[0] = d ? 0 : kTryAgain;
 }
 
+#if defined(__ANDROID__)
+// The codec's pictures come out on their own time, a few to tens of milliseconds after their input. The calls above
+// only take them when the game makes one, and CriVpdSwitch waits for the output event before it feeds much more: a
+// picture that came out after the last call stalled the video for good (the casino opening after New Game, 424
+// frames in, at ~15 fps until then). This guest thread drains every started codec every 2 ms and signals the event.
+void movie_pump_thread(CPU& c) {
+    log("movie: pump thread running");
+    for (;;) {
+        plat::sleep_ns(2'000'000);
+        std::vector<uint64_t> events;
+        {
+            std::lock_guard lk(g_lock);
+            for (auto& [id, d] : g_decoders)
+                if (d->started && d->codec && pump(*d, 0)) events.push_back(d->events[kOutputAvailable]);
+        }
+        signal_all(c, events);
+    }
+}
+
+void start_pump_thread(CPU& c) {
+    static bool started = false;
+    if (started) return;
+    started = true;
+    uint64_t create = find_symbol("_ZN2nn2os12CreateThreadEPNS0_10ThreadTypeEPFvPvES3_S3_mi");
+    uint64_t start = find_symbol("_ZN2nn2os11StartThreadEPNS0_10ThreadTypeE");
+    if (!create || !start) return log("movie: nn::os::CreateThread/StartThread not found, no pump thread");
+    uint64_t thread = kernel_alloc(0x1000), stack = kernel_alloc(0x20000);
+    uint64_t saved[31];
+    std::memcpy(saved, c.x, sizeof saved);
+    c.x[0] = thread, c.x[1] = hle_address("__movie_pump_thread"), c.x[2] = 0, c.x[3] = stack, c.x[4] = 0x20000;
+    c.x[5] = 16;  // high priority: it only polls
+    call(c, create);
+    uint64_t rc = c.x[0];
+    c.x[0] = thread;
+    if (rc == 0) call(c, start);
+    std::memcpy(c.x, saved, sizeof saved);
+    if (rc) log("movie: CreateThread failed (%llx)", (unsigned long long)rc);
+}
+#endif
+
 // Status Start(), Stop(), Reset(), Flush()
 void DecoderStart(CPU& c) {
     uint64_t input_event = 0;
@@ -403,6 +446,9 @@ void DecoderStart(CPU& c) {
 #endif
         }
     }
+#if defined(__ANDROID__)
+    start_pump_thread(c);
+#endif
     signal(c, input_event);
     c.x[0] = 0;
 }
@@ -694,5 +740,8 @@ NX_HLE("movie::Decoder::ReleaseOutputBufferIndex", DecoderReleaseOutputBufferInd
 NX_HLE("movie::Decoder::GetLastError", DecoderGetLastError);
 NX_HLE("movie::Decoder::GetOutputBuffer (format)", DecoderGetOutputBufferWithFormat);
 NX_HLE("movie::Decoder::GetOutputBufferFormat", DecoderGetOutputBufferFormat);
+#if defined(__ANDROID__)
+NX_HLE("__movie_pump_thread", movie_pump_thread);
+#endif
 
 }  // namespace nx

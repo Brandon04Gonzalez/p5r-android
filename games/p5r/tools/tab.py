@@ -4,7 +4,7 @@
 #   python tab.py key A|B|X|Y|L|R|ZL|ZR|PLUS|MINUS|UP|DOWN|LEFT|RIGHT [--ms 120] [--n 1] [--gap 0.4]
 #   python tab.py tap X Y                     (0..1 across the landscape screen)
 #   python tab.py touch A [--ms 120]          (the drawn touch button, P5R layout of runtime/src/touch_layout.cpp)
-#   python tab.py stick DX DY --ms 1500       (left stick: a drag from the stick area held for --ms)
+#   python tab.py stick DX DY --ms 1500       (left stick: a finger in the stick area held for --ms; rstick: camera)
 #   python tab.py seq "A;wait 1;DOWN*3;A"     (several keys, `wait s` between them; KEY*n repeats)
 import argparse
 import os
@@ -81,11 +81,15 @@ def tap(x, y):
     adb("shell", "input", "tap", str(int(x * w)), str(int(y * h)))
 
 
-def stick(dx, dy, ms):
+def stick(dx, dy, ms, right=False):
+    # One finger held at the deflection (dx, dy: -1..1, y up) for ms, all on the device so the timing holds.
     w, h = screen()
-    x0, y0 = int(0.18 * w), int(0.70 * h)
+    x0, y0 = (int(0.70 * w), int(0.40 * h)) if right else (int(0.18 * w), int(0.80 * h))
     r = 0.12 * h
-    adb("shell", "input", "swipe", str(x0), str(y0), str(int(x0 + dx * r * 1.2)), str(int(y0 - dy * r * 1.2)), str(ms))
+    x1, y1 = int(x0 + dx * r * 1.1), int(y0 - dy * r * 1.1)
+    xm, ym = (x0 + x1) // 2, (y0 + y1) // 2
+    adb("shell", f"input motionevent DOWN {x0} {y0}; input motionevent MOVE {xm} {ym}; "
+                 f"input motionevent MOVE {x1} {y1}; sleep {ms / 1000:.2f}; input motionevent UP {x1} {y1}")
 
 
 def seq(text, gap):
@@ -104,7 +108,7 @@ def main():
     ap.add_argument("cmd")
     ap.add_argument("args", nargs="*")
     ap.add_argument("--w", type=int, default=960)
-    ap.add_argument("--ms", type=int, default=120)
+    ap.add_argument("--ms", type=int, default=250)
     ap.add_argument("--n", type=int, default=1)
     ap.add_argument("--gap", type=float, default=0.4)
     a = ap.parse_args()
@@ -122,8 +126,8 @@ def main():
                 time.sleep(a.gap)
     elif a.cmd == "tap":
         tap(float(a.args[0]), float(a.args[1]))
-    elif a.cmd == "stick":
-        stick(float(a.args[0]), float(a.args[1]), a.ms)
+    elif a.cmd in ("stick", "rstick"):
+        stick(float(a.args[0]), float(a.args[1]), a.ms, a.cmd == "rstick")
     elif a.cmd == "seq":
         seq(a.args[0], a.gap)
     else:

@@ -63,8 +63,20 @@ struct Touch {
     float x0, y0, x, y;
     Stick stick;
     uint64_t button;
+    uint64_t down_ns;
 };
 std::vector<Touch> g_touches;
+// A quick tap still reaches the game: a button let go sooner than kMinHoldNs after it went down stays held until
+// then (some P5R menus missed taps of 100-200 ms that the game had read on several frames).
+struct Latch {
+    uint64_t button, until_ns;
+};
+std::vector<Latch> g_latched;
+constexpr uint64_t kMinHoldNs = 150'000'000;
+
+void release_touch(const Touch& t, uint64_t now) {
+    if (t.button && now < t.down_ns + kMinHoldNs) g_latched.push_back({t.button, t.down_ns + kMinHoldNs});
+}
 float g_w = 1, g_h = 1;
 bool g_gamepad = false;  // the last input came from a controller: the drawn touch controls hide
 uint64_t g_last_touch_ns = 0;  // the drawn controls dim after kTouchIdleNs without a touch
@@ -151,7 +163,8 @@ int32_t on_input(android_app*, AInputEvent* e) {
     int32_t action = AMotionEvent_getAction(e);
     int32_t kind = action & AMOTION_EVENT_ACTION_MASK;
     size_t index = size_t((action & AMOTION_EVENT_ACTION_POINTER_INDEX_MASK) >> AMOTION_EVENT_ACTION_POINTER_INDEX_SHIFT);
-    g_last_touch_ns = monotonic_ns();
+    const uint64_t now = monotonic_ns();
+    g_last_touch_ns = now;
     if (ANativeWindow* w = android_window()) {
         g_w = float(ANativeWindow_getWidth(w));
         g_h = float(ANativeWindow_getHeight(w));
@@ -165,17 +178,22 @@ int32_t on_input(android_app*, AInputEvent* e) {
             uint64_t b = touch_hit(x / g_w, y / g_h, g_w / g_h);
             bool left = !b && (touch_mirrored() ? x > g_w * 0.5f : x < g_w * 0.5f);
             Stick stick = b ? kNoStick : left ? kLeftStick : touch_right_stick() ? kRightStick : kNoStick;
-            if (b || stick) g_touches.push_back({AMotionEvent_getPointerId(e, index), x, y, x, y, stick, b});
+            if (b || stick) g_touches.push_back({AMotionEvent_getPointerId(e, index), x, y, x, y, stick, b, now});
         } else {
             bool left = x < g_w * 0.5f;
             g_touches.push_back({AMotionEvent_getPointerId(e, index), x, y, x, y, left ? kLeftStick : kNoStick,
-                                 left ? 0 : touch_button(x, y)});
+                                 left ? 0 : touch_button(x, y), now});
         }
     } else if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_POINTER_UP ||
                kind == AMOTION_EVENT_ACTION_CANCEL) {
         int32_t id = AMotionEvent_getPointerId(e, index);
-        if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_CANCEL) g_touches.clear();
-        g_touches.erase(std::remove_if(g_touches.begin(), g_touches.end(), [&](const Touch& t) { return t.id == id; }),
+        const bool all = kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_CANCEL;
+        g_touches.erase(std::remove_if(g_touches.begin(), g_touches.end(),
+                                       [&](const Touch& t) {
+                                           if (!all && t.id != id) return false;
+                                           release_touch(t, now);
+                                           return true;
+                                       }),
                         g_touches.end());
     } else if (kind == AMOTION_EVENT_ACTION_MOVE) {
         for (size_t k = 0; k < AMotionEvent_getPointerCount(e); k++) {
@@ -207,6 +225,10 @@ void read_pad(PadState& p) {
     float radius = std::max(1.f, g_h * 0.12f);
     size_t drawn = 0;
     touch_buttons(drawn);
+    const uint64_t now = monotonic_ns();
+    g_latched.erase(std::remove_if(g_latched.begin(), g_latched.end(), [&](const Latch& l) { return now >= l.until_ns; }),
+                    g_latched.end());
+    for (const auto& l : g_latched) p.buttons |= l.button;
     for (const auto& t : g_touches) {
         float dx = (t.x - t.x0) / radius, dy = (t.y - t.y0) / radius;
         if (t.stick == kLeftStick) {
@@ -244,6 +266,7 @@ size_t touch_overlay(OverlayShape* out, size_t max) {
         if (t.stick == kRightStick) camera = &t;
         held |= t.button;
     }
+    for (const auto& l : g_latched) held |= l.button;
     for (size_t i = 0; i < n && k < max; i++)
         out[k++] = {b[i].x, b[i].y, b[i].r, std::min(1.0f, (held & b[i].button ? 0.5f : 0.2f) * shade), b[i].label};
     // A stick under the thumb: its ring where the finger went down and the knob where it is now.
