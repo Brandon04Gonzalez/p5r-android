@@ -343,6 +343,8 @@ bool audio_submit(const void* data, size_t bytes, void* ctx) {
     return true;
 }
 
+void audio_set_delay_ms(uint32_t) {}
+
 uint32_t audio_queued() { return g_queued; }
 
 // ---- Vulkan ---------------------------------------------------------------------------------------------------

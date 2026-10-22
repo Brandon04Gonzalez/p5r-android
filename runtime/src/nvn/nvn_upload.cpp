@@ -152,7 +152,11 @@ void clear_image(VkCommandBuffer cb, GpuImage& img, bool magenta) {
     }
 }
 
+// Uploads of large pitch-linear textures: the CPU-written pictures of a film (nvn_queue.cpp counts them per present).
+std::atomic<uint64_t> g_linear_uploads{0};
+
 void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_t lo, uint64_t hi) {
+    if (t.stride && uint64_t(t.width) * t.height >= 640 * 360) g_linear_uploads++;
     const bool was_uploaded = img.uploaded;
     img.uploaded = true;
     if (gpu_profile_on()) gpu_profile_mark(cb, "texture uploads");

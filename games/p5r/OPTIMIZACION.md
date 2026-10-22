@@ -25,7 +25,10 @@ vértices, reducir pases/sombras).
 | Cambio | Resultado (ABAB) | Decisión |
 |---|---|---|
 | `NX_IMAGE_STORAGE=0` (imágenes de color sin uso STORAGE: Adreno conserva UBWC) | GPU 81,6/83,0 → 78,5/79,4 ms; 7,27/7,07 → 7,53/7,40 fps (**−4 %**) | **Por defecto en P5R** (P5R nunca usa imágenes storage) |
-| `NX_RENDER_RES=960x540` (escala 75 %) | GPU ~105–133 → ~83–86 ms; ~5 → ~7,2 fps | **Opción del launcher** "Escala de render 75 % (rendimiento)" |
+| `NX_RENDER_RES=960x540` (escala 75 %) | Sesión 5: **no se aplica** (P5R no usa esa resolución; recorte 1280x720 igual). ABAB con `NX_LOD_BIAS=1`: 70,5/66,5 → 69,2/72,0 ms (igual). La mejora de la sesión 4 era ruido | Retirada |
+| 3D al 75 % desde la configuración del motor (`main+fe7260`, sesión 5) | solo cambia parte de los objetivos; los pases siguen a 960x540 y la GPU igual (61,6 ms en CARGAR) | Retirado (PROGRESO, punto 37) |
+| `NX_HANDHELD=0` + `NX_RENDER_RES=960x540` | ventana 1920x1080 igualmente; GPU 70/72 → 93/95 ms | No |
+| `NX_LOD_BIAS=1` (texturas un mip menos) | sin cambio medible en CARGAR | Opción "Gráficos: Bajos" (por si ayuda en el campo) |
 | `NX_REPLAY_THREAD=1` | 7,70/7,73 → 7,07/6,97 fps (−9 %) | No |
 | `NX_AFFINITY=2` | 7,60/7,63 → 7,43/7,53 fps | No (neutro/peor) |
 | D24S8 nativo | P5R no usa ese formato (no se llamó nunca) | Revertido |
@@ -36,6 +39,7 @@ envío por trozos, ADPF.
 
 ## Siguiente (por impacto estimado)
 
+0. **Culling por oclusión real** (sesión 5): P5R pregunta a la GPU qué objetos se ven (`ReportCounter` samples passed + `SetRenderEnableConditional`) y el port dice siempre que sí: se dibujan todos los objetos ocultos. Con la GPU limitada por geometría (menos píxeles no ayudan) es probablemente la mayor ganancia. Perfil de CARGAR ahora: 61,6 ms/frame en total; los tres pases 3D 960x540 10,6 + 9,3 + 7,3 ms.
 1. **Caché persistente de búferes** (vértices/índices estáticos en memoria de GPU, invalidada por write-watch): quitaría
    la mayor parte de los 16–22 MB/frame de copias y parte del replay.
 2. Sombras: resolución de los mapas (12 ms/frame).

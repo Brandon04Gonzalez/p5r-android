@@ -34,6 +34,66 @@ extern std::atomic<uint64_t> g_tick_calls, g_yield_calls, g_sleep_calls;
 }
 namespace nx::nvn {
 
+extern std::atomic<uint64_t> g_linear_uploads;  // nvn_upload.cpp
+
+// A film's cadence as shown: per present, whether a new picture went up (a large pitch-linear upload since the last
+// present). Every 60 presents while pictures come: how many presents showed a new one, and for how many presents in
+// a row each picture stayed (1 = smooth at the game's rate; 2+ = a repeated picture, a visible hitch).
+void video_cadence(uint64_t now) {
+    static bool on = false;
+    static uint64_t seen = 0, presents = 0, pictures = 0, run = 0, last_ns = 0, longest_ns = 0, from_ns = 0;
+    static uint64_t runs[4] = {};  // pictures shown for 1, 2, 3, 4+ presents
+    static uint64_t prev_present = 0, slow = 0, slowest = 0, held_after_slow = 0;  // the game's own frame times
+    const uint64_t gap = prev_present ? now - prev_present : 0;
+    prev_present = now;
+    const uint64_t ups = g_linear_uploads.load();
+    const bool got = ups != seen;
+    seen = ups;
+    if (!on && !got) return;
+    if (!on) on = true, from_ns = now, run = 0;
+    presents++;
+    if (gap > 40'000'000) slow++, slowest = std::max(slowest, gap);
+    if (!got && gap > 40'000'000) held_after_slow++;
+    if (got) {
+        if (run) runs[std::min<uint64_t>(run, 4) - 1]++;
+        if (last_ns) longest_ns = std::max(longest_ns, now - last_ns);
+        last_ns = now, pictures++, run = 1;
+    } else if (++run >= 30) {  // no picture for a second: the film is over
+        on = false, last_ns = 0;
+    }
+    if (presents < 60 && on) return;
+    if (pictures)
+        log("video: %llu of %llu presents showed a new picture (%.1f per s); pictures shown for 1/2/3/4+ presents: "
+            "%llu/%llu/%llu/%llu; longest between pictures %.0f ms; presents over 40 ms apart %llu (longest %.0f ms, "
+            "%llu of them without a new picture)", (unsigned long long)pictures,
+            (unsigned long long)presents, now > from_ns ? double(pictures) * 1e9 / double(now - from_ns) : 0.0,
+            (unsigned long long)runs[0], (unsigned long long)runs[1], (unsigned long long)runs[2],
+            (unsigned long long)runs[3], double(longest_ns) / 1e6, (unsigned long long)slow, double(slowest) / 1e6,
+            (unsigned long long)held_after_slow);
+    presents = pictures = longest_ns = slow = slowest = held_after_slow = 0, from_ns = now;
+    for (auto& r : runs) r = 0;
+}
+
+// A/V sync at low frame rates: a frame's picture reaches the screen about three frame periods after the game ran its
+// logic (the game a frame ahead of the replay, two submits in flight on the GPU), the sound it started ~100 ms after
+// (the AudioOut queue). That matches at 30 fps; at 12 fps the picture came ~150 ms after its sound (lips, hits and
+// footsteps ahead of the picture). The sound is delayed by 3 x (frame period - 33.3 ms), smoothed, at most 250 ms,
+// moved by at most 20 ms twice a second so it never jumps (plat::audio_set_delay_ms). NX_AV_SYNC=0: off.
+void av_sync(uint64_t now) {
+    static const bool on = !(std::getenv("NX_AV_SYNC") && std::getenv("NX_AV_SYNC")[0] == '0');
+    if (!on) return;
+    static uint64_t last = 0, n = 0;
+    static double period = 33.3;
+    static uint32_t applied = 0;
+    if (last && now - last < 500'000'000ull) period += (double(now - last) / 1e6 - period) * 0.05;
+    last = now;
+    if (++n % 15) return;
+    const double want = std::clamp(3.0 * (period - 33.3), 0.0, 250.0);
+    const uint32_t v = uint32_t(std::clamp(want, double(applied) - 20.0, double(applied) + 20.0) + 0.5);
+    if (v != applied) plat::audio_set_delay_ms(applied = v);
+    if (n % 600 == 0) log("av sync: frame period %.1f ms, sound delayed %u ms", period, applied);
+}
+
 // Submits the game made and submits whose replay (and GPU work, write-backs) finished. The game records the next frame
 // on one thread while another submits the last one, and our replay runs inside nvnQueueSubmitCommands: a fence the
 // game waits on must not pass before the submits it follows were replayed, or the game rewrites the next frame's
@@ -479,7 +539,8 @@ void WindowSetPresentInterval(CPU& c) {
     if (auto* w = get<Window>(c.x[0])) {
         static int logged = 0;
         if (w->interval != int(c.x[1]) && logged++ < 50)
-            log("nvn: window present interval %d -> %d (frame %llu)", w->interval, int(c.x[1]), (unsigned long long)g_frame.load());
+            log("nvn: window present interval %d -> %d (frame %llu, from %s)", w->interval, int(c.x[1]),
+                (unsigned long long)g_frame.load(), describe(c.x[30]).c_str());
         w->interval = int(c.x[1]);
     }
 }
@@ -531,6 +592,8 @@ void QueuePresentTexture(CPU& c) {
     }
     work_from = plat::monotonic_ns();
     uint64_t n = ++g_presents;
+    video_cadence(work_from);
+    av_sync(work_from);
     uw_scan(n);
     uw_cameras(n);
     tl("present<", n);

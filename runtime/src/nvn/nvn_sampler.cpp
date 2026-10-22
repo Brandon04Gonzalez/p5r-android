@@ -48,7 +48,13 @@ VkSampler sampler_for(const SamplerInfo& s, bool shadow) {
     ci.addressModeU = vk_wrap(s.wrap[0]);
     ci.addressModeV = vk_wrap(s.wrap[1]);
     ci.addressModeW = vk_wrap(s.wrap[2]);
-    ci.mipLodBias = s.lod_bias;
+    // Graphics quality (the P5R launcher's preset): NX_LOD_BIAS=<f> is added to the bias of mipmapped samplers (a
+    // smaller mip: less texture bandwidth, softer surfaces; samplers without mips, text and UI, keep level 0).
+    static const float lod_bias_add = [] {
+        const char* e = std::getenv("NX_LOD_BIAS");
+        return std::clamp(e ? float(std::atof(e)) : 0.0f, -2.0f, 4.0f);
+    }();
+    ci.mipLodBias = s.lod_bias + (m >= 2 ? lod_bias_add : 0.0f);
     // Games pass lod_min -1000 ("no limit"); Metal wants lodMinClamp >= 0, and a negative one made the glyph
     // sampler return 0 (all text invisible).
     ci.minLod = m <= 1 ? 0.0f : std::max(0.0f, s.lod_min);

@@ -1,12 +1,10 @@
 // Persona 5 Royal (01005CA01580E000, 1.0.0, BID 708BCACA873EA32B): what the shared runtime needs to know about the
 // game, and what only P5R needs. The game draws through NVN (Atlus' GFD engine); its shaders live in the GFD shader
 // caches BASE/GFDNXHHPRESET*.GSC of ALL_USEU.CPK (tools/gsc_shaders.py). Notes: games/p5r/PROGRESO.md.
-#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
-#include <thread>
 
 #include <nx/game.h>
 #include <nx/runtime.h>
@@ -42,43 +40,51 @@ void fputs_logged(CPU& c) {
     else c.x[0] = 0;
 }
 
-// The frame rate (the launcher's "FPS": NX_FPS_CAP=60; 30 is the game's own and the default). The engine keeps its
-// frame interval at [[[[main+0x2327B60]+0x10]+0x60]+0x8]+0xF14: 1 = 60 fps, 2 = 30 (the Atmosphere cheat that ships
-// with the dump: Breeze beta53, 1.0.0 BID 708BCACA873EA32B). The chain only exists once the engine is up and the game
-// may write it back on scene changes, so a host thread rewrites it twice a second.
-bool readable(uint64_t p) {
-    if (!p || (p & 7)) return false;
-    VmInfo v = vm_query(p);
-    return v.state != 0 && (v.perm & 1);
+// The frame rate. The game's target frame rate is [[main+0x2209f50]+0x84]: 30 on the Switch, read through main+f73730
+// all over the game and set by main+f73740(fps), which also resets the engine's frame timer ([[main+0x220a9c0]]).
+// Every frame the game's main thread (main+fd4140) sets the engine's frame interval to 60 / it through a virtual setter
+// (main+1048ee0: vsyncs per frame, 1..4, stored at obj+0x30), which the present (main+1025c9c) hands to
+// nvnWindowSetPresentInterval. The launcher's 60 fps (NX_FPS_CAP=60) sets the target to 60 from that setter: on the PC
+// the game then ran at 45-60 fps instead of 30. (The Atmosphere cheat that ships with the dump writes
+// [[[[main+0x2327B60]+0x10]+0x60]+0x8]+0xF14, a chain that is empty in this port.) NX_P5R_FPS=<15..60>: any target, to
+// study. NX_P5R_TRACE_INTERVAL=1: the setter's calls are logged.
+Fn g_interval_setter = nullptr;
+uint64_t g_main_base = 0;
+
+int target_fps() {
+    uint64_t p = ld<uint64_t>(g_main_base + 0x2209f50);
+    return p ? int(ld<uint32_t>(p + 0x84)) : 0;
 }
 
-void fps60_thread(uint64_t main_base) {
-    log("p5r: 60 fps (NX_FPS_CAP=60): patching the frame interval");
-    bool said = false;
-    for (;;) {
-        std::this_thread::sleep_for(std::chrono::milliseconds(500));
-        uint64_t p = main_base + 0x2327B60;
-        bool ok = true;
-        static int dbg = 0;
-        std::string trace;
-        for (uint64_t off : {0ull, 0x10ull, 0x60ull, 0x8ull}) {
-            VmInfo v = vm_query(p + off);
-            char b[96];
-            std::snprintf(b, sizeof b, " [%llx st %u perm %u]", (unsigned long long)(p + off), v.state, v.perm);
-            trace += b;
-            if (!readable(p + off)) {
-                ok = false;
-                break;
-            }
-            p = ld<uint64_t>(p + off);
+void set_target_fps(CPU& c, int fps) {
+    CPU saved = c;
+    c.x[0] = uint32_t(fps);
+    call(c, g_main_base + 0xf73740);
+    c = saved;
+}
+
+int wanted_fps() {
+    static const int fps = [] {
+        const char* forced = std::getenv("NX_P5R_FPS");
+        const char* cap = std::getenv("NX_FPS_CAP");
+        int v = forced ? std::atoi(forced) : cap && std::atoi(cap) >= 60 ? 60 : 0;
+        return v >= 15 && v <= 60 && 60 % v == 0 ? v : 0;  // 15, 20, 30 or 60: whole vsyncs per frame
+    }();
+    return fps;
+}
+
+void interval_setter_hook(CPU& c) {
+    if (const int fps = wanted_fps()) {
+        if (target_fps() != fps) {
+            log("p5r: target frame rate %d -> %d", target_fps(), fps);
+            set_target_fps(c, fps);
         }
-        if (dbg++ % 20 == 0) log("p5r dbg: chain%s -> %llx", trace.c_str(), (unsigned long long)p);
-        if (!ok || !p || !readable((p + 0xF14) & ~7ull)) continue;
-        if (ld<uint32_t>(p + 0xF14) != 1) {
-            if (!said) log("p5r: frame interval %u -> 1 at %llx", ld<uint32_t>(p + 0xF14), (unsigned long long)(p + 0xF14)), said = true;
-            st<uint32_t>(p + 0xF14, 1);
-        }
+        c.x[1] = uint32_t(60 / fps);
     }
+    static int traced = 0;
+    if (std::getenv("NX_P5R_TRACE_INTERVAL") && traced++ < 40)
+        log("p5r: frame interval set to %u on %llx from %s", uint32_t(c.x[1]), (unsigned long long)c.x[0], describe(c.x[30]).c_str());
+    g_interval_setter(c);
 }
 
 }  // namespace
@@ -102,11 +108,12 @@ void game::after_init() {
 #else
     setenv("NX_IMAGE_STORAGE", "0", 0);
 #endif
-    const char* cap = std::getenv("NX_FPS_CAP");
-    if (cap && std::atoi(cap) >= 60) {
-        const LoadedModule* m = module_at(find_symbol("nnMain"));
-        if (m) std::thread(fps60_thread, m->base).detach();
-        else log("p5r: nnMain not found: no 60 fps patch");
+    if (const LoadedModule* m = module_at(find_symbol("nnMain")); m && m->table[0x1048ee0 / 4]) {
+        g_main_base = m->base;
+        g_interval_setter = m->table[0x1048ee0 / 4];
+        m->table[0x1048ee0 / 4] = interval_setter_hook;
+    } else {
+        log("p5r: nnMain or the frame interval setter not found: the game's own 30 fps");
     }
 }
 void game::renderer_start() {}

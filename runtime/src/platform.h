@@ -95,6 +95,8 @@ void write_watch_remove(uint64_t addr);
 // lo/hi (optional): the written bytes as [lo, hi) from addr, page-rounded; [0, UINT64_MAX) when unknown, empty when none.
 bool write_watch_take(uint64_t addr, uint64_t* lo = nullptr, uint64_t* hi = nullptr);
 bool write_watch_fault(void* at);
+// Before the host itself stores into watched memory: marks the watches written and unprotects their pages at once.
+void write_watch_will_write(uint64_t addr, uint64_t size);
 // NX_HEADLESS=1: no visible window (it is created hidden) and nothing presented; frames still render and
 // NX_DUMP_FRAMES still writes them. For unattended test runs.
 bool headless();
@@ -113,6 +115,9 @@ bool audio_open(AudioDone done);
 bool audio_submit(const void* data, size_t bytes, void* ctx);  // false: no device (caller paces itself)
 uint32_t audio_queued();
 void audio_pause(bool paused);  // app in the background
+// Sound later than the game mixes it, by `ms`, so it stays with the picture when frames are slow (Android; elsewhere
+// nothing). The game's buffers still come back at the real-time rate.
+void audio_set_delay_ms(uint32_t ms);
 
 // Vulkan: the loader's vkGetInstanceProcAddr and the surface extension of this platform.
 void* vulkan_get_instance_proc_addr();

@@ -1,15 +1,16 @@
 # Port nativo de Persona 5 Royal a Android — progreso
 
-Última actualización: 2026-10-21 (sesión 4, noche)
+Última actualización: 2026-10-22 (sesión 5)
 
 ## Estado en una línea
 
 **P5R se juega en Android** (Lenovo Tab M11, Adreno 610, Vulkan 1.1) a **30 fps** con **controles táctiles**, **sonido**
 y **vídeos por hardware**: arranque, título 3D, Nueva partida, la película de apertura completa y el **casino jugable**
-(Joker se mueve, salta y escala; diálogos en español). Hay **launcher** con las opciones pedidas. Pendiente: terminar el
-casino (primera batalla), el parche de 60 fps (aún sin efecto: opción marcada experimental) y el **rendimiento**: en la
-Adreno 610 el casino va a **~13 fps** (GPU ≈ 70–80 ms/frame). Las mejoras y mediciones están en la rama **`p5r-opt`**
-(`games/p5r/OPTIMIZACION.md`); el APK instalado en la tablet es el de esa rama.
+hasta la primera batalla (ganada). Hay **launcher** con las opciones pedidas (incluida **Gráficos**, Bajos por defecto).
+Sesión 5: las películas ya no se congelan, el sonido se retrasa para ir con la imagen cuando hay pocos fps, y la opción
+de **60 fps funciona** (en PC sube de 30 a 45–60). Pendiente: **rendimiento** (en la Adreno 610 el casino va a
+**~12 fps**, limitado por geometría: ver sesión 5), objetos que desaparecen un frame (sesión 5, punto 39) y seguir la
+historia. Rama de trabajo **`p5r-opt`** (el APK instalado en la tablet es el de esa rama).
 
 ## Cómo funciona el port
 
@@ -197,16 +198,71 @@ Notas de la sesión 4:
 - Combate en la tablet: se ve bien (efectos de fuego, VICTORY); los comandos con A (atacar) bastan para ganarlo.
 - Tirones de 100–350 ms al cargar escenas (informe `stall:` en el log): para la rama de optimización.
 
+### Sesión 5 (2026-10-22) — películas, A/V, 60 fps, opción de gráficos
+
+32. **Películas que se congelaban ~4 s una y otra vez** (la de apertura tras Nueva partida: "tirones en cinemáticas").
+    CriVpdSwitch (`main+1276000..127a000`) se queda con los fotogramas que toma hasta mostrarlos y deja de mandar datos
+    cuando tiene casi todos los huecos de salida: con 8 iba ~4 s y se paraba ~4 s (7 de 8 retenidos, 0 entradas). Con
+    **16 huecos** (`hle_movie.cpp`, `NX_MOVIE_OUTPUTS`) decodifica a 30 fps de principio a fin (película de 50 s medida).
+    Nuevas medidas en el log: `movie: per s: sent/decoded/acquired/got/released ...` cada 2 s, `movie: no input for ...`
+    con volcado de hilos (`NX_MOVIE_DUMP=<n>`) y `video: N of 60 presents showed a new picture ...` (lo que se ve).
+    `screenrecord` no funciona en la tablet mientras el VP9 a 1080p está abierto (el códec no arranca); durante el juego
+    sí, a `--size 640x400`.
+33. Queda un tirón pequeño en películas: 1–3 fotogramas cada 2 s se ven 100–170 ms (dos presents sin imagen nueva). No es
+    el audio (el dispositivo AAudio pide cada ~4 ms sin cortes) ni la decodificación (30/s). Siguiente: la línea `video:`
+    ya cuenta presents > 40 ms (¿frames lentos del juego?) y CRI elige la imagen por su reloj.
+34. **A/V a pocos fps** ("desfase de audio"): la imagen de un frame llega a pantalla ~3 periodos después de la lógica (el
+    juego un frame por delante, dos envíos en vuelo en la GPU); el sonido ~100 ms después. A 30 fps cuadra; a 12 fps la
+    imagen iba ~150 ms por detrás del sonido. Ahora el audio sale de un anillo propio (`platform_android_audio.cpp`) con
+    un retardo de 3 × (periodo − 33,3 ms), suavizado y hasta 250 ms (`nvn_queue.cpp` `av_sync`, log `av sync:`;
+    `NX_AV_SYNC=0` lo quita). Los búferes del juego vuelven a ritmo real (su reloj no cambia). Probado a ~6 fps: 150 ms y
+    subiendo, sin cortes. **Sin confirmar a oído.**
+35. **FPS objetivo del juego**: `[[main+0x2209f50]+0x84]` (30), leído por `main+f73730` en cientos de sitios y fijado por
+    `main+f73740(fps)` (que reinicia el temporizador `[[main+0x220a9c0]]`). Cada frame `main+fd4140` pone el intervalo
+    del motor a 60/fps con el setter virtual `main+1048ee0` (1..4, `obj+0x30`), que el present (`main+1025c9c`) pasa a
+    `nvnWindowSetPresentInterval`. `games/p5r/game.cpp` engancha ese setter (tabla de funciones): **la opción de 60 fps
+    ahora funciona** (PC: 45–60 fps en vez de 30; velocidad de juego sin verificar). `NX_P5R_FPS=15|20|30|60` para
+    pruebas. Con 15 el arranque tarda más (el cargador avanza una vez por frame); que la lógica escale con el objetivo no
+    está demostrado (logos de ATLUS: 11 s a 24 fps reales frente a 15 s a 12 fps).
+36. **Opción "Gráficos"** en el launcher (Bajos por defecto / Medios / Altos): hoy solo baja el detalle de texturas
+    (`NX_LOD_BIAS` 1 / 0,5 / 0, `nvn_sampler.cpp`). Medido en CARGAR: sin cambio de GPU (66–72 ms). **La "escala de render
+    75 %" de la sesión 4 nunca funcionó**: P5R no usa la resolución que devolvemos (`NX_RENDER_RES`), elige 720p/1080p por
+    el modo de la consola (recorte 1280x720 con y sin la opción; la mejora medida era ruido). Retirada del launcher.
+37. Tamaños de render de P5R (para bajar resolución más adelante): la tarea de arranque del motor (`main+fe7260`, lanzada
+    por puntero desde `main+fe71ac`) pasa su configuración a `main+f73770 -> fd1ad0 -> fe3c30` (ventana 1920x1080, 3D 0 =
+    la ventana; los fps en +0x34). `fe3c30` llena la tabla `[[main+0x220b4a0]+0x4758]` (entrada 2 = escena 3D) y los
+    objetivos se crean con códigos relativos (`0x80000202` = entrada 2 / 2 = 960x540 en portátil; `main+fe3ec0`). Cambiar
+    el 3D en esa configuración solo redimensiona parte de los objetivos (otros salen de `main+fdca14`): imagen descolocada
+    en PC. **Además en la Adreno 610 el coste es geometría**: con menos píxeles los pases 3D cuestan casi igual.
+    `NX_TRACE_TEX_CALLER=<w>x<h>` registra quién crea cada textura de ese tamaño.
+38. **Culling por oclusión desactivado**: P5R usa consultas de oclusión (`ReportCounter` tipo 1 = samples passed,
+    `ResetCounter` desde `main+fc3f74`, en `main+fc3dd0`) y `SetRenderEnableConditional`; el port responde siempre
+    "visible", así que **dibuja todos los objetos ocultos**. Hacerlo de verdad (consultas de oclusión de Vulkan con un
+    frame de retraso) es probablemente la mayor ganancia de GPU pendiente.
+39. **Objetos que desaparecen un frame** (casino, tramo de correr; grabado mientras jugabas): en `runs/run2`, la imagen 7
+    de `seq_a.png` (desde 0:18) sale sin la lámpara dorada de la izquierda ni las luces de la derecha, que están en la
+    anterior y la siguiente. `private/p5r/flicker.py` los busca en una grabación. Hipótesis: lecturas de los contadores
+    de oclusión antes de que el replay los escriba (valores de otro frame). Sin confirmar.
+40. Pantalla: el juego pide 60 Hz (`ANativeWindow_setFrameRateWithChangeStrategy`, `NX_WINDOW_HZ`), pero la Tab M11 se
+    queda a 90 Hz.
+41. Vídeo en memoria vigilada: `write_watch_will_write` desprotege el rango de una vez (antes un fallo por página, 760 por
+    fotograma). Efecto pequeño (la copia ya costaba 1,5–2 ms).
+42. Tablet sin adb: el servicio **SuperDisplay** del PC (MirrorService, driver WinUSB de KeloCube) la pone en modo
+    accesorio USB (`18D1:2D01`). Se arregla parando el servicio (`Stop-Service SuperDisplay`, admin) y reiniciando el
+    dispositivo USB (`pnputil /restart-device "USB\VID_18D1&PID_2D01\HA269JK2"`, admin). Vuelve a arrancar con Windows.
+
 ## Falta ❌ (por orden)
 
-1. Terminar el casino (salir del almacén de jaulas) y seguir la historia. La primera batalla ya está comprobada.
-2. Confirmar el parche de 60 fps en el campo; si no, buscar el campo con `NX_WATCH`.
-3. Guardar/cargar partida (`user/` en la carpeta de datos).
-4. Servicios IPC que pida P5R y Wonder no usaba (`bsd:u`, `ectx:aw`, varios `cmd ... not implemented`).
-5. **GPUs**: tabla de quirks por vendorID (Adreno 0x5143, Mali 0x13B5, Xclipse 0x144D, PowerVR 0x1010, Maleoon) y
+1. **Rendimiento en la Adreno 610** (~12 fps en el casino): culling por oclusión real (punto 38), luego caché de
+   búferes de vértices y sombras (`OPTIMIZACION.md`).
+2. Objetos que desaparecen un frame (punto 39): confirmar con una captura del frame y la traza de draws.
+3. Tirón pequeño de las películas (punto 33).
+4. Verificar a oído el A/V a pocos fps (punto 34) y la velocidad del juego a 60 fps (punto 35).
+5. Bajar la resolución 3D de verdad (punto 37) si deja de ser la geometría lo que limita.
+6. Terminar el casino (salir del almacén de jaulas) y seguir la historia; guardar/cargar partida.
+7. Servicios IPC que pida P5R y Wonder no usaba (`bsd:u`, `ectx:aw`, varios `cmd ... not implemented`).
+8. **GPUs**: tabla de quirks por vendorID (Adreno 0x5143, Mali 0x13B5, Xclipse 0x144D, PowerVR 0x1010, Maleoon) y
    probar en el Moto G54 (PowerVR, pero solo 4,3 GB libres).
-6. Rendimiento (rama `p5r-opt`, ver `OPTIMIZACION.md` allí): caché persistente de búferes de vértices (16–22 MB/frame
-   copiados), sombras (12 ms/frame), tirones de carga (pipelines).
 
 ### Dispositivos de prueba
 

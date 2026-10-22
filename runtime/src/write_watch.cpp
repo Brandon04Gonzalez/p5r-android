@@ -98,6 +98,25 @@ void write_watch_remove(uint64_t addr) {
         }
 }
 
+// The host is about to store into [addr, addr + size) (hle_movie.cpp: a decoded picture copied into the game's
+// memory): the watches over it are marked written and those pages made writable with one call each, instead of one
+// fault per page (760 for a 1080p NV12 frame, every frame of a film). A take between this and the stores re-protects
+// them: the rest of the stores fault as usual.
+void write_watch_will_write(uint64_t addr, uint64_t size) {
+    if (!enabled() || !addr || !size) return;
+    std::lock_guard lk(g_watch_lock);
+    uint64_t ps = page_size(), b = addr & ~(ps - 1), e = (addr + size + ps - 1) & ~(ps - 1);
+    for (Watch& w : g_watches) {
+        if (!w.addr) continue;
+        uint64_t lo = std::max<uint64_t>(b, w.begin), hi = std::min<uint64_t>(e, w.end);
+        if (lo >= hi) continue;
+        for (uint64_t cur = w.lo; lo < cur && !w.lo.compare_exchange_weak(cur, lo);) {}
+        for (uint64_t cur = w.hi; hi > cur && !w.hi.compare_exchange_weak(cur, hi);) {}
+        w.written = true;
+        mprotect(reinterpret_cast<void*>(lo), hi - lo, PROT_READ | PROT_WRITE);
+    }
+}
+
 bool write_watch_take(uint64_t addr, uint64_t* lo, uint64_t* hi) {
     if (lo) *lo = 0, *hi = UINT64_MAX;  // unknown: all of it
     std::lock_guard lk(g_watch_lock);
@@ -137,6 +156,7 @@ bool write_watch_fault(void* at) {
 #else
 bool write_watch_add(uint64_t, uint64_t) { return false; }
 void write_watch_remove(uint64_t) {}
+void write_watch_will_write(uint64_t, uint64_t) {}
 bool write_watch_take(uint64_t, uint64_t* lo, uint64_t* hi) {
     if (lo) *lo = 0, *hi = UINT64_MAX;
     return true;

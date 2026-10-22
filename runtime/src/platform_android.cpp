@@ -434,6 +434,28 @@ void game_thread(void*) {
 
 void request_immersive();  // below: runs on the UI thread
 
+// The panel's refresh while the game shows (Android 11+): 60 Hz, the rate of our vsync event (hle_vi.cpp) and the
+// most the game presents. A 90 Hz panel (Lenovo Tab M11) showed a 30 fps frame for 3 refreshes or, when a present
+// landed next to a refresh, 2 or 4: uneven motion in films and cutscenes. NX_WINDOW_HZ=<hz>: another rate, 0: leave
+// the panel's own.
+void request_frame_rate(ANativeWindow* w) {
+    // Android 12+: the switch even when it is not seamless (60 <-> 90 Hz on the Tab M11 is not: the plain request
+    // was accepted and ignored); Android 11: the plain request.
+    using SetFrameRate = int32_t (*)(ANativeWindow*, float, int8_t);
+    using SetFrameRateStrategy = int32_t (*)(ANativeWindow*, float, int8_t, int8_t);
+    static void* lib = dlopen("libandroid.so", RTLD_NOW | RTLD_LOCAL);
+    static const auto set = reinterpret_cast<SetFrameRate>(lib ? dlsym(lib, "ANativeWindow_setFrameRate") : nullptr);
+    static const auto set_always = reinterpret_cast<SetFrameRateStrategy>(
+        lib ? dlsym(lib, "ANativeWindow_setFrameRateWithChangeStrategy") : nullptr);
+    const char* e = getenv("NX_WINDOW_HZ");
+    const float hz = e ? float(std::atof(e)) : 60.0f;
+    if (!w || hz <= 0) return;
+    if (!set && !set_always) return nx::log("android: no ANativeWindow_setFrameRate (Android 10 or older): the panel's own rate");
+    int32_t r = set_always ? set_always(w, hz, 1 /* COMPATIBILITY_FIXED_SOURCE */, 1 /* CHANGE_FRAME_RATE_ALWAYS */)
+                           : set(w, hz, 1);
+    nx::log("android: window frame rate %.0f Hz requested (%d%s)", double(hz), int(r), set_always ? ", even if not seamless" : "");
+}
+
 void on_cmd(android_app* app, int32_t cmd) {
     using namespace nx::plat;
     switch (cmd) {
@@ -441,6 +463,7 @@ void on_cmd(android_app* app, int32_t cmd) {
             g_window = app->window;
             g_window_gen++;
             g_visible = true;
+            request_frame_rate(app->window);
             request_immersive();
             break;
         case APP_CMD_TERM_WINDOW:  // the window goes away once this returns

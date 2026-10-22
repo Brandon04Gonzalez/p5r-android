@@ -150,8 +150,10 @@ static void dump_threads() {
             fp = next;
         }
         // x0..x2 as the thread left them: for one blocked in a call, what it waits on (a mutex, an event, a handle).
-        log("threads: %llx (handle %x) %s  [x0 %llx x1 %llx x2 %llx]", (unsigned long long)t->id, t->handle, chain.c_str(),
-            (unsigned long long)t->ctx.x[0], (unsigned long long)t->ctx.x[1], (unsigned long long)t->ctx.x[2]);
+        const char* hle = t->hle.load(std::memory_order_relaxed);
+        log("threads: %llx (handle %x)%s%s %s  [x0 %llx x1 %llx x2 %llx]", (unsigned long long)t->id, t->handle,
+            hle ? " in hle:" : "", hle ? hle : "", chain.c_str(), (unsigned long long)t->ctx.x[0],
+            (unsigned long long)t->ctx.x[1], (unsigned long long)t->ctx.x[2]);
     }
 }
 
@@ -196,6 +198,8 @@ static void stall_sampler(void*) {
                 hits[{t->id, t->ctx.x[30], t->hle.load(std::memory_order_relaxed)}]++;
     }
 }
+
+void log_guest_threads() { dump_threads(); }
 
 void kernel_init() {
     plat::start_thread(watchdog, nullptr, 1ull << 20);

@@ -19,6 +19,7 @@
 // of the same timestamp, so a video plays black for its length and the game goes on.
 #include <algorithm>
 #include <array>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -119,7 +120,18 @@ void BufferCapacity(CPU& c) { c.x[0] = ld<uint64_t>(c.x[0] + kBufCapacity); }
 // ---- Decoder -----------------------------------------------------------------------------------------------------
 
 enum Event { kInputAvailable, kOutputAvailable, kFormatChanged, kError };
-constexpr int kInputs = 4, kOutputs = 8;
+constexpr int kInputs = 4, kMaxOutputs = 32;
+// Output slots offered to the game (GetOutputBufferSize). CriVpdSwitch keeps the pictures it took until it shows
+// them, and feeds no more input while it holds nearly all: with 8, P5R's opening film (after New Game) played ~4 s
+// and froze ~4 s over and over, 7 of the 8 held and no input sent. With 16 it plays through at 30 pictures a second.
+// NX_MOVIE_OUTPUTS=<n> (2..32): another count.
+int output_slots() {
+    static const int n = [] {
+        const char* e = std::getenv("NX_MOVIE_OUTPUTS");
+        return e ? std::clamp(std::atoi(e), 2, kMaxOutputs) : 16;
+    }();
+    return n;
+}
 constexpr uint32_t kEndOfStream = 4;
 constexpr uint32_t kTryAgain = 0x1001;  // any non-zero status: CriVpdSwitch waits for the next event
 
@@ -133,12 +145,20 @@ struct Decoder {
         int64_t pts = 0;
         uint32_t flags = 0;
         bool busy = false;
-    } outputs[kOutputs];
+    } outputs[kMaxOutputs];
     std::deque<int> ready;                              // outputs to acquire
     std::deque<std::pair<int64_t, uint32_t>> pending;  // black frames made with every output slot busy
-    std::vector<uint8_t> frames[kOutputs];              // a slot's decoded picture (tight NV12); empty: black
+    std::vector<uint8_t> frames[kMaxOutputs];              // a slot's decoded picture (tight NV12); empty: black
     bool started = false, format_sent = false;
     uint64_t frames_in = 0, frames_out = 0, decoded = 0;
+    // Per-window counts for the movie: line (pump thread, every 2 s while the decoder runs).
+    struct Stats {
+        uint64_t sent = 0, decoded = 0, acquired = 0, got = 0, released = 0, empty_acquires = 0;
+        uint64_t convert_ns = 0, copy_ns = 0, send_wait_ns = 0, max_got_gap_ns = 0;
+    } win;
+    uint64_t last_got_ns = 0, win_from_ns = 0, last_sent_ns = 0;
+    int64_t last_sent_pts = 0, last_got_pts = 0;
+    bool starve_logged = false;  // NX_MOVIE_DUMP: threads logged for this pause in the input
 #if defined(__ANDROID__)
     AMediaCodec* codec = nullptr;
     struct Input {
@@ -159,7 +179,7 @@ struct Decoder {
     uint64_t nv12_size() const { return uint64_t(stride()) * rows() * 3 / 2; }
 
     int free_slot() const {
-        for (int k = 0; k < kOutputs; k++)
+        for (int k = 0; k < output_slots(); k++)
             if (!outputs[k].busy) return k;
         return -1;
     }
@@ -178,6 +198,7 @@ struct Decoder {
         for (int k = 0; k < kInputs; k++) free_inputs.push_back(k);
         for (auto& o : outputs) o = {};
         ready.clear(), pending.clear();
+        win = {}, win_from_ns = last_got_ns = last_sent_ns = 0;
 #if defined(__ANDROID__)
         to_codec.clear();
         eos_sent = codec_eos = false;
@@ -262,10 +283,13 @@ bool pump(Decoder& d, int64_t wait_us) {
         if (o < 0) break;
         size_t size = 0;
         uint8_t* buf = AMediaCodec_getOutputBuffer(d.codec, size_t(o), &size);
+        const uint64_t t0 = plat::monotonic_ns();
         if (buf && info.size > 0)
             to_nv12(d, buf + info.offset, size_t(info.size), d.frames[slot]);
         else
             d.frames[slot].clear();
+        d.win.convert_ns += plat::monotonic_ns() - t0;
+        d.win.decoded++;
         AMediaCodec_releaseOutputBuffer(d.codec, size_t(o), false);
         const bool eos = info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM;
         d.codec_eos |= eos;
@@ -398,11 +422,48 @@ void movie_pump_thread(CPU& c) {
     for (;;) {
         plat::sleep_ns(2'000'000);
         std::vector<uint64_t> events;
+        bool dump = false;
         {
             std::lock_guard lk(g_lock);
-            for (auto& [id, d] : g_decoders)
+            const uint64_t now = plat::monotonic_ns();
+            for (auto& [id, d] : g_decoders) {
                 if (d->started && d->codec && pump(*d, 0)) events.push_back(d->events[kOutputAvailable]);
+                if (!d->started) continue;
+                // NX_MOVIE_DUMP=<n>: the first n times a playing film gets no input for a second, where every guest
+                // thread is (what the game's reader waits for).
+                static int dumps_left = std::getenv("NX_MOVIE_DUMP") ? std::atoi(std::getenv("NX_MOVIE_DUMP")) : 0;
+                if (dumps_left > 0 && d->last_sent_ns && !d->eos_sent && !d->starve_logged &&
+                    now - d->last_sent_ns > 1'000'000'000ull) {
+                    int busy = 0;
+                    std::string held;
+                    for (const auto& o : d->outputs)
+                        if (o.busy) busy++, held += " " + std::to_string(o.pts / 1000);
+                    log("movie: no input for %.0f ms (%llu frames in, last pts %lld ms, last taken %lld ms; ready %zu, "
+                        "slots busy %d, their pts in ms:%s): threads follow", double(now - d->last_sent_ns) / 1e6,
+                        (unsigned long long)d->frames_in, (long long)(d->last_sent_pts / 1000),
+                        (long long)(d->last_got_pts / 1000), d->ready.size(), busy, held.c_str());
+                    d->starve_logged = true, dumps_left--, dump = true;
+                }
+                if (!d->win_from_ns) d->win_from_ns = now;
+                if (now - d->win_from_ns < 2'000'000'000ull) continue;
+                // What the video did over the window: pictures the game sent, the codec decoded, the game took
+                // (got = copied into its memory, about one per shown frame) and the longest wait between two.
+                const auto& w = d->win;
+                const double s = double(now - d->win_from_ns) / 1e9;
+                int busy = 0;
+                for (const auto& o : d->outputs) busy += o.busy;
+                log("movie: per s: sent %.1f, decoded %.1f, acquired %.1f (+%.1f empty), got %.1f, released %.1f; "
+                    "longest gap between gots %.0f ms; convert %.2f ms, copy %.2f ms, send wait %.2f ms per picture; "
+                    "queued for the codec %zu, ready %zu, slots busy %d",
+                    w.sent / s, w.decoded / s, w.acquired / s, w.empty_acquires / s, w.got / s, w.released / s,
+                    double(w.max_got_gap_ns) / 1e6, w.decoded ? double(w.convert_ns) / 1e6 / double(w.decoded) : 0.0,
+                    w.got ? double(w.copy_ns) / 1e6 / double(w.got) : 0.0,
+                    w.sent ? double(w.send_wait_ns) / 1e6 / double(w.sent) : 0.0, d->to_codec.size(), d->ready.size(), busy);
+                d->win = {};
+                d->win_from_ns = now;
+            }
         }
+        if (dump) log_guest_threads();
         signal_all(c, events);
     }
 }
@@ -455,7 +516,8 @@ void DecoderStart(CPU& c) {
 void DecoderStop(CPU& c) {
     std::lock_guard lk(g_lock);
     if (Decoder* d = decoder(c.x[0])) {
-        log("movie: decoder stopped after %llu frames in, %llu out (%llu decoded)", (unsigned long long)d->frames_in,
+        log("movie: decoder stopped at present %llu, %.1f s, after %llu frames in, %llu out (%llu decoded)",
+            (unsigned long long)g_frame.load(), double(plat::monotonic_ns()) / 1e9, (unsigned long long)d->frames_in,
             (unsigned long long)d->frames_out, (unsigned long long)d->decoded);
 #if defined(__ANDROID__)
         if (d->codec && d->started) AMediaCodec_stop(d->codec);
@@ -531,9 +593,13 @@ void DecoderSendInputBufferForDecode(CPU& c) {
                                         d->inputs[index].size() - std::min<size_t>(d->inputs[index].size(), size_t(c.x[2])));
             d->to_codec.push_back({std::vector<uint8_t>(src, src + n), pts, flags & kEndOfStream});
             d->eos_sent |= (flags & kEndOfStream) != 0;
+            const uint64_t t0 = plat::monotonic_ns();
             output = pump(*d, 4000);
             for (int k = 0; (flags & kEndOfStream) && !d->codec_eos && k < 100 && d->free_slot() >= 0; k++)
                 output |= pump(*d, 20000);
+            d->win.send_wait_ns += plat::monotonic_ns() - t0;
+            d->win.sent++;
+            d->last_sent_ns = plat::monotonic_ns(), d->starve_logged = false, d->last_sent_pts = pts;
         } else
 #endif
             d->emit(pts, flags & kEndOfStream);
@@ -553,9 +619,11 @@ void DecoderAcquireOutputBufferIndex(CPU& c) {
 #if defined(__ANDROID__)
     if (d && d->ready.empty()) pump(*d, 0);
 #endif
+    if (d && d->ready.empty()) d->win.empty_acquires++;
     if (!d || d->ready.empty()) return void(c.x[0] = kTryAgain);
     int index = d->ready.front();
     d->ready.pop_front();
+    d->win.acquired++;
     if (c.x[1]) st<int32_t>(c.x[1], index);
     if (c.x[2]) st<int64_t>(c.x[2], d->outputs[index].pts);
     if (c.x[3]) st<uint32_t>(c.x[3], d->outputs[index].flags);
@@ -580,12 +648,15 @@ void DecoderGetOutputBuffer(CPU& c) {
     std::lock_guard lk(g_lock);
     Decoder* d = decoder(c.x[0]);
     int index = int(c.x[1]);
-    if (!d || index < 0 || index >= kOutputs || !d->outputs[index].busy || !c.x[2]) return void(c.x[0] = kTryAgain);
+    if (!d || index < 0 || index >= output_slots() || !d->outputs[index].busy || !c.x[2]) return void(c.x[0] = kTryAgain);
     static bool said = false;
     if (!said) said = true, log("movie: output format %u (4: NV12), frame %dx%d", d->format, d->width, d->height);
     const std::vector<uint8_t>& frame = d->frames[index];
     uint8_t* base = reinterpret_cast<uint8_t*>(ld<uint64_t>(c.x[2] + kBufBase));
     uint64_t cap = ld<uint64_t>(c.x[2] + kBufCapacity);
+    const uint64_t t0 = plat::monotonic_ns();
+    // The game's textures over this memory are write-watched (a fault per 4 KB page otherwise: 760 per 1080p frame).
+    if (base && cap) plat::write_watch_will_write(reinterpret_cast<uint64_t>(base), std::min<uint64_t>(cap, d->nv12_size()));
     if (!frame.empty() && base && cap) {  // a decoded picture
         std::memcpy(base, frame.data(), std::min<uint64_t>(cap, frame.size()));
         st<int32_t>(c.x[2] + kBufOffset, 0);
@@ -593,6 +664,12 @@ void DecoderGetOutputBuffer(CPU& c) {
     } else {
         fill_black(*d, c.x[2]);
     }
+    const uint64_t t1 = plat::monotonic_ns();
+    d->win.copy_ns += t1 - t0;
+    d->win.got++;
+    d->last_got_pts = d->outputs[index].pts;
+    if (d->last_got_ns) d->win.max_got_gap_ns = std::max(d->win.max_got_gap_ns, t1 - d->last_got_ns);
+    d->last_got_ns = t1;
     d->frames_out++;
     c.x[0] = 0;
 }
@@ -609,7 +686,7 @@ void DecoderGetOutputBufferSize(CPU& c) {
     Decoder* d = decoder(c.x[0]);
     if (!d) return void(c.x[0] = kTryAgain);
     if (c.x[1]) st<int32_t>(c.x[1], int32_t(d->nv12_size()));
-    if (c.x[2]) st<int32_t>(c.x[2], kOutputs);
+    if (c.x[2]) st<int32_t>(c.x[2], output_slots());
     c.x[0] = 0;
 }
 
@@ -620,8 +697,9 @@ void DecoderReleaseOutputBufferIndex(CPU& c) {
         std::lock_guard lk(g_lock);
         Decoder* d = decoder(c.x[0]);
         int index = int(c.x[1]);
-        if (d && index >= 0 && index < kOutputs) {
+        if (d && index >= 0 && index < output_slots()) {
             d->outputs[index].busy = false;
+            d->win.released++;
             if (!d->pending.empty()) {  // a slot is free again for a frame that waited
                 auto [pts, flags] = d->pending.front();
                 d->pending.pop_front();
@@ -672,7 +750,8 @@ void DecoderCtor(CPU& c) {
     const uint64_t self = c.x[0];
     auto d = std::make_unique<Decoder>();
     d->type = uint32_t(c.x[1]), d->format = uint32_t(c.x[2]), d->mode = uint32_t(c.x[3]);
-    log("movie: Decoder(type %u, output format %u, mode %u, priority %d)", d->type, d->format, d->mode, int(c.x[4]));
+    log("movie: Decoder(type %u, output format %u, mode %u, priority %d) at present %llu, %.1f s", d->type, d->format,
+        d->mode, int(c.x[4]), (unsigned long long)g_frame.load(), double(plat::monotonic_ns()) / 1e9);
     std::lock_guard lk(g_lock);
     const uint64_t id = g_next_id++;
     g_decoders[id] = std::move(d);

@@ -113,6 +113,7 @@ inline void guest_call(CPU& c, uint64_t addr) { call(c, addr); }
 extern std::atomic<uint64_t> g_frame;  // frames presented so far (vkQueuePresentKHR)
 
 void kernel_init();
+void log_guest_threads();  // every guest thread's call chain, now (kernel_watch.cpp)
 uint32_t create_main_thread(uint64_t stack_size);  // the calling host thread becomes it
 CPU& current_cpu();
 uint64_t system_tick();

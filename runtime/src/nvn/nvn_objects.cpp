@@ -301,6 +301,25 @@ void TextureInitialize(CPU& c) {  // NVNboolean (NVNtexture*, const NVNtextureBu
     t.offset = driver(c, "nvnTextureBuilderGetMemoryOffset", {builder});
     t.storage_size = texture_storage_size(c, builder);
     uw_widen_texture(t);  // NX_ULTRAWIDE: screen-sized render targets get the display's width
+    // NX_TRACE_TEX_CALLER=<w>x<h>: the guest call chain of every texture made at that size (who sizes the targets).
+    if (static const char* e = std::getenv("NX_TRACE_TEX_CALLER"); e) {
+        static unsigned tw = 0, th = 0;
+        if (!tw) std::sscanf(e, "%ux%u", &tw, &th);
+        static int n = 0;
+        if (t.width == tw && t.height == th && n++ < 30) {
+            std::string chain = describe(c.x[30]);
+            uint64_t fp = c.x[29];
+            for (int k = 0; k < 10 && fp && (fp & 7) == 0; k++) {
+                uint64_t lr = ld<uint64_t>(fp + 8);
+                if (!lr) break;
+                chain += " < " + describe(lr);
+                uint64_t next = ld<uint64_t>(fp);
+                if (next <= fp) break;
+                fp = next;
+            }
+            log("nvn: texture %ux%u format %#x flags %#x made from %s", t.width, t.height, t.format, t.flags, chain.c_str());
+        }
+    }
     if (old) {
         std::lock_guard lk(objects_lock());
         pool_textures()[t.pool].insert(guest);
