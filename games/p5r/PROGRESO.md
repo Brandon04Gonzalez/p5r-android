@@ -1,13 +1,13 @@
 # Port nativo de Persona 5 Royal a Android — progreso
 
-Última actualización: 2026-10-21 (sesión 3)
+Última actualización: 2026-10-21 (sesión 4, noche)
 
 ## Estado en una línea
 
-**P5R ya corre en Android** (Lenovo Tab M11, Adreno 610, Vulkan 1.1) a **30 fps**: pantallas de arranque, diálogo
-THIEVES GUILD, logos, **vídeo de la intro decodificado por hardware** (VP9, `c2.qti.vp9.decoder`) y el **menú de
-título 3D**. En PC llega hasta la pantalla LOAD. Pendiente inmediato: **el vídeo no tiene sonido** y verificar en
-la tablet los últimos arreglos (ver "Sesión 3b").
+**P5R se juega en Android** (Lenovo Tab M11, Adreno 610, Vulkan 1.1) a **30 fps** con **controles táctiles**, **sonido**
+y **vídeos por hardware**: arranque, título 3D, Nueva partida, la película de apertura completa y el **casino jugable**
+(Joker se mueve, salta y escala; diálogos en español). Hay **launcher** con las opciones pedidas. Pendiente: terminar el
+casino (primera batalla), verificar el parche de 60 fps en juego, guardado, y rendimiento (rama de optimización).
 
 ## Cómo funciona el port
 
@@ -147,27 +147,48 @@ retirados (`write_watch.cpp`; el juego crasheaba al escribir frames de vídeo en
 `run_android.ps1 -Name x -Seconds 25 -Keep` y pulsar A con `adb shell input keyevent --duration 250 KEYCODE_BUTTON_B`.
 Capa de validación Vulkan: `private/third_party/vvl` (se activa con `settings put global gpu_debug_*`; ya desactivada).
 
+### Sesión 4 (2026-10-21, noche) — controles táctiles, sonido, vídeo, launcher
+25. **Controles táctiles de P5R** (`runtime/src/touch_layout.cpp`, `platform_android_input.cpp`): rombo A/B/X/Y abajo a
+    la derecha, L/ZL y R/ZR en las esquinas, −/+ arriba, cruceta a la izquierda; la mitad izquierda es el stick (aparece
+    donde cae el pulgar) y el resto de la mitad derecha mueve la **cámara** (stick derecho). Etiquetas dibujadas por el
+    shader de presentación (`tools/shaders/present/overlay.glsl`, compartido con FSR para que no desaparezcan con
+    `NX_FSR=1`). Se atenúan tras 8 s sin tocar (vídeos). Un toque corto se mantiene 150 ms (si no, el juego lo perdía).
+    Teclado: Enter/Espacio = A, Esc = B (la tablet Lenovo usa BUTTON_B para la captura del lápiz).
+26. **Sonido**: P5R usa AudioOut (no AudioRenderer). Su mezclador CRI preguntaba `GetAudioOutSampleRate/ChannelCount/
+    SampleFormat/BufferDataSize/Name` a las versiones del SDK, que leían campos que nuestro `OpenDefaultAudioOut` no
+    rellena: todo salía en silencio. Implementados en `hle_audio.cpp`; ahora suenan BGM, vídeos y voces (el log da
+    `audio: AudioOut: peak N, x of 1000 buffers silent`).
+27. **Vídeo que se congelaba** (película del casino tras Nueva partida, a los 424 frames): CRI espera el evento de
+    salida antes de alimentar más, y los frames que el códec soltaba después de la última llamada nunca se anunciaban.
+    Un hilo invitado (`__movie_pump_thread`, `hle_movie.cpp`) vacía el códec cada 2 ms y señala el evento: decodifica a
+    30 fps (antes ~15).
+28. **Launcher** (`games/p5r/java/io/github/p5rrecomp/Launcher.java`): comprueba los datos y el permiso de archivos,
+    opciones guardadas en `config.txt`: **Resolución 720p** (defecto) / 1080p, **30 fps** (defecto) / 60 fps,
+    **contador de FPS desactivado** (defecto), controles táctiles sí/no, tamaño y opacidad de los botones.
+29. **Contador de FPS** (`NX_SHOW_FPS=1`): dibujado por el mismo shader (dígitos en `overlay.glsl`), arriba a la izquierda.
+30. **60 fps** (`NX_FPS_CAP=60`, `games/p5r/game.cpp`): un hilo reescribe el intervalo del motor según el cheat que viene
+    con el dump (`[[[[main+0x2327B60]+0x10]+0x60]+0x8]+0xF14` = 1). En los menús y la película esa cadena acaba en 0
+    (la estructura aún no existe); falta confirmar que se aplica en el campo.
+31. Herramientas de prueba: `games/p5r/tools/tab.py` (capturas, botones, toques, stick/cámara con `input motionevent`),
+    `private/p5r/newgame.sh` (de arrancar al casino), `explore.sh`, `sheet.py` (hoja de capturas tras cada movimiento).
+
+Notas de la sesión 4:
+- Menú de título: [Nueva partida] [Cargar partida] [??]; el cursor empieza en Cargar: IZQUIERDA + A = Nueva partida
+  (esperar ~6 s tras entrar al menú, si no se pierde la pulsación).
+- Casino: tras la primera lámpara, "Saltar hacia abajo" mirando a cámara en la viga de la pantalla roja; luego plataforma
+  rosa → "Escalar" → agentes ("¡Ahí está!") → saltar a los pilares hexagonales → pasarela curva de cristal. Ahí me quedé
+  (no encontré el siguiente punto de acción; la cámara es fija).
+- Tirones de 100–350 ms al cargar escenas (informe `stall:` en el log): para la rama de optimización.
+
 ## Falta ❌ (por orden)
 
-0. **Sonido del vídeo** (lo reportó el usuario): el audio de los USM lo decodifica CRI y sale por nn::audio
-   (`audio: device output (48 kHz stereo s16)` en Android). Mirar si suena el resto del juego (BGM del título); si
-   no suena nada, revisar `hle_audio.cpp` para SDK 13 (P5R) — Wonder usa AudioRenderer de SDK 16.
-
-1. ~~`nn::movie` HLE~~ hecho (puntos 21-23). El juego ya llega aquí: tras el logo de P-STUDIO llama a
-   `movie::BufferC1`, `SetCoreMask`, `Set/GetThreadPriority` y `movie::Decoder::Decoder(type, format, mode, int)`
-   (`main+12785d8`); como el import devuelve 0, crashea con dirección 0x18 (vtable nula). Primero un decodificador
-   falso que devuelva frames NV12 negros con las marcas de tiempo correctas (para que el juego avance), luego
-   `AMediaCodec` VP9 en Android (y quizá libvpx en PC). API: punto 13.
-2. Servicios IPC que pida P5R y Wonder no usaba (ver `nx.log`: `bsd:u`, `ectx:aw` y varios `cmd ... not implemented`).
-3. **Opciones pedidas** (conectar en el launcher de P5R): 720p por defecto (`NX_HANDHELD=1`), opción 1080p;
-   **30 fps por defecto** (`NX_FPS_CAP=30`), opción 60 (parche del cheat: cadena `main+0x2327B60 → +0x10 → +0x60 →
-   +0x8`, escribir `1` en `+0xF14` para 60 o `2` para 30); contador de FPS desactivado por defecto.
-4. **Launcher Android `android/p5r/`** (copiar `android/wonder/`; ajustar `build_apk.sh/.ps1`).
-5. **GPUs**: el runtime exige Vulkan 1.3; los dos dispositivos de prueba tienen 1.1. Fallback con
-   `NX_RENDER_PASS_OBJECTS=1` (no hay `VK_KHR_dynamic_rendering` ni `VK_EXT_extended_dynamic_state` en la Tab M11),
-   y tabla de quirks por vendorID (Adreno 0x5143, Mali 0x13B5, Xclipse 0x144D, PowerVR 0x1010, Maleoon).
-6. **Compilar la `.so` de Android** y copiar ~15 GB de datos.
-7. Arrancar en el dispositivo, leer `nx.log` y depurar.
+1. Terminar el casino (primera batalla: comprobar render de combate) y seguir la historia.
+2. Confirmar el parche de 60 fps en el campo; si no, buscar el campo con `NX_WATCH`.
+3. Guardar/cargar partida (`user/` en la carpeta de datos).
+4. Servicios IPC que pida P5R y Wonder no usaba (`bsd:u`, `ectx:aw`, varios `cmd ... not implemented`).
+5. **GPUs**: tabla de quirks por vendorID (Adreno 0x5143, Mali 0x13B5, Xclipse 0x144D, PowerVR 0x1010, Maleoon) y
+   probar en el Moto G54 (PowerVR, pero solo 4,3 GB libres).
+6. Rendimiento (rama `p5r-opt`): tirones de carga, `NX_REPLAY_THREAD=1`, caché de pipelines.
 
 ### Dispositivos de prueba
 

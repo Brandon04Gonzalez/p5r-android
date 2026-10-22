@@ -18,7 +18,8 @@ $data = "/storage/emulated/0/Persona 5 Royal"
 $run = "$root\private\p5r\runs\$Name"
 New-Item -ItemType Directory -Force $run | Out-Null
 
-$lines = @("NX_FPS_CAP=30", "NX_HANDHELD=1") + @($Env -split ";" | Where-Object { $_ -match "=" })
+# -Env first: the runtime keeps the first value of a key (setenv without overwrite), so -Env wins over the defaults.
+$lines = @($Env -split ";" | Where-Object { $_ -match "=" }) + @("NX_FPS_CAP=30", "NX_HANDHELD=1")
 $cfg = "$run\config.txt"
 [System.IO.File]::WriteAllText($cfg, ($lines -join "`n") + "`n")
 & $adb @dev shell am force-stop $pkg 2>$null

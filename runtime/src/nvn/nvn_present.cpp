@@ -15,6 +15,7 @@
 
 #include "nvn_vk.h"
 #include "platform.h"
+#include "touch_layout.h"
 
 namespace nx::nvn {
 
@@ -386,6 +387,21 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
     // The touch controls (platform_android_input.cpp), in upright uv; none elsewhere.
     plat::OverlayShape shapes[kOverlayMax];
     size_t count = plat::touch_overlay(shapes, kOverlayMax);
+    // NX_SHOW_FPS=1 (the launcher's FPS counter, off by default): presents over the last second, top left.
+    static const bool show_fps = [] {
+        const char* e = std::getenv("NX_SHOW_FPS");
+        return e && e[0] == '1';
+    }();
+    if (show_fps && count < kOverlayMax) {
+        static uint64_t t0 = plat::monotonic_ns(), frames = 0;
+        static uint32_t fps = 0;
+        uint64_t now = plat::monotonic_ns();
+        frames++;
+        if (now - t0 >= 1'000'000'000ull) fps = uint32_t((frames * 1'000'000'000ull + (now - t0) / 2) / (now - t0)), frames = 0, t0 = now;
+        uint32_t v = std::min<uint32_t>(fps, 99);
+        uint32_t label = (plat::kGlyphDigit0 + v / 10) | (plat::kGlyphDigit0 + v % 10) << 5;
+        shapes[count++] = {0.20f, 0.05f, 0.035f, 0.0f, label};
+    }
     auto* dst = reinterpret_cast<float*>(ubo.ptr);
     for (size_t k = 0; k < count; k++)
         dst[4 * k] = shapes[k].x, dst[4 * k + 1] = shapes[k].y, dst[4 * k + 2] = shapes[k].r,

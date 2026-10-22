@@ -1,11 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Persona 5 Royal: a NativeActivity (all code in libp5r.so, android_main), for now without a home screen. The game
-     data (analysis/, extract/romfs/, spirv/ from the player's own dump) lives in Internal storage/Persona 5 Royal,
-     which needs all-files access. A private build for the owner of the game: never published. -->
+<!-- Persona 5 Royal: a NativeActivity (all code in libp5r.so, android_main) behind a home screen with the options
+     (games/p5r/java: Launcher.java, which writes config.txt). The game data (analysis/, extract/romfs/, spirv/ from the
+     player's own dump) lives in Internal storage/Persona 5 Royal, which needs all-files access. A private build for the
+     owner of the game: never published. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.p5rrecomp"
-    android:versionCode="1"
-    android:versionName="0.1.0">
+    android:versionCode="2"
+    android:versionName="0.2.0">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -19,13 +20,25 @@
     <application
         android:label="P5R"
         android:requestLegacyExternalStorage="true"
-        android:hasCode="false"
+        android:hasCode="true"
         android:extractNativeLibs="true"
         android:debuggable="true"
         android:isGame="true"
         android:appCategory="game"
         android:largeHeap="true"
         android:theme="@style/Fullscreen">
+        <!-- Home screen: data check, options (config.txt), then the game. -->
+        <activity
+            android:name=".Launcher"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:screenOrientation="sensorLandscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <!-- The game. Exported: test runs start it directly (games/p5r/tools/run_android.ps1). -->
         <activity
             android:name="android.app.NativeActivity"
             android:exported="true"
@@ -33,10 +46,6 @@
             android:resizeableActivity="false"
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density">
             <meta-data android:name="android.app.lib_name" android:value="p5r" />
-            <intent-filter>
-                <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.LAUNCHER" />
-            </intent-filter>
         </activity>
     </application>
 </manifest>

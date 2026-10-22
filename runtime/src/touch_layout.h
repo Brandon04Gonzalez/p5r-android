@@ -11,7 +11,7 @@ namespace nx::plat {
 // Labels drawn on the buttons: glyphs of kFont in tools/shaders/present/overlay.glsl.
 enum Glyph : uint32_t {
     kGlyphNone, kGlyphA, kGlyphB, kGlyphX, kGlyphY, kGlyphL, kGlyphR, kGlyphZ, kGlyphPlus, kGlyphMinus,
-    kGlyphUp, kGlyphDown, kGlyphLeft, kGlyphRight, kGlyph3,
+    kGlyphUp, kGlyphDown, kGlyphLeft, kGlyphRight, kGlyph3, kGlyphDigit0,  // ..kGlyphDigit0 + 9
 };
 constexpr uint32_t touch_label(Glyph first, Glyph second = kGlyphNone) { return first | uint32_t(second) << 5; }
 

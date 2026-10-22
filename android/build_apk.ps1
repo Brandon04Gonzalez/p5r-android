@@ -43,6 +43,8 @@ $java = "$root\games\$Game\java"
 if (Test-Path $java) {
     $jdk = (Get-ChildItem "C:\Program Files\Microsoft\jdk-*", "C:\Program Files\Java\jdk-*" -Directory -ErrorAction SilentlyContinue |
         Sort-Object Name | Select-Object -Last 1).FullName
+    # else Android Studio's own runtime, which is a full JDK (javac included)
+    if (-not $jdk -and $env:JAVA_HOME -and (Test-Path (Join-Path $env:JAVA_HOME "bin\javac.exe"))) { $jdk = $env:JAVA_HOME }
     if (-not $jdk) { throw "a JDK is needed for games\$Game\java (winget install Microsoft.OpenJDK.17)" }
     New-Item -ItemType Directory -Force "$out\classes", "$out\dex" | Out-Null
     $sources = @((Get-ChildItem $java -Recurse -Filter *.java).FullName)
