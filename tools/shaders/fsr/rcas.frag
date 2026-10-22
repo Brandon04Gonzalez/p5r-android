@@ -1,7 +1,8 @@
 #version 450
+#extension GL_GOOGLE_include_directive : require
 // FSR 1 RCAS (robust contrast adaptive sharpening), after AMD FidelityFX FSR 1.0 (MIT), then the picture fitted into
 // the target: `box` is where the EASU output sits in the upright target, `crop.xy` its size in texels, `crop.z` the
-// sharpness constant exp2(-stops). Outside the box: black.
+// sharpness constant exp2(-stops). Outside the box: black. Over it, the touch controls (../present/overlay.glsl).
 layout(set = 0, binding = 0) uniform sampler2D src;
 layout(push_constant) uniform P {
     vec4 rot;
@@ -11,6 +12,8 @@ layout(push_constant) uniform P {
 } p;
 layout(location = 0) in vec2 uv;
 layout(location = 0) out vec4 color;
+
+#include "../present/overlay.glsl"
 
 void main() {
     vec2 up = mat2(p.rot.xy, p.rot.zw) * uv + p.off.xy;
@@ -32,5 +35,5 @@ void main() {
         float lobe = max(-0.1875, min(max(lobeRGB.r, max(lobeRGB.g, lobeRGB.b)), 0.0)) * p.crop.z;
         c = ((b + d + f + h) * lobe + e) / (4.0 * lobe + 1.0);
     }
-    color = vec4(c, 1.0);
+    color = vec4(overlay(c, up, int(p.off.z), p.off.w), 1.0);
 }

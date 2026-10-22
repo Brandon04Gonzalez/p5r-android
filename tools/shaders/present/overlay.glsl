@@ -1,0 +1,60 @@
+// The touch controls over the picture (platform_android_input.cpp, touch_layout.cpp), shared by present.frag and
+// fsr/rcas.frag: up to 32 circles in upright uv, shape[i] = (x, y, radius in target heights, alpha + 4 * label). A
+// label is up to two 5x7 glyphs of kFont (first + 32 * second), drawn in the middle of the circle with a shadow.
+layout(set = 0, binding = 1) uniform Overlay {
+    vec4 shape[32];
+} ov;
+
+// One row per entry, bit 4 = the left column: 0 none, 1 A, 2 B, 3 X, 4 Y, 5 L, 6 R, 7 Z, 8 +, 9 -, 10 up, 11 down,
+// 12 left, 13 right, 14 3.
+const uint kFont[15 * 7] = uint[](
+    0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u, 0x00u,
+    0x0Eu, 0x11u, 0x11u, 0x1Fu, 0x11u, 0x11u, 0x11u,
+    0x1Eu, 0x11u, 0x11u, 0x1Eu, 0x11u, 0x11u, 0x1Eu,
+    0x11u, 0x11u, 0x0Au, 0x04u, 0x0Au, 0x11u, 0x11u,
+    0x11u, 0x11u, 0x0Au, 0x04u, 0x04u, 0x04u, 0x04u,
+    0x10u, 0x10u, 0x10u, 0x10u, 0x10u, 0x10u, 0x1Fu,
+    0x1Eu, 0x11u, 0x11u, 0x1Eu, 0x14u, 0x12u, 0x11u,
+    0x1Fu, 0x01u, 0x02u, 0x04u, 0x08u, 0x10u, 0x1Fu,
+    0x00u, 0x04u, 0x04u, 0x1Fu, 0x04u, 0x04u, 0x00u,
+    0x00u, 0x00u, 0x00u, 0x1Fu, 0x00u, 0x00u, 0x00u,
+    0x00u, 0x00u, 0x04u, 0x0Eu, 0x1Fu, 0x00u, 0x00u,
+    0x00u, 0x00u, 0x1Fu, 0x0Eu, 0x04u, 0x00u, 0x00u,
+    0x00u, 0x02u, 0x06u, 0x0Eu, 0x06u, 0x02u, 0x00u,
+    0x00u, 0x08u, 0x0Cu, 0x0Eu, 0x0Cu, 0x08u, 0x00u,
+    0x1Eu, 0x01u, 0x01u, 0x0Eu, 0x01u, 0x01u, 0x1Eu);
+
+// Glyph `g` at q (cells: x 0..5 left to right, y 0..7 top to bottom): 1 inside a lit cell.
+float glyph(uint g, vec2 q) {
+    if (g == 0u || g >= 15u || q.x < 0.0 || q.y < 0.0 || q.x >= 5.0 || q.y >= 7.0) return 0.0;
+    uint row = kFont[g * 7u + uint(q.y)];
+    return float((row >> (4u - uint(q.x))) & 1u);
+}
+
+float label(uint g1, uint g2, vec2 q) {
+    return max(glyph(g1, q), glyph(g2, q - vec2(6.0, 0.0)));
+}
+
+// `c` with the first n circles drawn over it; `up` is upright uv, `aspect` the target's width / height.
+vec3 overlay(vec3 c, vec2 up, int n, float aspect) {
+    for (int i = 0; i < n; i++) {
+        vec4 s = ov.shape[i];
+        float id = floor(s.w * 0.25);
+        float a = s.w - id * 4.0;
+        vec2 v = vec2((up.x - s.x) * aspect, up.y - s.y);
+        float d = length(v);
+        if (d < s.z) {
+            c = mix(c, vec3(1.0), a);
+            uint g1 = uint(id) & 31u, g2 = uint(id) >> 5u;
+            if (g1 != 0u) {
+                vec2 q = v / (s.z * 0.1) + vec2(g2 != 0u ? 5.5 : 2.5, 3.5);
+                float k = min(1.0, a * 3.5);
+                c = mix(c, vec3(0.0), 0.6 * k * label(g1, g2, q - vec2(0.35)));
+                c = mix(c, vec3(1.0), k * label(g1, g2, q));
+            }
+        } else if (d < s.z + 0.005) {
+            c = mix(c, vec3(1.0), min(1.0, a * 3.0));
+        }
+    }
+    return c;
+}

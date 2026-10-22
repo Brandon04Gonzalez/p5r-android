@@ -70,9 +70,11 @@ struct PadState {
 };
 void read_pad(PadState& p);  // player 1
 // Touch controls to draw over the picture (touch_layout.cpp, platform_android_input.cpp): circles at x, y (0..1
-// across the landscape screen), radius r (a fraction of its height), opacity alpha. 0 where nothing is drawn.
+// across the landscape screen), radius r (a fraction of its height), opacity alpha, and a label drawn in the middle
+// (touch_label(): up to two glyphs of tools/shaders/present/overlay.glsl; 0 none). 0 where nothing is drawn.
 struct OverlayShape {
     float x, y, r, alpha;
+    uint32_t label = 0;
 };
 size_t touch_overlay(OverlayShape* out, size_t max);
 // Performance hints (perf_hint.cpp; Android ADPF, nothing elsewhere): the calling thread takes part in making frames;

@@ -32,8 +32,26 @@ struct Out {
     std::deque<uint64_t> queued, released;
     std::shared_ptr<EventState> event = std::make_shared<EventState>();
     bool started = false;
+    // statistics since the last log (every 1000 buffers)
+    uint64_t buffers = 0, silent = 0;
+    int peak = 0;
 };
 Out g_out;
+
+// Peak and silence of one appended s16 buffer, logged every 1000 buffers (P5R's CRI mixer had no sound at first).
+void out_stats(uint64_t buf) {
+    const int16_t* pcm = reinterpret_cast<const int16_t*>(ld<uint64_t>(buf));
+    uint64_t n = ld<uint64_t>(buf + 16) / 2;
+    int peak = 0;
+    for (uint64_t k = 0; pcm && k < n; k++) peak = std::max(peak, std::abs(int(pcm[k])));
+    if (g_out.buffers == 0) log("audio: first AudioOut buffer, %llu bytes", (unsigned long long)(n * 2));
+    g_out.peak = std::max(g_out.peak, peak);
+    g_out.silent += peak == 0;
+    if (++g_out.buffers % 1000 == 0) {
+        log("audio: AudioOut: peak %d, %llu of 1000 buffers silent", g_out.peak, (unsigned long long)g_out.silent);
+        g_out.peak = 0, g_out.silent = 0;
+    }
+}
 
 void release(void* ctx) {
     std::lock_guard lk(g_out.lock);
@@ -143,6 +161,7 @@ void GetAudioOutBufferDataPointer(CPU& c) { c.x[0] = ld<uint64_t>(c.x[0]); }
 
 void AppendAudioOutBuffer(CPU& c) {  // (AudioOut*, AudioOutBuffer*)
     std::lock_guard lk(g_out.lock);
+    out_stats(c.x[1]);
     g_out.queued.push_back(c.x[1]);
     g_out.cv.notify_all();
     c.x[0] = 1;  // bool: appended
@@ -157,6 +176,17 @@ void GetReleasedAudioOutBuffer(CPU& c) {
     c.x[0] = g_out.released.front();
     g_out.released.pop_front();
     if (g_out.released.empty()) g_out.event->signaled = false;
+}
+
+// What the output is, for games that ask (P5R's CRI mixer sizes its buffers from these; the sdk's own versions read
+// the fields a real OpenDefaultAudioOut fills, which ours does not): 48 kHz, stereo, PcmInt16 (SampleFormat 2).
+void GetAudioOutSampleRate(CPU& c) { c.x[0] = 48000; }
+void GetAudioOutChannelCount(CPU& c) { c.x[0] = 2; }
+void GetAudioOutSampleFormat(CPU& c) { c.x[0] = 2; }
+void GetAudioOutBufferDataSize(CPU& c) { c.x[0] = ld<uint64_t>(c.x[0] + 16); }
+void GetAudioOutName(CPU& c) {
+    static const char kName[] = "DeviceOut";
+    c.x[0] = reinterpret_cast<uint64_t>(kName);
 }
 
 void ListAudioIns(CPU& c) { c.x[0] = 0; }
@@ -542,6 +572,11 @@ NX_HLE("_ZN2nn5audio21SetAudioOutBufferInfoEPNS0_14AudioOutBufferEPvmm", SetAudi
 NX_HLE("_ZN2nn5audio28GetAudioOutBufferDataPointerEPKNS0_14AudioOutBufferE", GetAudioOutBufferDataPointer);
 NX_HLE("_ZN2nn5audio20AppendAudioOutBufferEPNS0_8AudioOutEPNS0_14AudioOutBufferE", AppendAudioOutBuffer);
 NX_HLE("_ZN2nn5audio25GetReleasedAudioOutBufferEPNS0_8AudioOutE", GetReleasedAudioOutBuffer);
+NX_HLE("_ZN2nn5audio21GetAudioOutSampleRateEPKNS0_8AudioOutE", GetAudioOutSampleRate);
+NX_HLE("_ZN2nn5audio23GetAudioOutChannelCountEPKNS0_8AudioOutE", GetAudioOutChannelCount);
+NX_HLE("_ZN2nn5audio23GetAudioOutSampleFormatEPKNS0_8AudioOutE", GetAudioOutSampleFormat);
+NX_HLE("_ZN2nn5audio25GetAudioOutBufferDataSizeEPKNS0_14AudioOutBufferE", GetAudioOutBufferDataSize);
+NX_HLE("_ZN2nn5audio15GetAudioOutNameEPKNS0_8AudioOutE", GetAudioOutName);
 NX_HLE("_ZN2nn5audio12ListAudioInsEPNS0_11AudioInInfoEi", ListAudioIns);
 NX_HLE("_ZN2nn5audio11OpenAudioInEPNS0_7AudioInEPKcRKNS0_16AudioInParameterE", audio_in_fail);
 NX_HLE("_ZN2nn5audio26InitializeAudioInParameterEPNS0_16AudioInParameterE", zero);
