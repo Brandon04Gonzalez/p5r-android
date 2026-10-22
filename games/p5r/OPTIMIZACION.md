@@ -1,0 +1,42 @@
+# P5R en Android — optimización (rama `p5r-opt`)
+
+Dispositivo: Lenovo Tab M11 (Snapdragon 685, **Adreno 610**, Vulkan 1.1). Mediciones con `private/p5r/ab.sh`
+(pantalla CARGAR, la más pesada que se alcanza sin jugar: título 3D de Shibuya detrás; `NX_GPU_PROFILE=3`, orden
+ABAB para que el calor no sesgue). En el casino jugable: **~13 fps**; en CARGAR: **~7,5 fps**.
+
+## Dónde se va el frame (CARGAR, `NX_GPU_PROFILE=1`, 105 ms de GPU por frame)
+
+| Pase | ms/frame |
+|---|---|
+| 960x540 fs 20ad01e0 (escena 3D; el fs del primer draw es pequeño: el coste es geometría/relleno) | 27,2 |
+| 960x540 fs 62e537d4 | 25,8 |
+| solo profundidad (sombras, 2 pases) | 12,1 |
+| 960x540 fs 40869c9c | 6,8 |
+| compute f82cd07a (skinning por compute, ~180 dispatches/frame) | 5,4 |
+| resto (30 etiquetas) | ~28 |
+
+CPU: el hilo de replay tarda ~33 ms/frame; ~1.265 draws/frame; 16–22 MB/frame copiados de memoria del juego al ring.
+Conclusión: la Adreno 610 está limitada por GPU (≈ 3× por encima de los 33 ms de 30 fps) y el replay por CPU también
+pasa de 33 ms. Para 30 fps estables en esta gama haría falta trabajo grande (caché persistente de búferes de
+vértices, reducir pases/sombras).
+
+## Probado
+
+| Cambio | Resultado (ABAB) | Decisión |
+|---|---|---|
+| `NX_IMAGE_STORAGE=0` (imágenes de color sin uso STORAGE: Adreno conserva UBWC) | GPU 81,6/83,0 → 78,5/79,4 ms; 7,27/7,07 → 7,53/7,40 fps (**−4 %**) | **Por defecto en P5R** (P5R nunca usa imágenes storage) |
+| `NX_RENDER_RES=960x540` (escala 75 %) | GPU ~105–133 → ~83–86 ms; ~5 → ~7,2 fps | **Opción del launcher** "Escala de render 75 % (rendimiento)" |
+| `NX_REPLAY_THREAD=1` | 7,70/7,73 → 7,07/6,97 fps (−9 %) | No |
+| `NX_AFFINITY=2` | 7,60/7,63 → 7,43/7,53 fps | No (neutro/peor) |
+| D24S8 nativo | P5R no usa ese formato (no se llamó nunca) | Revertido |
+| `spirv-opt -O` de los shaders calientes | los fs de los pases caros son pequeños: no es coste de shader | No aplicado |
+
+Ya estaban en el runtime (Wonder): R11G11B10F nativo, MUTABLE_FORMAT con lista (UBWC), resets en hilo janitor,
+envío por trozos, ADPF.
+
+## Siguiente (por impacto estimado)
+
+1. **Caché persistente de búferes** (vértices/índices estáticos en memoria de GPU, invalidada por write-watch): quitaría
+   la mayor parte de los 16–22 MB/frame de copias y parte del replay.
+2. Sombras: resolución de los mapas (12 ms/frame).
+3. Tirones de 100–350 ms al entrar en escenas (`stall:` en el log): compilación de pipelines; precalentar la caché.

@@ -32,6 +32,8 @@ import java.util.Map;
  * storage/Persona 5 Royal (asking for all-files access), shows the options and writes them to that folder's
  * config.txt, whose NX_* lines the runtime turns into its switches:
  *   resolution  720p (NX_HANDHELD=1, default) or 1080p (NX_HANDHELD=0)
+ *   render scale 100% (default) or 75% (NX_RENDER_RES: the game renders for 960x540 / 1440x810 and the picture is
+ *               scaled up; ~20% less GPU time on an Adreno 610, for weak GPUs)
  *   frame rate  30 (NX_FPS_CAP=30, default) or 60 (NX_FPS_CAP=60: games/p5r/game.cpp patches the engine's interval)
  *   FPS counter off (default) or on (NX_SHOW_FPS)
  *   on-screen controls on (default) or off (NX_TOUCH_SHOW), their size (NX_TOUCH_SIZE) and opacity (NX_TOUCH_OPACITY)
@@ -76,8 +78,10 @@ public class Launcher extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
         options.add(new Option("NX_HANDHELD", "Resolución", "Resolution", new String[] {"1", "0"},
                 new String[] {"720p", "1080p"}, new String[] {"720p", "1080p"}, 0));
+        options.add(new Option("RENDER_SCALE", "Escala de render", "Render scale", new String[] {"100", "75"},
+                new String[] {"100%", "75% (rendimiento)"}, new String[] {"100%", "75% (performance)"}, 0));
         options.add(new Option("NX_FPS_CAP", "Fotogramas por segundo", "Frame rate", new String[] {"30", "60"},
-                new String[] {"30 fps", "60 fps"}, new String[] {"30 fps", "60 fps"}, 0));
+                new String[] {"30 fps", "60 fps (experimental)"}, new String[] {"30 fps", "60 fps (experimental)"}, 0));
         options.add(new Option("NX_SHOW_FPS", "Contador de FPS", "FPS counter", new String[] {"0", "1"},
                 new String[] {"Desactivado", "Activado"}, new String[] {"Off", "On"}, 0));
         options.add(new Option("NX_TOUCH_SHOW", "Controles táctiles", "On-screen controls", new String[] {"1", "0"},
@@ -233,6 +237,11 @@ public class Launcher extends Activity {
         if (!hasAccess() || !dataDir().isDirectory()) return;
         load();
         for (Option o : options) config.put(o.key, o.values[o.pick]);
+        // RENDER_SCALE is the launcher's own key; the runtime reads NX_RENDER_RES, which follows the resolution.
+        if ("75".equals(config.get("RENDER_SCALE")))
+            config.put("NX_RENDER_RES", "1".equals(config.get("NX_HANDHELD")) ? "960x540" : "1440x810");
+        else
+            config.remove("NX_RENDER_RES");
         try (FileWriter w = new FileWriter(new File(dataDir(), "config.txt"))) {
             for (Map.Entry<String, String> e : config.entrySet()) w.write(e.getKey() + "=" + e.getValue() + "\n");
         } catch (Exception ignored) {
