@@ -184,7 +184,14 @@ GpuImage* image_of(uint64_t guest) {
     {
         VkFormatProperties fp{};
         p_vkGetPhysicalDeviceFormatProperties(vk_physical(), ci.format, &fp);
-        img->storage = !compressed && !aspect && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
+        // NX_IMAGE_STORAGE=0: no colour image can be a storage image. STORAGE usage turns Adreno's framebuffer
+        // compression (UBWC) off for the image, and some games never bind one (P5R: "storage image 0" in the pool
+        // peaks; games/p5r/game.cpp makes it its default). A storage view of such an image gets the dummy (logged).
+        static const bool no_storage = [] {
+            const char* e = std::getenv("NX_IMAGE_STORAGE");
+            return e && e[0] == '0';
+        }();
+        img->storage = !no_storage && !compressed && !aspect && (fp.optimalTilingFeatures & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT);
         if (img->storage) ci.usage |= VK_IMAGE_USAGE_STORAGE_BIT;
     }
     ci.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;

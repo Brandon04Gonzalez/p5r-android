@@ -95,6 +95,13 @@ NX_HLE("glslcGetDefaultOptions", glslc_nop);
 NX_HLE("glslcGetVersion", glslc_nop);
 
 void game::after_init() {
+    // P5R never binds a storage image: colour images without STORAGE keep Adreno's framebuffer compression
+    // (nvn_image.cpp). config.txt's NX_IMAGE_STORAGE=1 brings it back.
+#if defined(_WIN32)
+    if (!std::getenv("NX_IMAGE_STORAGE")) _putenv_s("NX_IMAGE_STORAGE", "0");
+#else
+    setenv("NX_IMAGE_STORAGE", "0", 0);
+#endif
     const char* cap = std::getenv("NX_FPS_CAP");
     if (cap && std::atoi(cap) >= 60) {
         const LoadedModule* m = module_at(find_symbol("nnMain"));

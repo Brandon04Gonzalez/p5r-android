@@ -1127,6 +1127,10 @@ VkImageView storage_view(VkCommandBuffer cb, uint64_t texture, const ImageShape&
         v.levels = 1, v.swizzle = 0;  // storage views: one level, identity
         if (VkImageView iv = view_of(*img, view_type(shape), v)) return iv;
     }
+    if (img && !img->storage) {
+        static uint64_t n = 0;
+        if (n++ % 1000 == 0) log("nvn/vk: storage view of an image made without STORAGE (%llu so far): the dummy", (unsigned long long)n);
+    }
     static std::map<VkImageViewType, GpuImage> dummies;
     VkImageViewType type = view_type(shape);
     auto& d = dummies[type];
