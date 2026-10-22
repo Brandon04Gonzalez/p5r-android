@@ -185,12 +185,19 @@ Notas de la sesión 4:
   rosa → "Escalar" → agentes ("¡Ahí está!") → saltar a los pilares hexagonales → pasarela curva de cristal. Ahí me quedé
   (no encontré el siguiente punto de acción; la cámara es fija). En otra partida, desde los pilares hexagonales
   ("0 1", "1 1" + A) Joker siguió por una pasarela rosa con diálogos del equipo por el auricular hasta una lámpara
-  redonda con pantallas (cámara fija, Joker casi fuera de cuadro). Ahí quedó.
+  redonda con pantallas (cámara fija, Joker casi fuera de cuadro).
+- **Explorador automático** (`private/p5r/auto_explore.py SEGUNDOS [cada]`, `STEP_MS=250..450`): camina en una
+  dirección pulsando A tras cada paso, gira cuando no hay corte de cámara y guarda una hoja de miniaturas en
+  `private/p5r/shots/auto.png`. Así pasó el casino: lámparas → pasarela de cristal → letrero CASINO → **primera
+  batalla (ganada con A; combate y pantalla VICTORY se ven bien)** → salón de suelo a cuadros → pasillo ("¡Venga,
+  corre!") → almacén de jaulas azul, donde el explorador dio vueltas 15 min sin encontrar la salida (hay una puerta
+  hacia el fondo; probar a mano).
+- Combate en la tablet: se ve bien (efectos de fuego, VICTORY); los comandos con A (atacar) bastan para ganarlo.
 - Tirones de 100–350 ms al cargar escenas (informe `stall:` en el log): para la rama de optimización.
 
 ## Falta ❌ (por orden)
 
-1. Terminar el casino (primera batalla: comprobar render de combate) y seguir la historia.
+1. Terminar el casino (salir del almacén de jaulas) y seguir la historia. La primera batalla ya está comprobada.
 2. Confirmar el parche de 60 fps en el campo; si no, buscar el campo con `NX_WATCH`.
 3. Guardar/cargar partida (`user/` en la carpeta de datos).
 4. Servicios IPC que pida P5R y Wonder no usaba (`bsd:u`, `ectx:aw`, varios `cmd ... not implemented`).
