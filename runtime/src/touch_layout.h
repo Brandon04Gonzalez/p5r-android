@@ -30,6 +30,11 @@ float touch_opacity_scale();
 uint64_t touch_hit(float x, float y, float aspect);
 // The other half of the screen (not the stick's), where no button is, drags the right stick (P5R: the camera).
 bool touch_right_stick();
+constexpr float kStickRing = 0.12f;  // the stick ring's radius at rest, a fraction of the screen height
+// Where the stick's ring is drawn at rest (x, y across the screen, r a fraction of its height). The left stick takes
+// the touches of that half of the screen that miss the buttons.
+void touch_stick_rest(float& x, float& y, float& r);
+bool touch_stick_side(float x);  // x (0..1 across the screen) is on the stick's half
 // What the left stick pushed nearly all the way also holds (Wonder: Y, dash), or 0.
 uint64_t touch_stick_full_button();
 

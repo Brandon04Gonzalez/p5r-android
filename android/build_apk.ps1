@@ -28,7 +28,18 @@ New-Item -ItemType Directory -Force "$out\lib\arm64-v8a", "$out\res" | Out-Null
 & "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" --strip-unneeded -o "$out\lib\arm64-v8a\lib$Game.so" "$build\lib$Game.so"
 
 & "$bt\aapt2.exe" compile --dir "$PSScriptRoot\res" -o "$out\res.zip"
-& "$bt\aapt2.exe" link -o "$out\base.apk" -I $jar --manifest "$root\games\$Game\AndroidManifest.xml" "$out\res.zip"
+# The game's own launcher icon, when the player made it from their dump (private\<game>\icon\res, e.g.
+# games\p5r\tools\nsp_icon.py): compiled with the rest, and the manifest copy names it.
+$manifest = "$root\games\$Game\AndroidManifest.xml"
+$resZips = @("$out\res.zip")
+if (Test-Path "$priv\icon\res") {
+    & "$bt\aapt2.exe" compile --dir "$priv\icon\res" -o "$out\icon.zip"
+    $resZips += "$out\icon.zip"
+    $text = [System.IO.File]::ReadAllText($manifest) -replace '<application', '<application android:icon="@mipmap/ic_launcher"'
+    $manifest = "$out\AndroidManifest.xml"
+    [System.IO.File]::WriteAllText($manifest, $text)
+}
+& "$bt\aapt2.exe" link -o "$out\base.apk" -I $jar --manifest $manifest @resZips
 if ($LASTEXITCODE) { throw "aapt2 link failed" }
 
 # Add the native library (stored uncompressed would need page alignment; compressed + extractNativeLibs is fine).

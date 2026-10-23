@@ -36,7 +36,9 @@ import java.util.Map;
  *               own. (A lower render resolution needs the engine's target sizes: games/p5r/PROGRESO.md.)
  *   frame rate  30 (NX_FPS_CAP=30, default) or 60 (NX_FPS_CAP=60: games/p5r/game.cpp patches the engine's interval)
  *   FPS counter off (default) or on (NX_SHOW_FPS)
- *   on-screen controls on (default) or off (NX_TOUCH_SHOW), their size (NX_TOUCH_SIZE) and opacity (NX_TOUCH_OPACITY)
+ *   shadows     off (NX_SHADOWS=0, default: the shadow maps are not drawn, ~9% of the GPU on the 3D title) or on
+ *   on-screen controls on (default) or off (NX_TOUCH_SHOW), their size (NX_TOUCH_SIZE) and opacity (NX_TOUCH_OPACITY),
+ *               and where they are (NX_TOUCH_LAYOUT, written by ControlsEditor)
  * Other lines of config.txt are kept as they were. A private build for the owner of the game: never published.
  */
 public class Launcher extends Activity {
@@ -66,7 +68,7 @@ public class Launcher extends Activity {
 
     String t(String spanish, String english) { return es ? spanish : english; }
 
-    File dataDir() { return new File(Environment.getExternalStorageDirectory(), DATA); }
+    static File dataDir() { return new File(Environment.getExternalStorageDirectory(), DATA); }
 
     boolean hasAccess() { return Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager(); }
 
@@ -82,6 +84,8 @@ public class Launcher extends Activity {
                 new String[] {"Bajos", "Medios", "Altos"}, new String[] {"Low", "Medium", "High"}, 0));
         options.add(new Option("NX_FPS_CAP", "Fotogramas por segundo", "Frame rate", new String[] {"30", "60"},
                 new String[] {"30 fps", "60 fps (experimental)"}, new String[] {"30 fps", "60 fps (experimental)"}, 0));
+        options.add(new Option("NX_SHADOWS", "Sombras", "Shadows", new String[] {"0", "1"},
+                new String[] {"Desactivadas", "Activadas"}, new String[] {"Off", "On"}, 0));
         options.add(new Option("NX_SHOW_FPS", "Contador de FPS", "FPS counter", new String[] {"0", "1"},
                 new String[] {"Desactivado", "Activado"}, new String[] {"Off", "On"}, 0));
         options.add(new Option("NX_TOUCH_SHOW", "Controles táctiles", "On-screen controls", new String[] {"1", "0"},
@@ -146,6 +150,33 @@ public class Launcher extends Activity {
             value.setTag(o);
             root.addView(row);
         }
+
+        LinearLayout edit = new LinearLayout(this);
+        edit.setOrientation(LinearLayout.HORIZONTAL);
+        edit.setGravity(Gravity.CENTER_VERTICAL);
+        edit.setPadding(0, dp(4), 0, dp(4));
+        TextView editName = new TextView(this);
+        editName.setText(t("Posición de los controles", "Controls position"));
+        editName.setTextColor(Color.WHITE);
+        editName.setTextSize(17);
+        edit.addView(editName, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        Button editButton = new Button(this);
+        editButton.setAllCaps(false);
+        editButton.setMinWidth(dp(180));
+        editButton.setText(t("Mover", "Move"));
+        edit.addView(editButton);
+        editButton.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                if (!hasAccess()) {
+                    askAccess();
+                    return;
+                }
+                save();
+                startActivity(new Intent(Launcher.this, ControlsEditor.class));
+            }
+        });
+        root.addView(edit);
 
         play = new Button(this);
         play.setTextSize(20);
@@ -219,18 +250,33 @@ public class Launcher extends Activity {
         }
     }
 
-    void load() {
-        config.clear();
-        File f = new File(dataDir(), "config.txt");
-        if (!f.canRead()) return;
+    // config.txt: KEY=value lines, in order.
+    static Map<String, String> readConfig(File f) {
+        Map<String, String> out = new LinkedHashMap<>();
+        if (!f.canRead()) return out;
         try (BufferedReader r = new BufferedReader(new FileReader(f))) {
             for (String line; (line = r.readLine()) != null; ) {
                 line = line.trim();
                 int eq = line.indexOf('=');
-                if (eq > 0) config.put(line.substring(0, eq), line.substring(eq + 1));
+                if (eq > 0) out.put(line.substring(0, eq), line.substring(eq + 1));
             }
         } catch (Exception ignored) {
         }
+        return out;
+    }
+
+    static boolean writeConfig(File f, Map<String, String> config) {
+        try (FileWriter w = new FileWriter(f)) {
+            for (Map.Entry<String, String> e : config.entrySet()) w.write(e.getKey() + "=" + e.getValue() + "\n");
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    void load() {
+        config.clear();
+        config.putAll(readConfig(new File(dataDir(), "config.txt")));
     }
 
     void save() {
@@ -244,10 +290,7 @@ public class Launcher extends Activity {
         final String preset = config.get("GRAPHICS");
         if ("low".equals(preset)) config.put("NX_LOD_BIAS", "1");
         else if ("medium".equals(preset)) config.put("NX_LOD_BIAS", "0.5");
-        try (FileWriter w = new FileWriter(new File(dataDir(), "config.txt"))) {
-            for (Map.Entry<String, String> e : config.entrySet()) w.write(e.getKey() + "=" + e.getValue() + "\n");
-        } catch (Exception ignored) {
-        }
+        writeConfig(new File(dataDir(), "config.txt"), config);
     }
 
     int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }

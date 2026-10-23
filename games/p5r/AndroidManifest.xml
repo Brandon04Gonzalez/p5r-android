@@ -38,6 +38,13 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Where the on-screen controls go (NX_TOUCH_LAYOUT), full screen like the game. -->
+        <activity
+            android:name=".ControlsEditor"
+            android:exported="false"
+            android:theme="@style/Fullscreen"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
         <!-- The game. Exported: test runs start it directly (games/p5r/tools/run_android.ps1). -->
         <activity
             android:name="android.app.NativeActivity"

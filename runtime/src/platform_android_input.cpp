@@ -176,7 +176,7 @@ int32_t on_input(android_app*, AInputEvent* e) {
         touch_buttons(drawn);
         if (drawn) {  // a drawn layout (touch_layout.cpp): its buttons first, the rest of the left half is the stick
             uint64_t b = touch_hit(x / g_w, y / g_h, g_w / g_h);
-            bool left = !b && (touch_mirrored() ? x > g_w * 0.5f : x < g_w * 0.5f);
+            bool left = !b && touch_stick_side(x / g_w);
             Stick stick = b ? kNoStick : left ? kLeftStick : touch_right_stick() ? kRightStick : kNoStick;
             if (b || stick) g_touches.push_back({AMotionEvent_getPointerId(e, index), x, y, x, y, stick, b, now});
         } else {
@@ -277,9 +277,13 @@ size_t touch_overlay(OverlayShape* out, size_t max) {
         out[k++] = {t.x0 / g_w, t.y0 / g_h, r, std::min(1.0f, 0.14f * shade)};
         out[k++] = {(t.x0 / g_h + dx * s) * g_h / g_w, t.y0 / g_h + dy * s, 0.055f, std::min(1.0f, 0.45f * shade)};
     };
-    if (stick) draw_stick(*stick);
-    else if (k < max)
-        out[k++] = {touch_mirrored() ? 0.85f : 0.15f, 0.72f, 0.12f, std::min(1.0f, 0.08f * shade)};  // where the stick goes
+    if (stick) {
+        draw_stick(*stick);
+    } else if (k < max) {  // where the stick goes
+        float sx, sy, sr;
+        touch_stick_rest(sx, sy, sr);
+        out[k++] = {sx, sy, sr, std::min(1.0f, 0.08f * shade)};
+    }
     if (camera) draw_stick(*camera);
     return k;
 }

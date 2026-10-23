@@ -8,7 +8,9 @@
 //
 // Persona 5 Royal, landscape: the four face buttons in the Switch diamond at the bottom right (A confirm/talk, B back,
 // X menu, Y), L / ZL and R / ZR stacked in the top corners, - and + at the top centre, the d-pad on the left above
-// the stick. The left half is the stick; the rest of the right half drags the right stick (the camera).
+// the stick, with a gap (the d-pad's down arrow touched the stick's ring). The left half is the stick; the rest of
+// the right half drags the right stick (the camera). The launcher's editor (games/p5r/java: ControlsEditor.java, which
+// has a copy of this table) moves any of them, the stick's ring included (NX_TOUCH_LAYOUT).
 //
 // Games without a layout here keep their own touch handling (Hades: zones around the thumb).
 //
@@ -59,10 +61,10 @@ const Named kP5R[] = {
     {"ZL", {0.055f, 0.24f, 0.052f, kZL, touch_label(kGlyphZ, kGlyphL)}},
     {"MINUS", {0.440f, 0.07f, 0.045f, kMinus, touch_label(kGlyphMinus)}},
     {"PLUS", {0.560f, 0.07f, 0.045f, kPlus, touch_label(kGlyphPlus)}},
-    {"UP", {0.135f, 0.37f, 0.048f, kUp, touch_label(kGlyphUp)}},
-    {"DOWN", {0.135f, 0.55f, 0.048f, kDown, touch_label(kGlyphDown)}},
-    {"LEFT", {0.085f, 0.46f, 0.048f, kLeft, touch_label(kGlyphLeft)}},
-    {"RIGHT", {0.185f, 0.46f, 0.048f, kRight, touch_label(kGlyphRight)}},
+    {"UP", {0.135f, 0.31f, 0.048f, kUp, touch_label(kGlyphUp)}},
+    {"DOWN", {0.135f, 0.49f, 0.048f, kDown, touch_label(kGlyphDown)}},
+    {"LEFT", {0.085f, 0.40f, 0.048f, kLeft, touch_label(kGlyphLeft)}},
+    {"RIGHT", {0.185f, 0.40f, 0.048f, kRight, touch_label(kGlyphRight)}},
 };
 
 struct Layout {
@@ -71,11 +73,12 @@ struct Layout {
     size_t count;
     bool right_stick;
     uint64_t stick_full;
+    float stick_x, stick_y;  // where the stick's ring is drawn at rest (radius kStickRing)
 };
 
 const Layout kLayouts[] = {
-    {"wonder", kWonder, std::size(kWonder), false, kY},
-    {"p5r", kP5R, std::size(kP5R), true, 0},
+    {"wonder", kWonder, std::size(kWonder), false, kY, 0.15f, 0.72f},
+    {"p5r", kP5R, std::size(kP5R), true, 0, 0.15f, 0.76f},
 };
 
 const Layout* layout() {
@@ -87,35 +90,44 @@ const Layout* layout() {
     return l;
 }
 
+// NX_TOUCH_LAYOUT=A:x,y,r;B:...: the launcher's place for `name` (x, y across the screen, r a fraction of its height).
+bool layout_entry(const char* name, float& x, float& y, float& r) {
+    const char* e = std::getenv("NX_TOUCH_LAYOUT");
+    if (!e) return false;
+    const std::string all = e;
+    const size_t len = std::strlen(name);
+    size_t pos = 0;
+    while (pos < all.size()) {
+        size_t end = all.find(';', pos);
+        if (end == std::string::npos) end = all.size();
+        const std::string item = all.substr(pos, end - pos);
+        pos = end + 1;
+        float ix, iy, ir;
+        if (item.size() <= len || item.compare(0, len, name) != 0 || item[len] != ':' ||
+            std::sscanf(item.c_str() + len + 1, "%f,%f,%f", &ix, &iy, &ir) != 3)
+            continue;
+        if (ix < 0 || ix > 1 || iy < 0 || iy > 1 || ir <= 0.01f || ir >= 0.3f) return false;
+        x = ix, y = iy, r = ir;
+        return true;
+    }
+    return false;
+}
+
 int env_int(const char* name, int fallback) {
     const char* e = std::getenv(name);
     return e && *e ? std::atoi(e) : fallback;
 }
 
-// The layout as the launcher set it (config.txt, which becomes the environment): NX_TOUCH_LAYOUT=A:x,y,r;B:... replaces
-// the positions and radii of the named buttons, NX_TOUCH_SIZE (50..160, percent) scales every radius. Read once.
+// The layout as the launcher set it (config.txt, which becomes the environment): NX_TOUCH_LAYOUT replaces the positions
+// and radii of the named buttons, NX_TOUCH_SIZE (50..160, percent) scales every radius. Read once.
 const std::vector<TouchButton>& buttons() {
     static const std::vector<TouchButton> v = [] {
         std::vector<TouchButton> out;
         const Layout* l = layout();
         if (!l) return out;
-        for (size_t k = 0; k < l->count; k++) out.push_back(l->buttons[k].b);
-        if (const char* e = std::getenv("NX_TOUCH_LAYOUT")) {
-            std::string all = e;
-            size_t pos = 0;
-            while (pos < all.size()) {
-                size_t end = all.find(';', pos);
-                if (end == std::string::npos) end = all.size();
-                std::string item = all.substr(pos, end - pos);
-                pos = end + 1;
-                size_t colon = item.find(':');
-                float x, y, r;
-                if (colon == std::string::npos || std::sscanf(item.c_str() + colon + 1, "%f,%f,%f", &x, &y, &r) != 3) continue;
-                for (size_t k = 0; k < out.size(); k++)
-                    if (item.compare(0, colon, l->buttons[k].name) == 0 && x >= 0 && x <= 1 && y >= 0 && y <= 1 &&
-                        r > 0.01f && r < 0.3f)
-                        out[k].x = x, out[k].y = y, out[k].r = r;
-            }
+        for (size_t k = 0; k < l->count; k++) {
+            out.push_back(l->buttons[k].b);
+            layout_entry(l->buttons[k].name, out[k].x, out[k].y, out[k].r);
         }
         float scale = float(std::clamp(env_int("NX_TOUCH_SIZE", 100), 50, 160)) / 100.0f;
         for (auto& b : out) b.r *= scale;
@@ -157,6 +169,27 @@ const TouchButton* touch_buttons(size_t& count) {
 
 bool touch_right_stick() { return layout() && layout()->right_stick; }
 
+// The stick's ring at rest: the layout's place (NX_TOUCH_MIRROR=1: mirrored), or the launcher's (STICK:x,y,r).
+void touch_stick_rest(float& x, float& y, float& r) {
+    struct Rest {
+        float x, y, r;
+    };
+    static const Rest rest = [] {
+        const Layout* l = layout();
+        Rest v{l ? l->stick_x : 0.15f, l ? l->stick_y : 0.72f, kStickRing};
+        if (touch_mirrored()) v.x = 1 - v.x;
+        layout_entry("STICK", v.x, v.y, v.r);
+        return v;
+    }();
+    x = rest.x, y = rest.y, r = rest.r;
+}
+
+bool touch_stick_side(float x) {
+    float sx, sy, sr;
+    touch_stick_rest(sx, sy, sr);
+    return sx < 0.5f ? x < 0.5f : x >= 0.5f;
+}
+
 uint64_t touch_stick_full_button() { return layout() ? layout()->stick_full : 0; }
 
 uint64_t touch_hit(float x, float y, float aspect) {
@@ -178,7 +211,9 @@ size_t touch_overlay(OverlayShape* out, size_t max) {
     size_t n = 0, k = 0;
     const TouchButton* b = touch_buttons(n);
     for (; k < n && k < max; k++) out[k] = {b[k].x, b[k].y, b[k].r, 0.22f, b[k].label};
-    if (k < max) out[k++] = {0.15f, 0.72f, 0.12f, 0.10f};  // where the stick usually goes
+    float sx, sy, sr;
+    touch_stick_rest(sx, sy, sr);
+    if (k < max) out[k++] = {sx, sy, sr, 0.10f};  // where the stick usually goes
     return k;
 }
 #endif
