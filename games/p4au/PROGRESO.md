@@ -1,6 +1,6 @@
 # Port nativo de Persona 4 Arena Ultimax a Android — progreso
 
-Última actualización: 2026-10-23 (sesión 1, noche)
+Última actualización: 2026-10-23 (sesión 2, mañana: prueba en la tablet)
 
 ## Estado en una línea
 
@@ -10,6 +10,10 @@ título, menú principal en 3D, submenú de historia y selección de capítulo (
 x86_64 (`P4AU_Dev`, Vulkan 1.3 de gfxstream sobre la RTX 4060) a 46–60 fps. **Sonido**: AudioRenderer del SDK en
 proceso (arreglado para el SDK 12.3.3, punto 16) y `hwopus` con libopus (música/voces Opus). **Los combates funcionan** en PC (60 fps) y en el emulador (Yu contra
 Yosuke en la lección 1: personajes, Persona, efectos, HUD y escenario se ven bien).
+
+**En la tablet (Lenovo Tab M11, Adreno 610) también funciona** (sesión 2): menús, Arcade completo hasta el combate,
+controles táctiles y sonido. Pero el combate va a **~30 fps**, y como la lógica cuenta frames, **a media velocidad**
+(punto 22).
 
 ## Cómo funciona el port
 
@@ -146,16 +150,59 @@ Emulador: AVD propia **`P4AU_Dev`** (Android 15 x86_64, 40 GB de datos, 8 núcle
     ~10 s y traer `profile.txt` (líneas: hilo, lr del invitado, pila del host). En Git Bash usar rutas `C:/...` para los
     archivos locales cuando `MSYS_NO_PATHCONV=1`. En PC el perfilador no existe.
 
+### Sesión 2 (2026-10-23, mañana) — prueba en la tablet
+
+Dispositivo: Lenovo Tab M11 (`HA269JK2`, TB331FC): Snapdragon 685, **Adreno 610** (Vulkan 1.1), 8 GB, Android 14,
+panel 1200×1920 **solo a 90 Hz** (un único modo de pantalla). Capturas y logs en `private\p4au\runs\tab1`…`tab11`.
+
+18. **Datos reducidos para la tablet**: tenía 8,6 GB libres y los datos ocupan 15,5 GB. Con
+    `C:\Users\brand\p4au-port\tools\subset.py` se copian 7,2 GB (4.317 archivos) a
+    `Persona 4 Arena Ultimax/extract/romfs`: solo español/inglés, voces y películas en inglés (más los 62 archivos
+    pequeños de `sound/voice` que el juego abre igualmente, como `ns00.pac`), sin los recursos de novela visual de
+    `story/` (BG, CG, avatar, se, Voice…) ni los créditos. **El Modo Historia no tiene sus datos en la tablet.** Los
+    archivos se eligieron con una prueba en PC con `NX_TRACE_FS=1` (menús + combate): ninguno falta. Quedan 1,3 GB
+    libres. No se borró nada de la tablet.
+19. **Funciona en la tablet**: arranque, aviso de guardado (crea la partida), logos, película de apertura, título,
+    menú principal 3D, COMBATE → **Modo Arcade completo**: selección de mando, de personaje (Yu: tipo, color),
+    dificultad, introducción, charla previa (se salta con +) y **combate contra Chie**: personajes, Izanagi, golpes,
+    contador de hits, HUD y menú de pausa se ven bien. Sin errores en el log.
+20. **Controles táctiles**: todos los botones responden (probados con `adb shell input swipe` sobre cada botón). El
+    juego ocupa 1920×1080 de los 1920×1200 de la pantalla y los botones se dibujan encima de la imagen.
+21. **Sonido** en la tablet: AAudio en marcha (`192 frames per burst`), `audio: N frames rendered` y
+    `hwopus: 6000 packets decoded, peak 32768`: hay música y voces (sin comprobar de oído).
+22. **Rendimiento (el problema)**: menús 44–51 fps, selección de capítulo 44 fps, **combate 27–32 fps**. El reloj del
+    combate bajó de 76 a 65 en ~21 s reales: **el juego va a ~55 % de velocidad** (la lógica avanza un paso por
+    frame). La línea de tiempo (`NX_TRACE_TIMELINE=3000`, `runs\tab9`) muestra todo en serie en el hilo del juego,
+    ~34 ms por frame: lógica y grabación ~8–10 ms, replay ~9–10 ms y **`gpu_present` ~15 ms bloqueado**
+    (`vkAcquireNextImageKHR`/`vkQueuePresentKHR`: no son esperas de fences, que suman 0,1 ms). El hilo está en CPU solo
+    el ~30 % del tiempo: **no es la CPU**. Pruebas que **no cambian nada** (todas ~28–30 fps en combate):
+    `NX_REPLAY_THREAD=1` (present pasa a 21 ms), `NX_FIFO=1`, `NX_WINDOW_HZ=0`, `NX_RENDER_RES=960x540` (P4AU lo
+    ignora: siempre dibuja a 1280×768). Medidas de GPU contradictorias: `NX_GPU_PROFILE=1` (espera cada envío) da
+    **15 ms de GPU por frame** (7 ms en un solo pase de 1280×768, `fs ed25b265a8db96b2`), y `NX_GPU_PROFILE=3`
+    (sin esperas) da **31–34 ms**. Incluso en una pantalla casi vacía (aviso de guardado, replay 0,5 ms) el present
+    bloquea 16,6 ms y no pasa de 51 fps. La Tab M11 no expone la frecuencia de la GPU (`/sys/class/kgsl`: permiso
+    denegado).
+23. La selección de capítulo de historia tampoco responde en la tablet, pero **B sí funciona en ella** (abre "¿Volver
+    al menú principal?"): el juego lee la entrada; lo que ignora es A y la cruceta (pista para el punto 14).
+
+Herramientas nuevas (en `C:\Users\brand\p4au-port\tools`): `tab.sh` (`shot <png>`, `press <botón> [ms]` sobre los
+botones táctiles, `log <destino>`, `fps`) y `tabfight.sh <nombre> "<env>"` (arranca el juego en la tablet y llega solo
+a un combate de Arcade, Yu contra Chie, en ~85 s; necesita la partida ya creada).
+
 Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (en un submenú
 pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto).
 
 ## Falta ❌ (por orden)
 
-1. La selección de capítulo de historia que no responde (punto 14) y comprobar Arcade/Versus completos.
-2. Sonido: comprobar de oído en el emulador/móvil (ya se renderiza y se decodifica Opus, punto 16).
-3. Probar en un móvil real (arm64: Adreno/Mali/PowerVR) copiando los datos a `Persona 4 Arena Ultimax/`.
-4. Controles táctiles pensados para lucha (ahora son los de P5R sin la mitad de cámara).
-5. Rendimiento en gama media.
+1. **Rendimiento en la tablet** (punto 22): el combate a 30 fps va a media velocidad. Averiguar qué bloquea
+   `gpu_present` (perfetto con frecuencia de GPU y etapas de render de Adreno; marcas `tl()` dentro de `gpu_present`
+   para separar acquire, pase de presentación y `vkQueuePresentKHR`) y por qué la GPU mide 15 ms con esperas y 31 ms
+   sin ellas. Si la GPU de verdad no llega, bajar la resolución interna (P4AU ignora `NX_RENDER_RES`: buscar dónde
+   fija 1280×768) o probar la caché de pases.
+2. La selección de capítulo de historia que no responde (punto 14; B sí funciona, punto 23) y comprobar Versus.
+3. Sonido: comprobar de oído en la tablet (ya se renderiza y se decodifica Opus, puntos 16 y 21).
+4. Controles táctiles pensados para lucha (ahora son los de P5R sin la mitad de cámara; tapan parte de la imagen).
+5. Probar en otros móviles (Mali/PowerVR) y gama media.
 
 ## Notas
 
