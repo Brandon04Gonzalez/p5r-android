@@ -84,6 +84,14 @@ namespace nx::nvn::replay {
 
 // nvn_dedup.cpp: one copy per submit of the same guest bytes (padded to `padded` with zeros).
 Upload dedup_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t align);
+// NX_UPLOAD_STATS=1: what the copies are (set by the callers around them) and how much of each is the same as the
+// last copy of that address and size (hashed: costs time).
+enum UploadKind : uint8_t { kUploadOther, kUploadVertex, kUploadIndex, kUploadBlock, kUploadKinds };
+extern UploadKind g_upload_kind;  // also: only guest buffers (not kUploadOther) go through the buffer cache
+// nvn_buffer_cache.cpp: copies of guest buffers kept across submits while their bytes stay the same.
+bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t align, Upload& out);
+void cache_begin_submit();  // frees the copies retired submits read
+void cache_log();
 void dedup_reset();                                     // at each submit
 void dedup_invalidate(const uint8_t* p, uint64_t size);  // guest bytes written during the replay
 void dedup_log();

@@ -328,6 +328,7 @@ bool async_gpu() {
 
 FrameTimes& frame_times() { return g_times; }
 uint64_t frame_completed() { return g_completed; }
+uint64_t frame_recording_serial() { return g_submitted + 1; }  // the serial the submit being recorded will get
 
 void frame_init(VkCommandPool pool, uint32_t family, VkBuffer ring, uint8_t* ring_ptr, uint64_t ring_size) {
     // NX_ASYNC_GPU=1 (or 2): two frames in flight; 3 or 4: that many. A frame is a submit and a present, a slot each.

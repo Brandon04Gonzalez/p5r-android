@@ -204,7 +204,9 @@ bool draw_inputs(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const C
         const Range& r = g_state.vertex_buffers[s];
         const uint8_t* p = r.address ? guest_bytes(r.address) : nullptr;
         uint64_t size = p ? std::min<uint64_t>(r.size, 64ull << 20) : 0;
+        g_upload_kind = kUploadVertex;
         in.vertex[s] = read_upload(cb, p, size, std::max<uint64_t>((size + 15) & ~15ull, 16), 16);
+        g_upload_kind = kUploadOther;
     }
     if (!indexed) return true;
     uint32_t count = uint32_t(c.i[0]);

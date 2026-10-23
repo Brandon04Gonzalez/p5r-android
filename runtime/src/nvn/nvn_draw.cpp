@@ -298,6 +298,35 @@ bool shadow_draw_skipped(const Targets& t) {
     return d && d->width == d->height && d->width >= 512 && !(d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
 }
 
+// Live experiments while playing (debugging HUD glitches without a restart): a file named live_flags in the data
+// folder holds words, read about once a second while it exists (removing it turns them off). ui_always: draws into a
+// 1280x720 or larger RGBA8 target that test depth use ALWAYS (draw order alone, as if no depth buffer).
+// ui_nowrite: those draws do not write depth.
+enum : uint32_t { kLiveUiAlways = 1, kLiveUiNoWrite = 2 };
+uint32_t live_flags() {
+    static uint64_t next_check = 0;
+    static uint32_t flags = 0;
+    const uint64_t f = g_frame.load();
+    if (f < next_check) return flags;
+    next_check = f + 30;
+    uint32_t now = 0;
+    if (FILE* file = plat::fopen_utf8(plat::data_root() + "/live_flags", "rb")) {
+        char words[256] = {};
+        std::fread(words, 1, sizeof words - 1, file);
+        std::fclose(file);
+        if (std::strstr(words, "ui_always")) now |= kLiveUiAlways;
+        if (std::strstr(words, "ui_nowrite")) now |= kLiveUiNoWrite;
+    }
+    if (now != flags) log("live_flags: %x (was %x) at frame %llu", now, flags, (unsigned long long)f);
+    flags = now;
+    return flags;
+}
+
+bool live_ui_draw(const Targets& t) {
+    const Texture* t0 = t.color_count && t.colors[0] ? get<Texture>(t.colors[0]) : nullptr;
+    return t0 && t0->width >= 1280 && t0->format == 0x25 && t.depth && g_state.depth.depth_test;
+}
+
 bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, const Cmd& c) {
     g_stats.total++;
     if (g_state.rasterizer_discard || !g_state.render_enable) return false;  // nothing reaches the targets
@@ -432,6 +461,10 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     std::copy_n(g_state.streams.begin(), key.stream_count, key.streams);
     std::copy_n(g_state.blend, 8, key.blend);
     key.color = g_state.color, key.mask = g_state.mask, key.depth = g_state.depth, key.polygon = g_state.polygon;
+    if (const uint32_t live = live_flags(); live && live_ui_draw(t)) {
+        if (live & kLiveUiAlways) key.depth.depth_func = 8;  // NVN ALWAYS
+        if (live & kLiveUiNoWrite) key.depth.depth_write = 0;
+    }
     key.color_count = t.color_count, key.depth_clamp = g_state.depth_clamp;
     key.alpha_to_coverage = g_state.alpha_to_coverage;
     for (uint32_t k = 0; k < t.color_count; k++) {
@@ -621,6 +654,7 @@ void draw_begin_submit() {
     clears_begin_submit();
     g_submit_ns = plat::monotonic_ns();
     dedup_reset();
+    cache_begin_submit();
     written_reset();
     pipeline_begin_submit();
 }
@@ -630,6 +664,7 @@ uint64_t recorded_draws();
 void draw_log_stats() {
     if (g_vertex_barriers) log("nvn passes: %llu vertex-read barriers (G4)", (unsigned long long)g_vertex_barriers);
     dedup_log();
+    cache_log();
     render_pass_log();
     written_log();
     sampled_ready_log();

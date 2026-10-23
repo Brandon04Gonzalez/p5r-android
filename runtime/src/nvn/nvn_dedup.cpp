@@ -9,8 +9,13 @@
 #include <cstdlib>
 #include <cstring>
 #include <map>
+#include <unordered_map>
 
 #include "nvn_draw_state.h"
+
+namespace nx::nvn {
+uint64_t hash_memory(const uint8_t* p, uint64_t size);  // nvn_sampler.cpp
+}
 
 namespace nx::nvn::replay {
 
@@ -36,7 +41,30 @@ Front g_front[1024];
 uint64_t g_generation = 1;
 Front& front_of(const uint8_t* p) { return g_front[(uintptr_t(p) >> 4 ^ uintptr_t(p) >> 14) & 1023]; }
 
+// NX_UPLOAD_STATS: bytes copied per kind, and of those the bytes equal to the last copy of the same address and size.
+struct KindStats {
+    uint64_t copies = 0, bytes = 0, same = 0;
+};
+KindStats g_kind[kUploadKinds];
+std::unordered_map<const uint8_t*, std::pair<uint64_t, uint64_t>> g_last_hash;  // address -> (size, hash)
+
+bool upload_stats_on() {
+    static const bool on = std::getenv("NX_UPLOAD_STATS") != nullptr;
+    return on;
+}
+
+void count_copy(const uint8_t* p, uint64_t size) {
+    KindStats& k = g_kind[g_upload_kind < kUploadKinds ? g_upload_kind : kUploadOther];
+    k.copies++, k.bytes += size;
+    const uint64_t h = hash_memory(p, size);
+    auto& last = g_last_hash[p];
+    if (last.first == size && last.second == h) k.same += size;
+    last = {size, h};
+}
+
 }  // namespace
+
+UploadKind g_upload_kind = kUploadOther;
 
 Upload dedup_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t align) {
     if (!p || !size) {
@@ -57,9 +85,16 @@ Upload dedup_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t a
         g_saved += padded;
         return e->upload;
     }
-    Upload u = upload_alloc(padded, align);
+    Upload u;
+    if (g_upload_kind != kUploadOther && cache_upload(p, size, padded, align, u)) {  // nvn_buffer_cache.cpp
+        g_copies[p] = {size, padded, u};
+        f = {p, g_generation, {size, padded, u}};
+        return u;
+    }
+    u = upload_alloc(padded, align);
     std::memcpy(u.ptr, p, size);
     if (padded > size) std::memset(u.ptr + size, 0, padded - size);
+    if (upload_stats_on()) count_copy(p, size);
     g_copies[p] = {size, padded, u};
     f = {p, g_generation, {size, padded, u}};
     g_copied += padded;
@@ -109,6 +144,14 @@ void dedup_log() {
     if (g_copied + g_saved)
         log("nvn: uploads copied %.1f MB, reused %.1f MB", double(g_copied) / 1e6, double(g_saved) / 1e6);
     g_copied = g_saved = 0;
+    static const char* names[kUploadKinds] = {"other", "vertex", "index", "uniform/storage"};
+    for (int k = 0; k < kUploadKinds; k++) {
+        KindStats& s = g_kind[k];
+        if (s.copies)
+            log("nvn: uploads of %s: %llu copies, %.1f MB, %.0f%% the same as their last copy", names[k],
+                (unsigned long long)s.copies, double(s.bytes) / 1e6, 100.0 * double(s.same) / double(s.bytes));
+        s = {};
+    }
 }
 
 }  // namespace nx::nvn::replay

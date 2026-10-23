@@ -28,14 +28,15 @@ VkSamplerAddressMode vk_wrap(uint32_t w) {  // NVN: 0 clamp, 1 repeat, 2 mirror 
 
 // ---- samplers -------------------------------------------------------------------------------------------------------
 
-VkSampler sampler_for(const SamplerInfo& s, bool shadow) {
-    // Asked per texture binding of every draw: the key is the state's bytes and the flag (what the std::string key
+VkSampler sampler_for(const SamplerInfo& s, bool shadow, bool biased) {
+    // Asked per texture binding of every draw: the key is the state's bytes and the flags (what the std::string key
     // of before held, compared the same way), hashed; no allocation on a hit.
-    using Key = ByteKey<sizeof(SamplerInfo) + 1>;
+    using Key = ByteKey<sizeof(SamplerInfo) + 2>;
     static std::unordered_map<Key, VkSampler, ByteKeyHash> cache;
     Key key;
     std::memcpy(key.b, &s, sizeof s);
     key.b[sizeof s] = shadow ? '1' : '0';
+    key.b[sizeof s + 1] = biased ? '1' : '0';
     auto& v = cache[key];
     if (v) return v;
     VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
@@ -49,12 +50,13 @@ VkSampler sampler_for(const SamplerInfo& s, bool shadow) {
     ci.addressModeV = vk_wrap(s.wrap[1]);
     ci.addressModeW = vk_wrap(s.wrap[2]);
     // Graphics quality (the P5R launcher's preset): NX_LOD_BIAS=<f> is added to the bias of mipmapped samplers (a
-    // smaller mip: less texture bandwidth, softer surfaces; samplers without mips, text and UI, keep level 0).
+    // smaller mip: less texture bandwidth, softer surfaces) of the 3D draws only (`biased`: the draw tests depth): the
+    // 2D ones (menus, HUD) keep their sharpness.
     static const float lod_bias_add = [] {
         const char* e = std::getenv("NX_LOD_BIAS");
         return std::clamp(e ? float(std::atof(e)) : 0.0f, -2.0f, 4.0f);
     }();
-    ci.mipLodBias = s.lod_bias + (m >= 2 ? lod_bias_add : 0.0f);
+    ci.mipLodBias = s.lod_bias + (m >= 2 && biased ? lod_bias_add : 0.0f);
     // Games pass lod_min -1000 ("no limit"); Metal wants lodMinClamp >= 0, and a negative one made the glyph
     // sampler return 0 (all text invisible).
     ci.minLod = m <= 1 ? 0.0f : std::max(0.0f, s.lod_min);

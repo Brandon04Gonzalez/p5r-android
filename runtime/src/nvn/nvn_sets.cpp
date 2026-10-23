@@ -153,7 +153,7 @@ struct HandleSlot {
     bool has_sampler = false;
     SamplerInfo sampler;
     ViewInfo view;
-    VkSampler vk_sampler[2] = {};  // sampler_for(sampler, shadow), once a binding asked
+    VkSampler vk_sampler[4] = {};  // sampler_for(sampler, shadow, biased) by shadow + 2 * biased, once a binding asked
 };
 constexpr uint32_t kHandleSlots = 2048;  // a course frame names a few hundred handles
 HandleSlot g_handle_slots[kHandleSlots];
@@ -269,7 +269,9 @@ VkDescriptorBufferInfo buffer_of(VkCommandBuffer cb, const void* bytes, uint64_t
     uint64_t n = std::max<uint64_t>((size + 15) & ~15ull, min_size);
     const auto* p = static_cast<const uint8_t*>(bytes);
     if (!write_back && guest) {
+        g_upload_kind = kUploadBlock;
         Upload u = read_upload(cb, p, size, n, 256);
+        g_upload_kind = kUploadOther;
         return {u.buffer, u.offset, n};
     }
     if (write_back && p && size && !written_separate()) {
@@ -545,7 +547,7 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
         ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         ii.imageView = r.texture ? sampled_view(cb, r.texture, b->image, &r.view, &ii.imageLayout)
                                  : dummy_view(cb, b->image);
-        ii.sampler = r.vk_sampler ? r.vk_sampler : sampler_for(r.sampler, b->image.depth);
+        ii.sampler = r.vk_sampler ? r.vk_sampler : sampler_for(r.sampler, b->image.depth, g_state.depth.depth_test);
         images.push_back(ii);
         VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
         w.dstSet = set_of(2);
@@ -647,8 +649,11 @@ uint32_t gather_textures(const std::vector<const ShaderInfo*>& shaders) {
         if (HandleSlot* slot = handle_slot(handle)) {
             if (slot->object) texture = slot->texture, slot->object->last_sampled = submit_ns;
             r.sampler = slot->sampler, r.view = slot->view;
-            VkSampler& vk = slot->vk_sampler[b->image.depth ? 1 : 0];  // the same for every draw: a cache key built
-            if (!vk) vk = sampler_for(slot->sampler, b->image.depth);  // per binding otherwise (nvn_sampler.cpp)
+            // The same for every draw (a cache key built per binding otherwise, nvn_sampler.cpp). NX_LOD_BIAS applies
+            // to the 3D draws only: those that test depth.
+            const bool biased = g_state.depth.depth_test;
+            VkSampler& vk = slot->vk_sampler[(b->image.depth ? 1 : 0) + (biased ? 2 : 0)];
+            if (!vk) vk = sampler_for(slot->sampler, b->image.depth, biased);
             r.vk_sampler = vk;
         } else {
             lookup_handle(handle, texture, r.sampler, &r.view);
@@ -691,7 +696,9 @@ bool draw_inputs_shared(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, 
     if (!p) return false;
     in.index_type = vk_index_type(c.mask);
     uint64_t bytes = uint64_t(uint32_t(c.i[0])) * index_size(c.mask);
+    g_upload_kind = kUploadIndex;
     if (!written_read(cb, p, bytes, bytes, index_size(c.mask), in.index)) in.index = dedup_upload(p, bytes, bytes, 16);
+    g_upload_kind = kUploadOther;
     return true;
 }
 

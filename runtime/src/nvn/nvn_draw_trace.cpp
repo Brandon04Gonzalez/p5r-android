@@ -11,6 +11,7 @@
 #include <string>
 
 #include "nvn_draw_state.h"
+#include "platform.h"
 
 namespace nx::nvn::replay {
 
@@ -298,6 +299,100 @@ void frame_sig_flush(uint64_t presents) {
 
 namespace nx::nvn::replay {
 
+namespace {
+
+// On demand while playing: a file named trace_draws in the data folder (optionally holding "<frames>", default 1)
+// logs every draw of the next frames (draw_trace_line), then is deleted. Checked about once a second; for HUD and
+// texture glitches that only show deep in the game (the battle portrait, pixelated during the player's turn).
+bool draws_trace_due() {
+    static uint64_t next_check = 0, from = 0, until = 0;
+    const uint64_t f = g_frame.load();
+    if (f >= next_check) {
+        next_check = f + 30;
+        std::string path = plat::data_root() + "/trace_draws";
+        if (FILE* file = plat::fopen_utf8(path, "rb")) {
+            unsigned long long n = 1;
+            if (std::fscanf(file, "%llu", &n) != 1 || !n) n = 1;
+            std::fclose(file);
+            std::remove(path.c_str());
+            from = f + 1, until = f + 1 + n;
+            log("trace_draws: frames %llu..%llu", (unsigned long long)from, (unsigned long long)(until - 1));
+        }
+    }
+    return f >= from && f < until;
+}
+
+// One draw: its target 0, depth test and write, viewport, shaders and count, and per sampled texture its size,
+// levels, format, view levels and sampler (filters: NVN min 0 nearest 1 linear 2..5 with mips; mag 0 nearest 1 linear;
+// LOD bias and range; whether NX_LOD_BIAS applies: a depth-tested draw).
+void draw_trace_line(const Targets& t, bool indexed, const Cmd& c, const ShaderInfo* vs, const ShaderInfo* fs,
+                     const TexBindings& tex_bindings, const std::vector<uint64_t>& handles) {
+    const Texture* t0 = t.color_count && t.colors[0] ? get<Texture>(t.colors[0]) : nullptr;
+    std::string tex;
+    for (size_t k = 0; k < tex_bindings.size() && k < handles.size(); k++) {
+        uint64_t texture = 0;
+        SamplerInfo si;
+        ViewInfo vw;
+        texture_for(handles[k], texture, si, &vw);
+        const Texture* tx = texture ? get<Texture>(texture) : nullptr;
+        if (!tx) continue;
+        char b[200];
+        std::snprintf(b, sizeof b, " | t%zu %llx %ux%u L%u f%x%s view L%u+%u min %u mag %u bias %g lod %g..%g an %g", k,
+                      (unsigned long long)texture, tx->width, tx->height, tx->levels, tx->format,
+                      tx->image && tx->image->rendered ? " rt" : "", vw.base_level, vw.levels, si.min_filter,
+                      si.mag_filter, si.lod_bias, si.lod_min, si.lod_max, si.max_anisotropy);
+        tex += b;
+    }
+    const DepthStencilInfo& d = g_state.depth;
+    const Texture* dt = t.depth ? get<Texture>(t.depth) : nullptr;
+    const BlendTarget& b0 = g_state.blend[0];
+    // The first vertices (up to 4 distinct indices): attribute 0 and 1 as 4 floats each.
+    std::string verts;
+    if (!g_state.attribs.empty() && !g_state.streams.empty()) {
+        std::vector<uint32_t> idx;
+        if (indexed) {
+            if (const uint8_t* ib = guest_bytes(c.a[0])) {
+                const uint32_t size = c.mask == 0 ? 1 : c.mask == 1 ? 2 : 4;  // NVN index type: 0 u8, 1 u16, 2 u32
+                for (int k = 0; k < std::min(c.i[0], 6) && idx.size() < 4; k++) {
+                    uint32_t v = 0;
+                    std::memcpy(&v, ib + uint64_t(k) * size, size);
+                    if (std::find(idx.begin(), idx.end(), v) == idx.end()) idx.push_back(v);
+                }
+            }
+        } else {
+            for (int k = 0; k < std::min(c.i[1], 4); k++) idx.push_back(uint32_t(c.i[0] + k));
+        }
+        for (uint32_t a = 0; a < 2 && a < g_state.attribs.size(); a++) {
+            const VertexAttrib& va = g_state.attribs[a];
+            if (va.stream >= g_state.streams.size() || va.stream >= 16) continue;
+            const Range& vb = g_state.vertex_buffers[va.stream];
+            const uint32_t stride = g_state.streams[va.stream].stride;
+            const uint8_t* base = vb.address ? guest_bytes(vb.address) : nullptr;
+            char b[64];
+            std::snprintf(b, sizeof b, " a%u(f%x+%u):", a, va.format, va.offset);
+            verts += b;
+            for (uint32_t v : idx) {
+                const uint64_t at = (uint64_t(v) + uint64_t(indexed ? c.i[1] : 0)) * stride + va.offset;
+                float f[4] = {};
+                if (base && at + 16 <= vb.size) std::memcpy(f, base + at, 16);
+                std::snprintf(b, sizeof b, " (%.4g %.4g %.4g %.4g)", f[0], f[1], f[2], f[3]);
+                verts += b;
+            }
+        }
+    }
+    log("td: frame %llu draw %llu tgt %llx %ux%u f%x depth %llx f%x test %u write %u func %u stencil %u offset %u "
+        "(%g %g %g) blend %u (%u %u %u %u) alpha %u vp %d %d %d %d vs %s fs %s %s %d%s |%s",
+        (unsigned long long)g_frame.load(), (unsigned long long)g_stats.done, (unsigned long long)t.colors[0],
+        t0 ? t0->width : 0, t0 ? t0->height : 0, t0 ? t0->format : 0, (unsigned long long)t.depth, dt ? dt->format : 0,
+        d.depth_test, d.depth_write, d.depth_func, d.stencil_test, g_state.polygon.offset_enables, g_state.bias_factor,
+        g_state.bias_units, g_state.bias_clamp, g_state.color.blend_enable[0], b0.src_rgb, b0.dst_rgb, b0.src_a, b0.dst_a,
+        g_state.color.alpha_test, g_state.viewport[0], g_state.viewport[1], g_state.viewport[2], g_state.viewport[3],
+        vs->hash.c_str(), fs ? fs->hash.c_str() : "-", indexed ? "idx" : "arr", indexed ? c.i[0] : c.i[1], tex.c_str(),
+        verts.c_str());
+}
+
+}  // namespace
+
 void trace_draw(const Targets& t, uint32_t mode, bool indexed, const Cmd& c, const ShaderInfo* vs,
                 const ShaderInfo* fs, const TexBindings& tex_bindings, const std::vector<uint64_t>& handles) {
     // Always: the first draws with a huge vertex or instance count (a GPU hang candidate).
@@ -308,6 +403,7 @@ void trace_draw(const Targets& t, uint32_t mode, bool indexed, const Cmd& c, con
             fs ? fs->hash.c_str() : "-", indexed ? "indexed" : "arrays", count, instances);
     trace_cube_draw(t, vs, fs, tex_bindings, handles);
     frame_sig_draw(t, indexed, count, instances, fs, tex_bindings, handles);
+    if (draws_trace_due()) draw_trace_line(t, indexed, c, vs, fs, tex_bindings, handles);
     // NX_TRACE_DRAWS=<first draw>: logs 80 draws from there.
     static const char* trace_env = std::getenv("NX_TRACE_DRAWS");
     static const uint64_t trace_from = trace_env ? std::strtoull(trace_env, nullptr, 10) : 0;
