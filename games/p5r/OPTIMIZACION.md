@@ -37,6 +37,13 @@ vértices, reducir pases/sombras).
 Ya estaban en el runtime (Wonder): R11G11B10F nativo, MUTABLE_FORMAT con lista (UBWC), resets en hilo janitor,
 envío por trozos, ADPF.
 
+## Sesión 6
+
+- Menú del título 3D (`ab3.sh`, `NX_GPU_PROFILE=3`): **6,95 fps, GPU 75,3 ms por frame**.
+- Oclusión: ~413 objetos por frame en el título se dibujan dos veces (pase de consultas + pase condicionado). El
+  condicionado se puede hacer en la GPU con `vkCmdDrawIndexedIndirectCountKHR` (diseño en PROGRESO, punto 45).
+- Sombras: 2 mapas D32 (2048 y 1024), ~6 % de la GPU en CARGAR; `NX_SHADOWS=0` los vacía.
+
 ## Siguiente (por impacto estimado)
 
 0. **Culling por oclusión real** (sesión 5): P5R pregunta a la GPU qué objetos se ven (`ReportCounter` samples passed + `SetRenderEnableConditional`) y el port dice siempre que sí: se dibujan todos los objetos ocultos. Con la GPU limitada por geometría (menos píxeles no ayudan) es probablemente la mayor ganancia. Perfil de CARGAR ahora: 61,6 ms/frame en total; los tres pases 3D 960x540 10,6 + 9,3 + 7,3 ms.

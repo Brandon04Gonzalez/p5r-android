@@ -1,6 +1,6 @@
 # Port nativo de Persona 5 Royal a Android — progreso
 
-Última actualización: 2026-10-22 (sesión 5)
+Última actualización: 2026-10-22 (sesión 6)
 
 ## Estado en una línea
 
@@ -8,9 +8,10 @@
 y **vídeos por hardware**: arranque, título 3D, Nueva partida, la película de apertura completa y el **casino jugable**
 hasta la primera batalla (ganada). Hay **launcher** con las opciones pedidas (incluida **Gráficos**, Bajos por defecto).
 Sesión 5: las películas ya no se congelan, el sonido se retrasa para ir con la imagen cuando hay pocos fps, y la opción
-de **60 fps funciona** (en PC sube de 30 a 45–60). Pendiente: **rendimiento** (en la Adreno 610 el casino va a
-**~12 fps**, limitado por geometría: ver sesión 5), objetos que desaparecen un frame (sesión 5, punto 39) y seguir la
-historia. Rama de trabajo **`p5r-opt`** (el APK instalado en la tablet es el de esa rama).
+de **60 fps funciona** (en PC sube de 30 a 45–60). Sesión 6: **los tirones de las películas, arreglados** (la imagen de
+la luminancia se quedaba sin subir; punto 44). Pendiente: **rendimiento** (Adreno 610: título 3D ~7 fps, casino ~12 fps,
+limitado por la GPU; siguiente paso, el culling por oclusión real, punto 45), opción de sombras, objetos que desaparecen
+un frame (punto 39) y seguir la historia. Rama de trabajo **`p5r-opt`** (el APK instalado en la tablet es el de esa rama).
 
 ## Cómo funciona el port
 
@@ -251,18 +252,71 @@ Notas de la sesión 4:
     accesorio USB (`18D1:2D01`). Se arregla parando el servicio (`Stop-Service SuperDisplay`, admin) y reiniciando el
     dispositivo USB (`pnputil /restart-device "USB\VID_18D1&PID_2D01\HA269JK2"`, admin). Vuelve a arrancar con Windows.
 
+### Sesión 6 (2026-10-22, tarde) — tirones de las películas, oclusión, sombras
+
+43. **No hay logs ni depuración frenando el juego**: capa de validación apagada, APK en Release `-O2`, el log escribe
+    ~2 KB/s. En tu partida, el hilo de replay esperó a la GPU en 279 de 281 envíos: la Adreno 610 es el límite. Medido
+    en el menú del título 3D: **6,95 fps, GPU 75,3 ms por frame** (`runs/tmenu_v1k1`). Tus logs: `runs/user_1022`.
+44. **Tirones de las películas arreglados** (la intro anime; commit `a17cf38`). El decodificador iba bien (3–4 imágenes de
+    reserva) y CRI toma una por frame. Lo que fallaba era la subida a la GPU: P5R crea un objeto de textura por imagen
+    sobre un anillo de 6 búferes NV12, y la **luminancia (Y) no se subía en el 21 % de los frames**. Se veía la imagen de
+    6 frames antes durante 1–2 frames. Tres causas, todas en el runtime:
+    - un objeto nuevo que **compartía la imagen** de otro aún vivo sobre la misma memoria la daba por subida
+      (`nvn_image.cpp`: ahora se marca sucia; `NX_SHARE_KEEP=1`, como antes);
+    - la **primera lectura del vigilante de escritura** (Y, ≥ 1 MB) y el **primer hash** (UV, < 1 MB) se ignoraban aunque la
+      imagen se hubiera subido en un frame anterior (`nvn_sampler.cpp`: `armed_late`);
+    - los planos de tamaño de película se comprueban **cada frame**, no cada 4.
+    Resultado: **2.499 de 2.500 frames** suben Y y UV (`runs/film_fix4`). Con `NX_TRACE_VIDEO=<presents>` se ven, por
+    present, los eventos del decodificador (acquired/taken/released), las subidas de cada plano y las decisiones.
+    Notas: CRI copia cada imagen a su propio pool (5 × 4 MB) y la libera al instante. El `pts` que manda el juego es
+    siempre 0. La intro anime arranca sola tras los logos, y una A la salta.
+45. **Oclusión de P5R, cómo la usa** (`main+fc3dd0`; modo `[[main+0x220b4a0]+0x433c]` == 1: pase de consultas, otro
+    valor: pase condicionado). En el **pase de consultas**, cada objeto hace `ResetCounter(1)`, **un** draw y
+    `ReportCounter(1, 0x1010c0000 + 0x20·slot)`. En el **pase condicionado**, cada objeto hace
+    `SetRenderEnableConditional(1 = dibujar si distinto, misma dirección)`, su draw y `SetRenderEnable(1)`. El
+    condicionado va a otro color con el mismo depth, y compara el u64 de la dirección con el de +16 (que vale 0). En el
+    título 3D son **~413 objetos por frame** (de ~1.265 draws); en la escena de la frame 707, 34. `ResetCounter` ya se
+    registra (antes caía en el driver real del SDK). `NX_TRACE_OCCL=<líneas>[@frame]`. `NX_OCCL_FORCE=0` salta todos los
+    condicionados (techo de la ganancia; la imagen pierde objetos) y `=1` los dibuja todos.
+    **Plan (sin hacer)**: la Adreno 610 no tiene `VK_EXT_conditional_rendering`, pero sí `VK_KHR_draw_indirect_count` y
+    `drawIndirectFirstInstance`. Habría que hacer:
+    - una consulta de oclusión de Vulkan por draw del pase de consultas, en un solo pool con `vkCmdResetQueryPool` al
+      primer `ResetCounter` de cada envío (fuera del pase);
+    - en el primer condicionado, `vkCmdCopyQueryPoolResults` (u32, WAIT) al anillo de subida y una barrera
+      TRANSFER → DRAW_INDIRECT;
+    - cada draw condicionado como `vkCmdDraw[Indexed]IndirectCountKHR`, con count = el resultado y máximo 1. Así no hay
+      frame de retraso ni objetos que aparecen tarde.
+
+    Hay que activar `VK_KHR_draw_indirect_count` en `nvn_vk.cpp` (lista `dexts`). La medición del techo en el título
+    (`private/p5r/ab3.sh tmenu - "NX_OCCL_FORCE=0" "NX_SHADOWS=0"`) quedó a medias: solo dio la referencia.
+46. **Sombras**: los mapas de sombras son texturas de profundidad cuadradas D32 de 2048 y 1024 (registro
+    `nvn: depth-only pass into ...`). Las de 960x540 y 1280x720 D32S8 son el depth de la escena. `NX_SHADOWS=0` no dibuja
+    en los mapas (sus clears quedan: todo iluminado). En el perfil de CARGAR son 3,75 de 61,6 ms (~6 %). **Falta**: la
+    opción "Sombras" en el launcher (pedida: mínimo por defecto) y medirla.
+47. Scripts nuevos (`private/p5r/`): `screen_lib.py` (captura + estado del menú). `to_title.py [límite] [film]` llega al
+    menú del título por lo que se ve en pantalla; con `film`, para cuando empieza la intro anime.
+    `load_screen.py` llega a CARGAR (pantalla roja dos veces seguidas; en el menú pone el cursor en Cargar).
+    `ab3.sh nombre variantes...` alterna variantes en el menú del título (`-` = sin switches); `ab2.sh` hace lo mismo en
+    CARGAR. **`to_load.sh` y `ab.sh` ya no sirven**: sus tiempos fijos fallan con la pregunta de la red ("Gremio de
+    ladrones").
+48. Vulkan de la tablet: `adb shell cmd gpu vkjson`. No hay `conditional_rendering`, `extended_dynamic_state` ni
+    `descriptor_buffer`. Sí hay `draw_indirect_count`, `host_query_reset`, `occlusionQueryPrecise` y
+    `inheritedQueries`.
+
 ## Falta ❌ (por orden)
 
-1. **Rendimiento en la Adreno 610** (~12 fps en el casino): culling por oclusión real (punto 38), luego caché de
-   búferes de vértices y sombras (`OPTIMIZACION.md`).
-2. Objetos que desaparecen un frame (punto 39): confirmar con una captura del frame y la traza de draws.
-3. Tirón pequeño de las películas (punto 33).
-4. Verificar a oído el A/V a pocos fps (punto 34) y la velocidad del juego a 60 fps (punto 35).
-5. Bajar la resolución 3D de verdad (punto 37) si deja de ser la geometría lo que limita.
-6. Terminar el casino (salir del almacén de jaulas) y seguir la historia; guardar/cargar partida.
-7. Servicios IPC que pida P5R y Wonder no usaba (`bsd:u`, `ectx:aw`, varios `cmd ... not implemented`).
-8. **GPUs**: tabla de quirks por vendorID (Adreno 0x5143, Mali 0x13B5, Xclipse 0x144D, PowerVR 0x1010, Maleoon) y
-   probar en el Moto G54 (PowerVR, pero solo 4,3 GB libres).
+1. **Culling por oclusión real** (punto 45: diseño hecho, código sin escribir). Antes, medir el techo con `ab3.sh` (las
+   variantes `NX_OCCL_FORCE=0` y `NX_SHADOWS=0` quedaron sin medir).
+2. **Opción "Sombras"** en el launcher (Desactivadas por defecto / Activadas; `NX_SHADOWS`, punto 46). Medir.
+3. Revisar las barreras de Vulkan con la capa de validación (`private/third_party/vvl`), por los objetos que
+   desaparecen un frame (punto 39).
+4. Caché de búferes de vértices (16–22 MB/frame copiados) y precalentado de pipelines (`OPTIMIZACION.md`).
+5. Verificar a oído el A/V a pocos fps (punto 34) y la velocidad del juego a 60 fps (punto 35).
+6. Bajar la resolución 3D de verdad (punto 37) si deja de ser la geometría lo que limita.
+7. Terminar el casino (salir del almacén de jaulas) y seguir la historia; guardar/cargar partida.
+8. Servicios IPC que pida P5R y Wonder no usaba (`bsd:u`, `ectx:aw`, varios `cmd ... not implemented`).
+9. **GPUs**: tabla de quirks por vendorID y probar en el Moto G54 (PowerVR). Opcional: drivers Turnip (adrenotools)
+   como experimento solo en Adreno.
 
 ### Dispositivos de prueba
 
