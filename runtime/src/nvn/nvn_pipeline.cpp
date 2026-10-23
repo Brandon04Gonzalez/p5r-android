@@ -1039,6 +1039,7 @@ GpuImage* ensure_contents(VkCommandBuffer cb, uint64_t texture) {
             upload = false;
         }
     }
+    film_trace(*t, upload ? "ensure: upload" : "ensure: kept", dirty, img->uploaded);
     // A texture already on the GPU that the CPU wrote part of: only those bytes go again (the glyph cache).
     if (upload) upload_texture(cb, *t, *img, img->uploaded && dirty ? dirty_lo : 0, img->uploaded && dirty ? dirty_hi : UINT64_MAX);
     apply_texel_writes(cb, *t, *img);

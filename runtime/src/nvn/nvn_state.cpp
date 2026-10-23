@@ -286,6 +286,14 @@ void ReportCounter(CPU& c) {
     record(c.x[0], cmd);
 }
 
+// ResetCounter(cmd, NVNcounterType): the counter restarts from 0 (P5R: samples passed, before each object of its
+// occlusion pass; nvn_occlusion.cpp).
+void ResetCounter(CPU& c) {
+    Cmd cmd{Cmd::ResetCounter};
+    cmd.n = uint32_t(c.x[1]);
+    record(c.x[0], cmd);
+}
+
 // Our GPU timestamps are host nanoseconds: the conversions are identities.
 void GetTimestampInNanoseconds(CPU& c) { c.x[0] = c.x[1] ? ld<uint64_t>(c.x[1] + 8) : 0; }  // (device, counterData*)
 void GetCurrentTimestampInNanoseconds(CPU& c) { c.x[0] = plat::monotonic_ns(); }
@@ -320,6 +328,7 @@ NX_HLE("nvnCommandBufferDrawElementsBaseVertex", DrawElementsBaseVertex);
 NX_HLE("nvnCommandBufferDrawElementsInstanced", DrawElementsInstanced);
 NX_HLE("nvnCommandBufferBarrier", ignore);
 NX_HLE("nvnCommandBufferReportCounter", ReportCounter);
+NX_HLE("nvnCommandBufferResetCounter", ResetCounter);
 NX_HLE("nvnDeviceGetTimestampInNanoseconds", GetTimestampInNanoseconds);
 NX_HLE("nvnDeviceGetCurrentTimestampInNanoseconds", GetCurrentTimestampInNanoseconds);  // every replayed command is serialized for now
 

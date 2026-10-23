@@ -98,6 +98,13 @@ GpuImage* image_of(uint64_t guest) {
                 static uint64_t shares = 0;
                 if (++shares % 1000 == 1) log("nvn/vk: %llu textures shared an image with another", (unsigned long long)shares);
                 t->image = shared;
+                // A CPU-written (pitch-linear) texture made again over memory another live object still covers: the
+                // image holds what that one uploaded, the memory may hold more. P5R makes a texture per film picture
+                // over a ring of six NV12 buffers; when the previous object over a buffer was not finalized yet, the
+                // new picture's luma was never uploaded and the film showed the picture of six frames before for one
+                // or two frames (its stutter, 21% of the frames on the Adreno 610). NX_SHARE_KEEP=1: as before.
+                static const bool keep = std::getenv("NX_SHARE_KEEP") != nullptr;
+                if (!keep && t->stride && !shared->rendered) t->mark_dirty(0, UINT64_MAX);
                 return shared.get();
             }
     if ((t->image = reuse_image(*t))) return t->image.get();

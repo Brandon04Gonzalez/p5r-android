@@ -170,6 +170,15 @@ void begin_rendering(VkCommandBuffer cb, const Targets& t) {
     } else {
         dimg = nullptr;
     }
+    if (dimg && !t.color_count) {  // depth-only targets (P5R: its shadow maps), once each
+        static std::vector<const GpuImage*> seen;
+        if (seen.size() < 32 && std::find(seen.begin(), seen.end(), dimg) == seen.end()) {
+            seen.push_back(dimg);
+            log("nvn: depth-only pass into %llx: %ux%u, %u layers, format %d, level %u layer %u",
+                (unsigned long long)t.depth, dimg->width, dimg->height, dimg->layers, int(dimg->format),
+                t.views.level[8], t.views.layer[8]);
+        }
+    }
     if (extent.width == UINT32_MAX) extent = {1, 1};
     VkRenderingAttachmentInfo stencil = depth;  // same view, its own loadOp
     uint32_t cleared = clears_apply(t, colors, depth, stencil);  // pending clears of these targets: loadOp CLEAR
@@ -270,9 +279,22 @@ void vertex_read_barrier(VkCommandBuffer cb, const ShaderInfo* vs) {
     g_vertex_pending = false, g_vertex_barriers++, g_vertex_visible_at = g_pass_serial;
 }
 
+// NX_SHADOWS=0 (the launcher's "Sombras: desactivadas"): no draws into shadow maps, the square depth-only targets of
+// 512 or more (P5R: 2048 and 1024, D32). Their clears stay: the maps say "lit" everywhere.
+bool shadow_draw_skipped(const Targets& t) {
+    static const bool off = [] {
+        const char* e = std::getenv("NX_SHADOWS");
+        return e && e[0] == '0';
+    }();
+    if (!off || t.color_count || !t.depth) return false;
+    const GpuImage* d = image_of(t.depth);
+    return d && d->width == d->height && d->width >= 512 && !(d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
+}
+
 bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, const Cmd& c) {
     g_stats.total++;
     if (g_state.rasterizer_discard || !g_state.render_enable) return false;  // nothing reaches the targets
+    if (shadow_draw_skipped(t)) return false;
     static thread_local std::vector<const ShaderInfo*> combined;
     const auto* shaders = bound_graphics_shaders(combined);
     if (!shaders || shaders->empty()) {

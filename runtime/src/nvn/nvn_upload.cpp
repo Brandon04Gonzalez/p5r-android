@@ -156,7 +156,15 @@ void clear_image(VkCommandBuffer cb, GpuImage& img, bool magenta) {
 std::atomic<uint64_t> g_linear_uploads{0};
 
 void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_t lo, uint64_t hi) {
-    if (t.stride && uint64_t(t.width) * t.height >= 640 * 360) g_linear_uploads++;
+    if (t.stride && uint64_t(t.width) * t.height >= 640 * 360) {
+        g_linear_uploads++;
+        static long trace = std::getenv("NX_TRACE_VIDEO") ? 3 * std::atol(std::getenv("NX_TRACE_VIDEO")) : 0;
+        if (trace > 0 && trace--)  // the film's cadence (hle_movie.cpp, nvn_queue.cpp)
+            log("movie trace: upload %llx %ux%u rows %llu..%llu at %.1f ms", (unsigned long long)t.memory, t.width,
+                t.height, (unsigned long long)(hi == UINT64_MAX ? 0 : lo / std::max(1u, t.stride)),
+                (unsigned long long)(hi == UINT64_MAX ? t.height : (hi + t.stride - 1) / std::max(1u, t.stride)),
+                double(plat::monotonic_ns() % 1000000000000ull) / 1e6);
+    }
     const bool was_uploaded = img.uploaded;
     img.uploaded = true;
     if (gpu_profile_on()) gpu_profile_mark(cb, "texture uploads");

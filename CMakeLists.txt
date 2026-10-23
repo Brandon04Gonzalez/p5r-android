@@ -134,6 +134,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/nvn/nvn_sampler.cpp
     runtime/src/nvn/nvn_sampler_objects.cpp
     runtime/src/nvn/nvn_draw_state.cpp
+    runtime/src/nvn/nvn_occlusion.cpp
     runtime/src/nvn/nvn_raster.cpp
     runtime/src/nvn/nvn_worker.cpp
     runtime/src/nvn/nvn_shaders.cpp

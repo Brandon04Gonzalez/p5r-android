@@ -19,6 +19,7 @@
 // of the same timestamp, so a video plays black for its length and the game goes on.
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -327,6 +328,23 @@ AMediaCodec* make_codec(const Decoder& d) {
 }
 #endif
 
+}  // namespace
+
+// For the per-present film trace (NX_TRACE_VIDEO, nvn_queue.cpp): pictures the game took, and the last one's pts.
+std::atomic<uint64_t> g_movie_gots{0};
+std::atomic<int64_t> g_movie_last_pts{0};
+
+namespace {
+
+// NX_TRACE_VIDEO: each decoder event (acquired, taken, released) with its time, for the film's cadence.
+void ev_trace(const char* what, int index, int extra = -1) {
+    static long left = std::getenv("NX_TRACE_VIDEO") ? 3 * std::atol(std::getenv("NX_TRACE_VIDEO")) : 0;
+    if (left <= 0) return;
+    left--;
+    log("movie trace: %s %d (%d) at %.1f ms, thread %lld", what, index, extra, double(plat::monotonic_ns() % 1000000000000ull) / 1e6,
+        (long long)plat::current_thread_id());
+}
+
 std::mutex g_lock;
 std::unordered_map<uint64_t, std::unique_ptr<Decoder>> g_decoders;
 uint64_t g_next_id = 1;
@@ -623,6 +641,7 @@ void DecoderAcquireOutputBufferIndex(CPU& c) {
     if (!d || d->ready.empty()) return void(c.x[0] = kTryAgain);
     int index = d->ready.front();
     d->ready.pop_front();
+    ev_trace("acquired", index, int(d->ready.size()));
     d->win.acquired++;
     if (c.x[1]) st<int32_t>(c.x[1], index);
     if (c.x[2]) st<int64_t>(c.x[2], d->outputs[index].pts);
@@ -668,6 +687,8 @@ void DecoderGetOutputBuffer(CPU& c) {
     d->win.copy_ns += t1 - t0;
     d->win.got++;
     d->last_got_pts = d->outputs[index].pts;
+    g_movie_last_pts = d->last_got_pts, g_movie_gots++;
+    ev_trace("taken", index, int(reinterpret_cast<uint64_t>(base) & 0xfffffff));
     if (d->last_got_ns) d->win.max_got_gap_ns = std::max(d->win.max_got_gap_ns, t1 - d->last_got_ns);
     d->last_got_ns = t1;
     d->frames_out++;
@@ -700,6 +721,7 @@ void DecoderReleaseOutputBufferIndex(CPU& c) {
         if (d && index >= 0 && index < output_slots()) {
             d->outputs[index].busy = false;
             d->win.released++;
+            ev_trace("released", index);
             if (!d->pending.empty()) {  // a slot is free again for a frame that waited
                 auto [pts, flags] = d->pending.front();
                 d->pending.pop_front();

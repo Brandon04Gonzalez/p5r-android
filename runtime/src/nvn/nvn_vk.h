@@ -238,6 +238,12 @@ void replay_clear_texture(VkCommandBuffer cb, const Cmd& c, const CmdList& list)
 void forget_image_views(const GpuImage& img);
 // nvn_debug.cpp: NX_SNAP_DRAWS mid-frame snapshots of colour target 0.
 bool debug_snap_wanted(uint64_t draw);
+// nvn_occlusion.cpp: P5R's occlusion queries (ResetCounter / ReportCounter of samples passed) and the draws they
+// make conditional (SetRenderEnableConditional).
+void occlusion_reset(VkCommandBuffer cb, const Cmd& c, const Targets& t);
+void occlusion_report(VkCommandBuffer cb, const Cmd& c, const Targets& t);
+void occlusion_conditional(VkCommandBuffer cb, const Cmd& c, const Targets& t);
+
 // nvn_debug.cpp: NX_ZERO_DRAWS, shader pairs whose draws produce no pixel.
 bool zero_draws_on();
 void zero_draws_begin_submit(VkCommandBuffer cb);

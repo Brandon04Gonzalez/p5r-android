@@ -9,6 +9,7 @@
 #include <set>
 
 #include "nvn.h"
+#include "nvn_pipeline.h"
 #include "nvn_ultrawide.h"
 #include "platform.h"
 
@@ -188,6 +189,7 @@ void MemoryPoolFlushMappedRange(CPU& c) {
         if (t->image) {  // rendered images ignore it (nvn_pipeline.cpp)
             uint64_t base = std::max(off, t->offset), end = std::min(off + size, t->offset + t->storage_size);
             t->mark_dirty(base - t->offset, end - t->offset);
+            film_trace(*t, "flushed", base - t->offset, end - t->offset);
         }
     }
 }

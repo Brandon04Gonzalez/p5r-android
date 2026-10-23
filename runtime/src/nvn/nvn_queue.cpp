@@ -27,6 +27,8 @@
 #include "platform.h"
 
 namespace nx {
+extern std::atomic<uint64_t> g_movie_gots;      // hle_movie.cpp
+extern std::atomic<int64_t> g_movie_last_pts;
 void svc_profile_mark(int role);
 void svc_profile_report(uint64_t frames, int role);
 uint64_t display_period_ns();
@@ -48,6 +50,19 @@ void video_cadence(uint64_t now) {
     prev_present = now;
     const uint64_t ups = g_linear_uploads.load();
     const bool got = ups != seen;
+    // NX_TRACE_VIDEO=<presents>: each present while a film plays: its gap, the pictures uploaded and taken since the
+    // last one, and the pts of the last taken.
+    static long trace_left = std::getenv("NX_TRACE_VIDEO") ? std::atol(std::getenv("NX_TRACE_VIDEO")) : 0;
+    static uint64_t gots_seen = 0;
+    const uint64_t gots = g_movie_gots.load();
+    if (trace_left > 0 && (on || got)) {
+        trace_left--;
+        log("video trace: present at %.1f ms, gap %.1f ms, uploads %llu, taken %llu, last pts %lld ms",
+            double(plat::monotonic_ns() % 1000000000000ull) / 1e6, double(gap) / 1e6,
+            (unsigned long long)(ups - seen), (unsigned long long)(gots - gots_seen),
+            (long long)(g_movie_last_pts.load() / 1000));
+    }
+    gots_seen = gots;
     seen = ups;
     if (!on && !got) return;
     if (!on) on = true, from_ns = now, run = 0;
