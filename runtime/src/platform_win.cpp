@@ -7,7 +7,10 @@
 #include <cstdlib>
 #include <cstring>
 #include <filesystem>
+#include <map>
+#include <mutex>
 #include <thread>
+#include <tuple>
 
 #include <windows.h>
 #include <xaudio2.h>
@@ -50,9 +53,12 @@ struct ThreadStart {
     void* arg;
 };
 
+void arm_rw_watches();  // NX_WATCH_RW, with the crash handler below
+
 static DWORD WINAPI thread_entry(void* p) {
     ThreadStart s = *static_cast<ThreadStart*>(p);
     delete static_cast<ThreadStart*>(p);
+    arm_rw_watches();
     s.fn(s.arg);
     return 0;
 }
@@ -399,6 +405,49 @@ void dump_guest(nx::CPU& c) {
 
 uint64_t exe_va(void* p) { return uint64_t(p) - uint64_t(GetModuleHandleW(nullptr)) + 0x140000000ull; }
 
+// NX_WATCH_RW=<hex address>[,<hex address>...]: up to four hardware read/write watchpoints (DR0-3, 4 bytes each) on
+// every thread. Accesses are counted by (watchpoint, guest lr, host pc) and the counts logged every 3 s: for a leaf
+// accessor the guest lr is its caller, so this tells who reads a field.
+uint64_t g_rw_watch[4];
+int g_rw_count = 0;
+std::mutex g_rw_m;
+std::map<std::tuple<int, uint64_t, uint64_t, uint64_t, uint64_t>, uint64_t> g_rw_hits;
+uint64_t g_rw_last = 0;
+
+LONG WINAPI rw_watch_handler(EXCEPTION_POINTERS* e) {
+    if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !g_rw_count) return EXCEPTION_CONTINUE_SEARCH;
+    DWORD64 dr6 = e->ContextRecord->Dr6;
+    int which = -1;
+    for (int k = 0; k < g_rw_count; k++)
+        if (dr6 & (1ull << k)) which = k;
+    if (which < 0) return EXCEPTION_CONTINUE_SEARCH;
+    e->ContextRecord->Dr6 = 0;
+    static thread_local bool inside = false;  // the logging below reads the watched words itself
+    if (inside) return EXCEPTION_CONTINUE_EXECUTION;
+    struct Guard {
+        Guard() { inside = true; }
+        ~Guard() { inside = false; }
+    } guard;
+    nx::CPU* c = nx::current_cpu_or_null();
+    uint64_t lr = c ? c->x[30] : 0, pc = exe_va(e->ExceptionRecord->ExceptionAddress);
+    uint64_t fp = c ? c->x[29] : 0, caller = 0;  // the frame's saved lr: the caller of a non-leaf accessor
+    if (fp && nx::module_at(lr)) caller = nx::ld<uint64_t>(fp + 8);
+    std::lock_guard lk(g_rw_m);
+    g_rw_hits[{which, lr, pc, caller, c ? c->x[19] : 0}]++;
+    uint64_t now = nx::plat::monotonic_ns();
+    if (now - g_rw_last >= 3'000'000'000ull) {
+        g_rw_last = now;
+        nx::log("WATCH RW: %zu kinds of access in the last 3 s", g_rw_hits.size());
+        for (const auto& [k, n] : g_rw_hits)
+            nx::log("  %llx (now %08x) x%llu  guest lr %s  frame lr %s  x19 %llx  host %s.exe+%llx",
+                    (unsigned long long)g_rw_watch[std::get<0>(k)], nx::ld<uint32_t>(g_rw_watch[std::get<0>(k)]),
+                    (unsigned long long)n, nx::describe(std::get<1>(k)).c_str(), nx::describe(std::get<3>(k)).c_str(),
+                    (unsigned long long)std::get<4>(k), nx::game::kInfo.id, (unsigned long long)std::get<2>(k));
+        g_rw_hits.clear();
+    }
+    return EXCEPTION_CONTINUE_EXECUTION;
+}
+
 LONG WINAPI watch_handler(EXCEPTION_POINTERS* e) {
     if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !g_watch) return EXCEPTION_CONTINUE_SEARCH;
     nx::log("WATCH: %llx written (now %llx) at %s.exe+%llx (tools/symbolize.py)", (unsigned long long)g_watch,
@@ -459,6 +508,21 @@ LONG WINAPI crash_handler(EXCEPTION_POINTERS* e) {
 
 }  // namespace
 
+void nx::plat::arm_rw_watches() {
+    if (!g_rw_count) return;
+    CONTEXT ctx{};
+    ctx.ContextFlags = CONTEXT_DEBUG_REGISTERS;
+    HANDLE self = GetCurrentThread();
+    GetThreadContext(self, &ctx);
+    DWORD64* dr[4] = {&ctx.Dr0, &ctx.Dr1, &ctx.Dr2, &ctx.Dr3};
+    ctx.Dr7 = 0;
+    for (int k = 0; k < g_rw_count; k++) {
+        *dr[k] = g_rw_watch[k];
+        ctx.Dr7 |= (1ull << (2 * k)) | (3ull << (16 + 4 * k)) | (3ull << (18 + 4 * k));  // Lk, R/W = read/write, LEN = 4
+    }
+    SetThreadContext(self, &ctx);
+}
+
 // NX_THROW_TRACE=1: log the host call stack of every C++ throw that is not a guest longjmp (first chance).
 LONG WINAPI throw_tracer(EXCEPTION_POINTERS* e) {
     if (e->ExceptionRecord->ExceptionCode != 0xE06D7363) return EXCEPTION_CONTINUE_SEARCH;
@@ -478,6 +542,18 @@ int main() {
     nx::plat::start_memory_guard();  // before anything can grow: a leak must never freeze the machine (memguard_win.cpp)
     SetUnhandledExceptionFilter(crash_handler);
     if (const char* t = std::getenv("NX_THROW_TRACE"); t && *t == '1') AddVectoredExceptionHandler(1, throw_tracer);
+    if (const char* w = std::getenv("NX_WATCH_RW")) {
+        for (const char* p = w; *p && g_rw_count < 4;) {
+            char* end = nullptr;
+            uint64_t a = std::strtoull(p, &end, 16);
+            if (end == p) break;
+            g_rw_watch[g_rw_count++] = a;
+            nx::log("watching reads and writes of %llx", (unsigned long long)a);
+            p = *end ? end + 1 : end;
+        }
+        AddVectoredExceptionHandler(1, rw_watch_handler);
+        nx::plat::arm_rw_watches();
+    }
     if (const char* w = std::getenv("NX_WATCH")) {
         g_watch = std::strtoull(w, nullptr, 16);
         AddVectoredExceptionHandler(1, watch_handler);

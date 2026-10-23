@@ -8,6 +8,7 @@
 #include <mutex>
 #include <set>
 #include <string>
+#include <tuple>
 #include <vector>
 
 #include <nx/runtime.h>
@@ -80,10 +81,11 @@ void GetNpadState(CPU& c) {
     std::memset(reinterpret_cast<void*>(out), 0, 0x28);
     st<int64_t>(out, int64_t(++g_sampling));
     {
-        static std::set<std::pair<uint32_t, std::string>> seen;
+        static std::set<std::tuple<uint32_t, std::string, uint64_t>> seen;
         static std::mutex m;
         std::lock_guard lk(m);
-        if (seen.insert({id, hle_current_name()}).second) log("hid: reads id %#x via %s", id, hle_current_name());
+        if (seen.size() < 64 && seen.insert({id, hle_current_name(), c.x[30]}).second)
+            log("hid: reads id %#x via %s (lr %s)", id, hle_current_name(), describe(c.x[30]).c_str());
     }
     if (id != 0) return;  // only player 1 is connected
     PadState p = read();
@@ -171,9 +173,15 @@ void zero(CPU& c) { c.x[0] = 0; }
 void one(CPU& c) { c.x[0] = 1; }
 
 void GetNpadStyleSet(CPU& c) {
-    static int logged = 0;
-    if (logged++ < 4) log("hid: GetNpadStyleSet id %#x", ld<uint32_t>(c.x[0]));
-    c.x[0] = ld<uint32_t>(c.x[0]) == 0 ? kStyleFullKey : 0;
+    uint32_t id = ld<uint32_t>(c.x[0]);
+    {
+        static std::set<std::pair<uint32_t, uint64_t>> seen;
+        static std::mutex m;
+        std::lock_guard lk(m);
+        if (seen.size() < 64 && seen.insert({id, c.x[30]}).second)
+            log("hid: GetNpadStyleSet id %#x (lr %s)", id, describe(c.x[30]).c_str());
+    }
+    c.x[0] = id == 0 ? kStyleFullKey : 0;
 }
 
 void BindNpadStyleSetUpdateEvent(CPU& c) {  // (const u32& id, SystemEventType*, EventClearMode)
