@@ -230,8 +230,31 @@ uint64_t sdk_base() {
 
 // The AudioRendererImpl behind an AudioRendererHandle: an sf object whose vtable pointer is that one, within two
 // pointer hops of the handle.
+// The two by symbol when the sdk exports them (P4AU's SDK 12.3.3 does, at other offsets than Wonder's SDK 16: with
+// Wonder's offsets the renderer was never found, nothing signalled the game's audio event, its sound thread stopped
+// after one update and screens waiting for a sound never went on); Wonder's offsets otherwise.
+uint64_t renderer_vtable() {
+    static uint64_t v = [] {
+        uint64_t s = find_symbol(
+            "_ZTVN2nn2sf6detail38ObjectImplFactoryWithStatefulAllocatorINS0_13InterfaceInfoINS_5audio6detail14IAudioRendererEE4_"
+            "tABINS7_5_tO2NINS4_6server24AudioRendererManagerImpl17AudioRendererImplEE4typeES6_E4typeENS0_24StatefulAllocation"
+            "PolicyINS0_16ExpHeapAllocatorEEEE6ObjectE");
+        return s ? s : sdk_base() + kRendererVtable;
+    }();
+    return v;
+}
+uint64_t execute_rendering() {
+    static uint64_t f = [] {
+        uint64_t s = find_symbol("_ZN2nn5audio6server24AudioRendererManagerImpl17AudioRendererImpl29ExecuteAudioRendererRenderingEv");
+        log("audio: ExecuteAudioRendererRendering at %s, renderer vtable at %s", describe(s ? s : sdk_base() + kExecuteRendering).c_str(),
+            describe(renderer_vtable()).c_str());
+        return s ? s : sdk_base() + kExecuteRendering;
+    }();
+    return f;
+}
+
 uint64_t find_renderer(uint64_t handle) {
-    uint64_t vptr = sdk_base() + kRendererVtable + 0x10;
+    uint64_t vptr = renderer_vtable() + 0x10;
     auto valid = [](uint64_t p) { return p >= kModuleBase && p < kKernelBase + kKernelSize && (p & 7) == 0; };
     for (uint64_t a = 0; a < 0x40; a += 8) {
         uint64_t p = ld<uint64_t>(handle + a);
@@ -448,7 +471,7 @@ void audio_render_thread(CPU& c) {
             std::memcpy(saved, c.x, sizeof saved);
             c.x[0] = impl;
             std::lock_guard lk(g_render_system);
-            call(c, sdk_base() + kExecuteRendering);
+            call(c, execute_rendering());
             last_rc = c.x[0];
             std::memcpy(c.x, saved, sizeof saved);
             std::lock_guard pk(g_pace_lock);  // counted under the render lock (AudioRenderSystemUpdate)
@@ -498,6 +521,7 @@ void OpenAudioRenderer(CPU& c) {
         st<uint32_t>(sysev + 0x18, handle_add(w));
     }
     uint64_t rc = c.x[0];
+    execute_rendering();  // logs where both are
     uint64_t impl = rc == 0 ? find_renderer(handle) : 0;
     log("audio: renderer opened (result %llx), impl %llx", (unsigned long long)rc, (unsigned long long)impl);
     if (!impl) return;
