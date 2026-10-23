@@ -1,6 +1,6 @@
 # Build a game's Android APK (NativeActivity, no Gradle): cmake (NDK) -> lib<game>.so -> aapt2 -> zipalign -> apksigner.
 # Usage, in a dev shell (. .\dev.ps1):  android\build_apk.ps1 [-Game <game>] [-Install]   (a folder under games\, default hades)
-param([string]$Game = "hades", [switch]$Install)
+param([string]$Game = "hades", [switch]$Install, [string]$Abis = "arm64-v8a")  # -Abis "arm64-v8a,x86_64" (emulator)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot
 # The SDK: ANDROID_HOME, else C:\Android\sdk, else Android Studio's default (%LOCALAPPDATA%\Android\Sdk).
@@ -14,18 +14,25 @@ $jar = "$sdk\platforms\android-35\android.jar"
 # Hades keeps the layout from before there were other games (private\apk, private\ba).
 $priv = if ($Game -eq "hades") { "$root\private" } else { "$root\private\$Game" }
 $out = "$priv\apk"
-$build = "$priv\ba"
-
-if (-not (Test-Path "$build\build.ninja")) {
-    cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$ndk\build\cmake\android.toolchain.cmake" `
-        -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static "-DNX_GAME=$Game"
+$abiList = @($Abis -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
+# One build folder per ABI: arm64-v8a keeps the old one (private\<game>\ba), x86_64 (the emulator) is ba_x86_64.
+function BuildDir($abi) { if ($abi -eq "arm64-v8a") { "$priv\ba" } else { "$priv\ba_$abi" } }
+foreach ($abi in $abiList) {
+    $build = BuildDir $abi
+    if (-not (Test-Path "$build\build.ninja")) {
+        cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$ndk\build\cmake\android.toolchain.cmake" `
+            "-DANDROID_ABI=$abi" -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static "-DNX_GAME=$Game"
+    }
+    cmake --build $build --target $Game
+    if ($LASTEXITCODE) { throw "native build failed ($abi)" }
 }
-cmake --build $build --target $Game
-if ($LASTEXITCODE) { throw "native build failed" }
 
 Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force "$out\lib\arm64-v8a", "$out\res" | Out-Null
-& "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" --strip-unneeded -o "$out\lib\arm64-v8a\lib$Game.so" "$build\lib$Game.so"
+New-Item -ItemType Directory -Force "$out\res" | Out-Null
+foreach ($abi in $abiList) {
+    New-Item -ItemType Directory -Force "$out\lib\$abi" | Out-Null
+    & "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" --strip-unneeded -o "$out\lib\$abi\lib$Game.so" "$(BuildDir $abi)\lib$Game.so"
+}
 
 & "$bt\aapt2.exe" compile --dir "$PSScriptRoot\res" -o "$out\res.zip"
 # The game's own launcher icon, when the player made it from their dump (private\<game>\icon\res, e.g.
@@ -48,7 +55,9 @@ Compress-Archive -Path "lib" -DestinationPath "$out\lib.zip" -Force
 Pop-Location
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $apk = [System.IO.Compression.ZipFile]::Open("$out\base.apk", "Update")
-[System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk, "$out\lib\arm64-v8a\lib$Game.so", "lib/arm64-v8a/lib$Game.so", "Optimal") | Out-Null
+foreach ($abi in $abiList) {
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk, "$out\lib\$abi\lib$Game.so", "lib/$abi/lib$Game.so", "Optimal") | Out-Null
+}
 # Java of the game's own (games\<game>\java, e.g. Wonder's home screen): javac against android.jar, d8 to classes.dex.
 $java = "$root\games\$Game\java"
 if (Test-Path $java) {

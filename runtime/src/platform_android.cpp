@@ -130,7 +130,11 @@ void yield() {
         sched_yield();
         return;
     }
+#if defined(__aarch64__)
     for (int k = 0; k < 64; k++) asm volatile("yield" ::: "memory");
+#else
+    for (int k = 0; k < 64; k++) __builtin_ia32_pause();
+#endif
 }
 void set_thread_name(const char* name) { pthread_setname_np(pthread_self(), name); }
 int64_t current_thread_id() { return gettid(); }
@@ -161,11 +165,18 @@ void on_sample(int, siginfo_t*, void* uc) {
     for (size_t k = 0; k < g_prof_count; k++)
         if (g_prof_tids[k] == s.tid) s.guest_lr = *g_prof_lr[k];
     std::memset(s.pc, 0, sizeof s.pc);
+#if defined(__aarch64__)
     s.pc[0] = m.pc;
     s.pc[1] = m.regs[30];
     // Frame records (fp -> [prev fp, lr]) on this thread's stack only: between sp and sp + 256 MiB, going up.
     uint64_t fp = m.regs[29], lo = m.sp, hi = m.sp + (256ull << 20);
-    for (int k = 2; k < kFrames && fp >= lo && fp < hi && (fp & 7) == 0; k++) {
+    const int first = 2;
+#else  // x86_64 (the emulator on a PC): rip, then rbp frame records ([prev rbp, return address])
+    s.pc[0] = uint64_t(m.gregs[REG_RIP]);
+    uint64_t fp = uint64_t(m.gregs[REG_RBP]), lo = uint64_t(m.gregs[REG_RSP]), hi = lo + (256ull << 20);
+    const int first = 1;
+#endif
+    for (int k = first; k < kFrames && fp >= lo && fp < hi && (fp & 7) == 0; k++) {
         const uint64_t* rec = reinterpret_cast<const uint64_t*>(fp);
         s.pc[k] = rec[1];
         if (rec[0] <= fp) break;
