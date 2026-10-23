@@ -116,6 +116,13 @@ void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc) {
         raster_dynamic(cb, slack), std::memcpy(b.raster, raster, sizeof raster);  // (nvn_raster.cpp)
 }
 
+// No colour image behind any of the targets' colour slots: P5R binds its shadow maps with two empty colour slots.
+bool depth_only(const Targets& t) {
+    for (uint32_t k = 0; k < t.color_count; k++)
+        if (t.colors[k]) return false;
+    return t.depth != 0;
+}
+
 void begin_rendering(VkCommandBuffer cb, const Targets& t) {
     if (clears_pending_other(t)) clears_flush(cb);  // other targets' clears first, in order
     // An image never written (layout UNDEFINED) has nothing to load: loadOp CLEAR to zero, not a LOAD of whatever
@@ -170,7 +177,7 @@ void begin_rendering(VkCommandBuffer cb, const Targets& t) {
     } else {
         dimg = nullptr;
     }
-    if (dimg && !t.color_count) {  // depth-only targets (P5R: its shadow maps), once each
+    if (dimg && depth_only(t)) {  // depth-only targets (P5R: its shadow maps), once each
         static std::vector<const GpuImage*> seen;
         if (seen.size() < 32 && std::find(seen.begin(), seen.end(), dimg) == seen.end()) {
             seen.push_back(dimg);
@@ -286,7 +293,7 @@ bool shadow_draw_skipped(const Targets& t) {
         const char* e = std::getenv("NX_SHADOWS");
         return e && e[0] == '0';
     }();
-    if (!off || t.color_count || !t.depth) return false;
+    if (!off || !depth_only(t)) return false;
     const GpuImage* d = image_of(t.depth);
     return d && d->width == d->height && d->width >= 512 && !(d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
 }
