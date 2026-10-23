@@ -303,11 +303,34 @@ Notas de la sesión 4:
     `descriptor_buffer`. Sí hay `draw_indirect_count`, `host_query_reset`, `occlusionQueryPrecise` y
     `inheritedQueries`.
 
+49. **Culling por oclusión en la GPU** (`nvn_occlusion.cpp`): cada draw del pase de consultas va dentro de una
+    consulta de oclusión de Vulkan; al primer condicionado se copian los resultados al anillo de subida y cada draw
+    condicionado pasa a `vkCmdDraw[Indexed]IndirectCountKHR` con el resultado como cuenta (máximo 1). Funciona en el PC
+    y en la Adreno 610: el **81 %** de los objetos del título están ocultos y se saltan, y la imagen no cambia.
+    **Pero no gana nada**. ABAB en el título 3D (`ab4.sh`):
+
+    | Variante | GPU por frame | fps |
+    |---|---|---|
+    | sin oclusión (`NX_OCCL=0`, 3 medidas) | 75,7 ms | 7,43 |
+    | oclusión en la GPU (2 medidas) | 78,7 ms | 7,13 |
+    | todos los condicionados saltados (`NX_OCCL_FORCE=0`, techo) | 80,6 ms | 7,24 |
+
+    Ni siquiera saltar todos los condicionados ahorra: esos draws son baratos. Queda **apagado por defecto**
+    (`NX_OCCL=1` lo enciende; `NX_OCCL_STATS=1` registra el % oculto esperando cada envío, solo para comprobar).
+50. **Perfil por pases del título 3D** (`NX_GPU_PROFILE=1`, `runs/tprof4`, 52 ms por frame en total; este modo espera
+    cada envío): dos pases 960x540 de **11,8 y 11,4 ms** (fs del primer draw `20ad01e0` y `62e537d4`), sombras (pases
+    solo profundidad, 2 por frame) **4,7 ms**, skinning por compute 3,1 ms, y el resto menos de 3 ms cada uno.
+51. Scripts: `ab4.sh` (como `ab3.sh`, pero solo cuenta las ventanas del log del título 3D, de 10 o más partes por
+    frame, y repite la prueba si no llegó). `to_title.py` exige ver el menú dos veces seguidas y el texto blanco de
+    "Configuración" (`screen_lib.config_white`): los grafitis cian de la película lo engañaban. Guarda la captura que
+    tomó por menú en `shots/to_title_last.png`. Si el menú se deja quieto, el juego vuelve a la película: medir en los
+    primeros ~25 s. Un arranque con `NX_OCCL=0` se cerró solo al empezar (`runs/oc_v2k1`; sin causa en el log).
+
 ## Falta ❌ (por orden)
 
-1. **Culling por oclusión real** (punto 45: diseño hecho, código sin escribir). Antes, medir el techo con `ab3.sh` (las
-   variantes `NX_OCCL_FORCE=0` y `NX_SHADOWS=0` quedaron sin medir).
-2. **Opción "Sombras"** en el launcher (Desactivadas por defecto / Activadas; `NX_SHADOWS`, punto 46). Medir.
+1. **Opción "Sombras"** en el launcher (Desactivadas por defecto / Activadas; `NX_SHADOWS`, punto 46). Medir con
+   `ab4.sh` (el perfil del título les da 4,7 de 52 ms).
+2. Los dos pases 960x540 del título (11,8 + 11,4 ms, punto 50): qué dibujan y si es geometría o relleno.
 3. Revisar las barreras de Vulkan con la capa de validación (`private/third_party/vvl`), por los objetos que
    desaparecen un frame (punto 39).
 4. Caché de búferes de vértices (16–22 MB/frame copiados) y precalentado de pipelines (`OPTIMIZACION.md`).

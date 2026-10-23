@@ -6,8 +6,10 @@
 // draw becomes an indirect draw whose count is its object's result, at most 1 (VK_KHR_draw_indirect_count: the Adreno
 // 610 has no VK_EXT_conditional_rendering). An object whose query is unknown (another submit, no draw or several,
 // queries used up) is drawn, as before.
-// NX_OCCL=0: no queries, every conditional draw drawn (as before). NX_OCCL_FORCE=0|1: every conditional draw skipped
-// / drawn (the most culling could save). NX_OCCL_STATS=1: how many objects were hidden.
+// Off by default: on the 3D title the tablet culls 81% of these objects and saves nothing (75.7 ms of GPU a frame
+// off, 78.7 on, 80.6 with every conditional draw skipped: they are cheap; PROGRESO.md #49).
+// NX_OCCL=1: on. NX_OCCL_FORCE=0|1: every conditional draw skipped / drawn (the most culling could save).
+// NX_OCCL_STATS=1: how many objects were hidden.
 // NX_TRACE_OCCL=<lines>[@<first frame>]: the sequence (frame, draw, op, counter/mode, address, targets).
 #include <cstdlib>
 #include <cstring>
@@ -47,11 +49,11 @@ bool forced() { return std::getenv("NX_OCCL_FORCE") != nullptr; }
 bool on() {
     static const bool v = [] {
         const char* e = std::getenv("NX_OCCL");
-        bool want = !(e && e[0] == '0') && !forced();
+        bool want = e && e[0] == '1' && !forced();
         // Not with NX_ZERO_DRAWS: its queries wrap every draw (two occlusion queries cannot be active at once).
         bool can = vk_indirect_count() && !zero_draws_on();
         log("nvn: occlusion culling %s", want && can ? "on the GPU (queries and indirect count draws)"
-                                         : want ? "off (no VK_KHR_draw_indirect_count)" : "off (NX_OCCL / NX_OCCL_FORCE)");
+                                         : want ? "off (no VK_KHR_draw_indirect_count)" : "off (NX_OCCL=1: on)");
         return want && can;
     }();
     return v;

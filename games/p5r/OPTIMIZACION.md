@@ -43,10 +43,14 @@ envío por trozos, ADPF.
 - Oclusión: ~413 objetos por frame en el título se dibujan dos veces (pase de consultas + pase condicionado). El
   condicionado se puede hacer en la GPU con `vkCmdDrawIndexedIndirectCountKHR` (diseño en PROGRESO, punto 45).
 - Sombras: 2 mapas D32 (2048 y 1024), ~6 % de la GPU en CARGAR; `NX_SHADOWS=0` los vacía.
+- **Oclusión en la GPU hecha y descartada** (PROGRESO, punto 49): salta el 81 % de los objetos condicionados, pero el
+  título queda igual (75,7 ms sin ella, 78,7 con ella, 80,6 saltándolos todos): esos draws son baratos. Apagada por
+  defecto (`NX_OCCL=1`).
+- Perfil por pases del título 3D (52 ms): pases 960x540 de 11,8 y 11,4 ms, sombras 4,7, skinning por compute 3,1.
 
 ## Siguiente (por impacto estimado)
 
-0. **Culling por oclusión real** (sesión 5): P5R pregunta a la GPU qué objetos se ven (`ReportCounter` samples passed + `SetRenderEnableConditional`) y el port dice siempre que sí: se dibujan todos los objetos ocultos. Con la GPU limitada por geometría (menos píxeles no ayudan) es probablemente la mayor ganancia. Perfil de CARGAR ahora: 61,6 ms/frame en total; los tres pases 3D 960x540 10,6 + 9,3 + 7,3 ms.
+0. ~~Culling por oclusión real~~: hecho en la sesión 6, sin ganancia (los draws condicionados son baratos).
 1. **Caché persistente de búferes** (vértices/índices estáticos en memoria de GPU, invalidada por write-watch): quitaría
    la mayor parte de los 16–22 MB/frame de copias y parte del replay.
 2. Sombras: resolución de los mapas (12 ms/frame).
