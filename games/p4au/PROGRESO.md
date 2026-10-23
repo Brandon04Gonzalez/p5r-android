@@ -139,6 +139,12 @@ Emulador: AVD propia **`P4AU_Dev`** (Android 15 x86_64, 40 GB de datos, 8 núcle
     actualización y no sonaba nada. Ahora se buscan por símbolo (con los offsets de Wonder de respaldo). Resultado en
     PC: `audio: N frames rendered` y `hwopus: 100 packets decoded, peak 13786` (sonido real). La selección de capítulo
     (punto 14) sigue sin responder: no era el audio.
+17. Perfil del hilo principal en la selección de capítulo (emulador): ~80 % de las muestras esperando el vsync /
+    presentación (`main+48616c`, `main+4862f4`), muy poca lógica (`main+2d51fc`, `main+2fc24`, `main+2ce57c`,
+    `main+2314e0`...): la pantalla está en un estado de espera, no cargando. Cómo perfilar en el emulador o un móvil:
+    con el juego en marcha, `adb push <archivo con "8"> "/storage/emulated/0/Persona 4 Arena Ultimax/profile"`, esperar
+    ~10 s y traer `profile.txt` (líneas: hilo, lr del invitado, pila del host). En Git Bash usar rutas `C:/...` para los
+    archivos locales cuando `MSYS_NO_PATHCONV=1`. En PC el perfilador no existe.
 
 Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (en un submenú
 pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto).
