@@ -501,6 +501,8 @@ NX_HLE("_ZN2nn2fs9FlushFileENS0_10FileHandleE", FlushFile);
 NX_HLE("_ZN2nn2fs25EnableGlobalFileDataCacheEPvm", EnableGlobalFileDataCache);
 NX_HLE("_ZN2nn2fs26DisableGlobalFileDataCacheEv", DisableGlobalFileDataCache);
 NX_HLE("_ZN2nn2fs6CommitEPKc", Commit);
+NX_HLE("_ZN2nn2fs14CommitSaveDataEPKc", Commit);  // P4AU imports this one (the SDK's calls Commit inside itself)
+NX_HLE("_ZN2nn2fs32EnableDefaultGlobalFileDataCacheEPvm", EnableGlobalFileDataCache);
 NX_HLE("_ZN2nn2fs13OpenDirectoryEPNS0_15DirectoryHandleEPKci", OpenDirectory);
 NX_HLE("_ZN2nn2fs13ReadDirectoryEPlPNS0_14DirectoryEntryENS0_15DirectoryHandleEl", ReadDirectory);
 NX_HLE("_ZN2nn2fs14CloseDirectoryENS0_15DirectoryHandleE", CloseDirectory);
@@ -530,6 +532,12 @@ void log_recent_files() {
 void add_virtual_file(const std::string& path, std::string data) {
     std::lock_guard lk(g_fs);
     g_virtual[virtual_key(fs::u8path(path))] = std::move(data);
+}
+
+std::string guest_to_host_path(const std::string& guest) {
+    std::lock_guard lk(g_fs);
+    fs::path p = resolve(guest);
+    return p.empty() ? std::string() : utf8(p);
 }
 
 std::string read_game_file(const std::string& relative_to_romfs) {

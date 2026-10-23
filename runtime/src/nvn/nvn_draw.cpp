@@ -567,7 +567,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             sc.offset.x = x, sc.extent.width = uint32_t(w);
         }
     }
-    vp.y += vp.height, vp.height = -vp.height;
+    if (!origin_lower_left()) vp.y += vp.height, vp.height = -vp.height;  // lower-left: Vulkan's own mapping
     set_dynamic(cb, vp, sc);
 
     trace_skin(indexed, c, vs, fs);

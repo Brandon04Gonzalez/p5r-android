@@ -1,6 +1,7 @@
 // NVN device (docs/NVN.md, phases N2-N3). Values come from what the game checks and from the SDK's own NVN driver
 // (recompiled in sdk; NX_NVN_REAL=1 records where each of its procs lives, see nvn_trace.cpp).
 #include <atomic>
+#include <cstdlib>
 #include <map>
 
 #include <nx/runtime.h>
@@ -138,20 +139,32 @@ void nvnDeviceSetDepthMode(CPU& c) {
 }
 void nvnDeviceGetDepthMode(CPU& c) { c.x[0] = g_depth_mode.load(); }
 
-// nvnDeviceSetWindowOriginMode(device, NVNwindowOriginMode) / Get: the replay always draws with NVN's upper-left
-// origin (1; a negative-height viewport, nvn_draw.cpp), what Wonder and P5R use. Lower-left (0) would be upside down.
-std::atomic<uint32_t> g_origin_mode{1};
+// nvnDeviceSetWindowOriginMode(device, NVNwindowOriginMode) / Get: upper-left (1, what Wonder and P5R set) or
+// lower-left (0, NVN's default; P4AU never calls the setter). Before the game sets it the mode is NX_ORIGIN_MODE, else
+// upper-left as before (the game's after_init can set NX_ORIGIN_MODE=0). nvn_vk.h origin_lower_left.
+std::atomic<int> g_origin_mode{-1};
+uint32_t origin_mode() {
+    int m = g_origin_mode.load(std::memory_order_relaxed);
+    if (m < 0) {
+        const char* e = std::getenv("NX_ORIGIN_MODE");
+        m = e && e[0] == '0' ? 0 : 1;
+        g_origin_mode = m;
+        log("nvn: window origin mode %d (%s) until the game sets one", m, m ? "upper-left" : "lower-left");
+    }
+    return uint32_t(m);
+}
 void nvnDeviceSetWindowOriginMode(CPU& c) {
     uint32_t mode = uint32_t(c.x[1]);
-    g_origin_mode = mode;
-    if (mode != 1) log("nvn: window origin mode %u: only upper-left (1) is drawn right", mode);
+    if (origin_mode() != mode) log("nvn: window origin mode %u (%s)", mode, mode ? "upper-left" : "lower-left");
+    g_origin_mode = int(mode != 0);
 }
-void nvnDeviceGetWindowOriginMode(CPU& c) { c.x[0] = g_origin_mode.load(); }
+void nvnDeviceGetWindowOriginMode(CPU& c) { c.x[0] = origin_mode(); }
 
 }  // namespace
 
 namespace nvn {
 bool clip_z_minus_one() { return g_depth_mode.load(std::memory_order_relaxed) == 0; }
+bool origin_lower_left() { return origin_mode() == 0; }
 }  // namespace nvn
 
 NX_HLE("nvnDeviceGetInteger", nvnDeviceGetInteger);

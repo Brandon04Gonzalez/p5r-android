@@ -116,12 +116,14 @@ void kernel_init();
 void log_guest_threads();  // every guest thread's call chain, now (kernel_watch.cpp)
 uint32_t create_main_thread(uint64_t stack_size);  // the calling host thread becomes it
 CPU& current_cpu();
+CPU* current_cpu_or_null();  // null on a host thread that runs no guest code
 uint64_t system_tick();
 // A file the game can open under a mount (e.g. "Content/Mods/X/a.lua" for Content:/Mods/X/a.lua), served from
 // memory; it takes precedence over a real file of the same path (hle_fs.cpp).
 void add_virtual_file(const std::string& path, std::string data);
 // The contents of a real game file under the data folder ("" if missing).
 std::string read_game_file(const std::string& relative_to_romfs);
+std::string guest_to_host_path(const std::string& guest);  // "rom:/a/b" -> host path (hle_fs.cpp), empty if unmounted
 // The last file and directory opens of every thread (a small ring, always on), logged by the crash handlers: what
 // the game was loading when it crashed (hle_fs.cpp).
 void log_recent_files();

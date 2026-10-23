@@ -403,7 +403,8 @@ LONG WINAPI watch_handler(EXCEPTION_POINTERS* e) {
     if (e->ExceptionRecord->ExceptionCode != EXCEPTION_SINGLE_STEP || !g_watch) return EXCEPTION_CONTINUE_SEARCH;
     nx::log("WATCH: %llx written (now %llx) at %s.exe+%llx (tools/symbolize.py)", (unsigned long long)g_watch,
             (unsigned long long)nx::ld<uint64_t>(g_watch), nx::game::kInfo.id, (unsigned long long)exe_va(e->ExceptionRecord->ExceptionAddress));
-    dump_guest(nx::current_cpu());
+    if (nx::CPU* c = nx::current_cpu_or_null()) dump_guest(*c);
+    else nx::log("  (host thread, no guest context: the loader)");
     static int hits = 0;
     if (++hits >= 30) e->ContextRecord->Dr7 = 0;
     return EXCEPTION_CONTINUE_EXECUTION;

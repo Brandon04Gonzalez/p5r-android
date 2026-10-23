@@ -284,6 +284,11 @@ void gpu_profile_mark(VkCommandBuffer cb, const std::string& label);
 void gpu_profile_collect();
 void gpu_profile_log(uint64_t frames);
 
+// NVN's window origin (nvn_device.cpp). Upper-left (1, Wonder and P5R set it) draws with a negative-height viewport;
+// lower-left (0, NVN's default, which P4AU keeps) is Vulkan's own mapping: row 0 of every render target is the bottom
+// of the picture, so the draws use a plain viewport with the front face swapped and the present flips the picture.
+bool origin_lower_left();
+
 namespace replay {
 void dedup_reset();  // nvn_dedup.cpp
 bool written_separate();         // nvn_written.cpp (nvn_draw_state.h)

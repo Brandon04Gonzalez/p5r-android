@@ -59,6 +59,41 @@ ServiceRegistrar r_aoc("aoc:u", [] {
     });
 });
 
+// friend:u (P4AU asks it for its play-history key at boot, and for the notification event): no friends, nothing to
+// notify. IFriendService's unknown commands succeed with no output.
+std::shared_ptr<Service> event_service(const char* name, uint32_t cmd) {
+    return make(name, [cmd](Service& s) {
+        s.cmds[cmd] = [](IpcCtx& c) {
+            auto e = std::make_shared<KEvent>();
+            e->state = std::make_shared<EventState>();
+            c.out_copy.push_back(handle_add(e));
+            return 0u;
+        };
+    });
+}
+
+void friend_service(Service& s) {
+    s.cmds[0] = [](IpcCtx& c) {  // CreateFriendService
+        c.push_object(make("IFriendService", [](Service& f) {
+            f.cmds[10101] = [](IpcCtx& c) { c.push<uint32_t>(0); return 0u; };  // GetFriendList: count 0
+            f.cmds[10102] = [](IpcCtx& c) { c.push<uint32_t>(0); return 0u; };  // UpdateFriendInfo
+            f.cmds[10110] = [](IpcCtx& c) { c.push<uint32_t>(0); return 0u; };  // GetFriendProfileImage
+            f.cmds[10600] = [](IpcCtx&) { return 0u; };                           // DeclareOpenOnlinePlaySession
+            f.cmds[10601] = [](IpcCtx&) { return 0u; };                           // DeclareCloseOnlinePlaySession
+            f.cmds[10610] = [](IpcCtx&) { return 0u; };                           // UpdateUserPresence
+        }));
+        return 0u;
+    };
+    s.cmds[1] = [](IpcCtx& c) { c.push_object(event_service("INotificationService", 0)); return 0u; };  // CreateNotificationService
+    s.cmds[2] = [](IpcCtx& c) { c.push_object(make("IDaemonSuspendSessionService")); return 0u; };
+}
+
+ServiceRegistrar r_friend_u("friend:u", [] { return make("friend:u", friend_service); });
+ServiceRegistrar r_friend_v("friend:v", [] { return make("friend:v", friend_service); });
+ServiceRegistrar r_friend_m("friend:m", [] { return make("friend:m", friend_service); });
+ServiceRegistrar r_friend_s("friend:s", [] { return make("friend:s", friend_service); });
+ServiceRegistrar r_friend_a("friend:a", [] { return make("friend:a", friend_service); });
+
 }  // namespace
 
 }  // namespace nx

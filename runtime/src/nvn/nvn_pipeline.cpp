@@ -822,7 +822,8 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
     rs.cullMode = vk_cull(key.polygon.cull);
     // NVNfrontFace CW 0 / CCW 1, taken as is: the draws use a negative-height viewport (nvn_draw.cpp) that gives NVN's
     // upper-left-origin mapping, so windings match NVN's.
-    rs.frontFace = key.polygon.front == 0 ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    // Lower-left origin (P4AU): a plain viewport, so the winding Vulkan sees is the mirror of NVN's.
+    rs.frontFace = (key.polygon.front == 0) != origin_lower_left() ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
     rs.lineWidth = 1.0f;
     // SetDepthClamp: clamps instead of clipping at the near and far planes, like depthClampEnable (a device feature;
     // nvn_vk.cpp enables every core feature the GPU has, and MoltenVK has it through Metal's depth clip mode).

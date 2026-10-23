@@ -37,6 +37,7 @@
 
 #include <nx/runtime.h>
 
+#include "mp4_demux.h"
 #include "platform.h"
 
 namespace nx {
@@ -66,6 +67,19 @@ void md_set_rect(uint64_t md, const char* key, int32_t l, int32_t t, int32_t r, 
     }
 }
 
+// Strings and byte blobs (codec-specific data: H.264 SPS/PPS, the AAC AudioSpecificConfig) share `s`.
+void md_set_str(uint64_t md, const char* key, const std::string& v) {
+    if (MediaMap* m = media(md)) (*m)[key].s = v;
+}
+
+bool md_get_str(uint64_t md, const char* key, std::string& out) {
+    MediaMap* m = media(md);
+    auto it = m ? m->find(key) : MediaMap::iterator{};
+    if (!m || it == m->end() || it->second.is_rect) return false;
+    out = it->second.s;
+    return true;
+}
+
 bool md_get(uint64_t md, const char* key, int32_t& out) {
     MediaMap* m = media(md);
     auto it = m ? m->find(key) : MediaMap::iterator{};
@@ -87,6 +101,14 @@ void MediaDataFindInt32(CPU& c) {
     int32_t v = 0;
     bool found = md_get(c.x[0], reinterpret_cast<const char*>(c.x[1]), v);
     if (found && c.x[2]) st<int32_t>(c.x[2], v);
+    c.x[0] = found;
+}
+// bool FindString(const char* key, const char** out) const: the map keeps the string alive.
+void MediaDataFindString(CPU& c) {
+    MediaMap* m = media(c.x[0]);
+    auto it = m ? m->find(reinterpret_cast<const char*>(c.x[1])) : MediaMap::iterator{};
+    bool found = m && it != m->end() && !it->second.is_rect && !it->second.s.empty();
+    if (found && c.x[2]) st<uint64_t>(c.x[2], reinterpret_cast<uint64_t>(it->second.s.c_str()));
     c.x[0] = found;
 }
 // bool FindRect(const char* key, int32_t* left, int32_t* top, int32_t* right, int32_t* bottom) const
@@ -116,6 +138,8 @@ void BufferSetRange(CPU& c) {  // (int offset, int size)
     st<int32_t>(c.x[0] + kBufSize, int32_t(c.x[2]));
 }
 void BufferBase(CPU& c) { c.x[0] = ld<uint64_t>(c.x[0] + kBufBase); }
+void BufferSize(CPU& c) { c.x[0] = uint32_t(ld<int32_t>(c.x[0] + kBufSize)); }
+void BufferOffset(CPU& c) { c.x[0] = uint32_t(ld<int32_t>(c.x[0] + kBufOffset)); }
 void BufferCapacity(CPU& c) { c.x[0] = ld<uint64_t>(c.x[0] + kBufCapacity); }
 
 // ---- Decoder -----------------------------------------------------------------------------------------------------
@@ -140,6 +164,13 @@ struct Decoder {
     uint32_t type = 0, format = 0, mode = 0;
     uint64_t events[4] = {};
     int32_t width = 0, height = 0, max_input = 0;
+    // From Configure's MediaData (P4AU: the Extractor's track configuration). Empty mime: VP9 video (P5R's CRI).
+    std::string mime, csd0, csd1;
+    bool audio = false;
+    int32_t sample_rate = 48000, channels = 2;
+    // An AAC frame's PCM (16-bit, interleaved), what a silent output holds where there is no decoder.
+    uint64_t pcm_frame_bytes() const { return 1024ull * uint64_t(std::max(1, channels)) * 2; }
+    uint64_t output_bytes() const { return audio ? 8192ull * uint64_t(std::max(2, channels)) * 2 : nv12_size(); }
     std::vector<uint8_t> inputs[kInputs];
     std::deque<int> free_inputs;
     struct Output {
@@ -246,6 +277,13 @@ void to_nv12(const Decoder& d, const uint8_t* src, size_t size, std::vector<uint
 void read_codec_format(Decoder& d) {
     AMediaFormat* f = AMediaCodec_getOutputFormat(d.codec);
     if (!f) return;
+    if (d.audio) {
+        AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, &d.sample_rate);
+        AMediaFormat_getInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, &d.channels);
+        log("movie: audio codec output: %d Hz, %d channels (%s)", d.sample_rate, d.channels, AMediaFormat_toString(f));
+        AMediaFormat_delete(f);
+        return;
+    }
     AMediaFormat_getInt32(f, "color-format", &d.color);
     AMediaFormat_getInt32(f, "stride", &d.codec_stride);
     AMediaFormat_getInt32(f, "slice-height", &d.codec_rows);
@@ -285,7 +323,9 @@ bool pump(Decoder& d, int64_t wait_us) {
         size_t size = 0;
         uint8_t* buf = AMediaCodec_getOutputBuffer(d.codec, size_t(o), &size);
         const uint64_t t0 = plat::monotonic_ns();
-        if (buf && info.size > 0)
+        if (buf && info.size > 0 && d.audio)  // PCM as it comes
+            d.frames[slot].assign(buf + info.offset, buf + info.offset + info.size);
+        else if (buf && info.size > 0)
             to_nv12(d, buf + info.offset, size_t(info.size), d.frames[slot]);
         else
             d.frames[slot].clear();
@@ -302,26 +342,39 @@ bool pump(Decoder& d, int64_t wait_us) {
     return any;
 }
 
-// The device's VP9 decoder, configured for the video (null: none, black frames).
+// The device's decoder for the stream (VP9 for P5R's CRI films; H.264 and AAC from P4AU's MP4 films), configured for
+// it (null: none, black frames or silence).
 AMediaCodec* make_codec(const Decoder& d) {
-    AMediaCodec* c = AMediaCodec_createDecoderByType("video/x-vnd.on2.vp9");
-    if (!c) return nullptr;
+    const char* mime = d.mime.empty() ? "video/x-vnd.on2.vp9" : d.mime.c_str();
+    AMediaCodec* c = AMediaCodec_createDecoderByType(mime);
+    if (!c) {
+        log("movie: no %s decoder on this device", mime);
+        return nullptr;
+    }
     AMediaFormat* f = AMediaFormat_new();
-    AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, "video/x-vnd.on2.vp9");
-    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, d.width);
-    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, d.height);
+    AMediaFormat_setString(f, AMEDIAFORMAT_KEY_MIME, mime);
+    if (d.audio) {
+        AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_SAMPLE_RATE, d.sample_rate);
+        AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_CHANNEL_COUNT, d.channels);
+        AMediaFormat_setInt32(f, "is-adts", 0);
+    } else {
+        AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_WIDTH, d.width);
+        AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_HEIGHT, d.height);
+        AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7F420888);  // COLOR_FormatYUV420Flexible
+    }
     AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_MAX_INPUT_SIZE, d.max_input);
-    AMediaFormat_setInt32(f, AMEDIAFORMAT_KEY_COLOR_FORMAT, 0x7F420888);  // COLOR_FormatYUV420Flexible
+    if (!d.csd0.empty()) AMediaFormat_setBuffer(f, "csd-0", const_cast<char*>(d.csd0.data()), d.csd0.size());
+    if (!d.csd1.empty()) AMediaFormat_setBuffer(f, "csd-1", const_cast<char*>(d.csd1.data()), d.csd1.size());
     media_status_t st = AMediaCodec_configure(c, f, nullptr, nullptr, 0);
     AMediaFormat_delete(f);
     if (st != AMEDIA_OK) {
-        log("movie: the VP9 decoder refused %dx%d (%d): black frames", d.width, d.height, int(st));
+        log("movie: the %s decoder refused %dx%d / %d Hz (%d): no decoding", mime, d.width, d.height, d.sample_rate, int(st));
         AMediaCodec_delete(c);
         return nullptr;
     }
     char* name = nullptr;
     if (AMediaCodec_getName(c, &name) == AMEDIA_OK && name) {
-        log("movie: VP9 decoder %s", name);
+        log("movie: %s decoder %s", mime, name);
         AMediaCodec_releaseName(c, name);
     }
     return c;
@@ -394,10 +447,23 @@ void DecoderConfigure(CPU& c) {
     md_get(c.x[1], "width", d->width);
     md_get(c.x[1], "height", d->height);
     md_get(c.x[1], "max-input-size", d->max_input);
+    md_get_str(c.x[1], "mime", d->mime);
+    md_get_str(c.x[1], "csd-0", d->csd0);
+    md_get_str(c.x[1], "csd-1", d->csd1);
+    d->audio = d->mime.compare(0, 6, "audio/") == 0;
+    if (d->audio) {
+        md_get(c.x[1], "sample-rate", d->sample_rate);
+        md_get(c.x[1], "channel-count", d->channels);
+    }
     if (d->max_input <= 0) d->max_input = 2 << 20;
-    log("movie: decoder configured %dx%d, input buffers of %d bytes", d->width, d->height, d->max_input);
+    if (d->audio)
+        log("movie: decoder configured: %s, %d Hz, %d channels, csd %zu bytes, input buffers of %d bytes", d->mime.c_str(),
+            d->sample_rate, d->channels, d->csd0.size(), d->max_input);
+    else
+        log("movie: decoder configured: %s %dx%d, csd %zu+%zu bytes, input buffers of %d bytes",
+            d->mime.empty() ? "VP9" : d->mime.c_str(), d->width, d->height, d->csd0.size(), d->csd1.size(), d->max_input);
 #if defined(__ANDROID__)
-    if (!d->codec && d->width > 0 && d->height > 0) d->codec = make_codec(*d);
+    if (!d->codec && (d->audio || (d->width > 0 && d->height > 0))) d->codec = make_codec(*d);
 #endif
     c.x[0] = 0;
 }
@@ -411,6 +477,12 @@ void DecoderRegisterClientEvents(CPU& c) {
 }
 
 void put_format(const Decoder& d, uint64_t md) {
+    if (d.audio) {
+        md_set_str(md, "mime", "audio/raw");
+        md_set(md, "sample-rate", d.sample_rate);
+        md_set(md, "channel-count", d.channels);
+        return;
+    }
     md_set(md, "width", d.width);
     md_set(md, "height", d.height);
     md_set(md, "stride", d.stride());
@@ -673,6 +745,18 @@ void DecoderGetOutputBuffer(CPU& c) {
     const std::vector<uint8_t>& frame = d->frames[index];
     uint8_t* base = reinterpret_cast<uint8_t*>(ld<uint64_t>(c.x[2] + kBufBase));
     uint64_t cap = ld<uint64_t>(c.x[2] + kBufCapacity);
+    if (d->audio) {  // PCM, or an AAC frame of silence where nothing decodes
+        uint64_t n = frame.empty() ? std::min(cap, d->pcm_frame_bytes()) : std::min<uint64_t>(cap, frame.size());
+        if (base && n) {
+            if (frame.empty()) std::memset(base, 0, n);
+            else std::memcpy(base, frame.data(), n);
+        }
+        st<int32_t>(c.x[2] + kBufOffset, 0);
+        st<int32_t>(c.x[2] + kBufSize, int32_t(base ? n : 0));
+        d->win.got++;
+        d->frames_out++;
+        return void(c.x[0] = 0);
+    }
     const uint64_t t0 = plat::monotonic_ns();
     // The game's textures over this memory are write-watched (a fault per 4 KB page otherwise: 760 per 1080p frame).
     if (base && cap) plat::write_watch_will_write(reinterpret_cast<uint64_t>(base), std::min<uint64_t>(cap, d->nv12_size()));
@@ -706,7 +790,7 @@ void DecoderGetOutputBufferSize(CPU& c) {
     std::lock_guard lk(g_lock);
     Decoder* d = decoder(c.x[0]);
     if (!d) return void(c.x[0] = kTryAgain);
-    if (c.x[1]) st<int32_t>(c.x[1], int32_t(d->nv12_size()));
+    if (c.x[1]) st<int32_t>(c.x[1], int32_t(d->output_bytes()));
     if (c.x[2]) st<int32_t>(c.x[2], output_slots());
     c.x[0] = 0;
 }
@@ -802,6 +886,286 @@ void SetThreadPriority(CPU& c) {
 }
 void GetThreadPriority(CPU& c) { c.x[0] = uint32_t(g_priority); }
 
+// ---- Extractor ---------------------------------------------------------------------------------------------------
+// P4AU plays its films (romfs data/movie*/*.mp4, H.264 + AAC) with movie::Extractor feeding two movie::Decoders. The
+// object the game allocates is 0x10 bytes: our vtable and an id. The interface follows Android's NuMediaExtractor,
+// which subsdk0 wraps (NnExtractor); statuses are its AndroidErrorToNnError: 0 ok, 0x2000 end of stream (-1011),
+// 0x1000 not ready. Our own demuxer (mp4_demux.cpp) reads the file, so the same code runs on every platform.
+
+constexpr uint32_t kStatusEndOfStream = 0x2000, kStatusError = 0x1000, kStatusBadArg = 0x1002;
+
+struct Extractor {
+    std::unique_ptr<mp4::File> file;
+    std::vector<bool> selected;
+    std::vector<size_t> cursor;
+    std::vector<uint8_t> scratch;
+    std::string path;
+    uint64_t reads = 0;
+    // The selected track whose next sample comes first (NuMediaExtractor's order), or -1 at the end.
+    int current() const {
+        int best = -1;
+        int64_t t = 0;
+        for (size_t k = 0; file && k < file->tracks.size(); k++) {
+            if (!selected[k] || cursor[k] >= file->tracks[k].samples.size()) continue;
+            int64_t tk = file->tracks[k].samples[cursor[k]].time_us;
+            if (best < 0 || tk < t) best = int(k), t = tk;
+        }
+        return best;
+    }
+};
+
+std::unordered_map<uint64_t, std::unique_ptr<Extractor>> g_extractors;
+
+Extractor* extractor(uint64_t self) {
+    auto it = g_extractors.find(ld<uint64_t>(self + 8));
+    return it == g_extractors.end() ? nullptr : it->second.get();
+}
+
+const std::array<const char*, 16> kExtractorVtable = {
+    "movie::Extractor::~Extractor", "movie::Extractor::~Extractor (deleting)", "movie::Extractor::SetDataSource",
+    "movie::Extractor::SetDataSource (memory)", "movie::Extractor::GetTrackCount",
+    "movie::Extractor::GetTrackConfiguration", "movie::Extractor::SelectTrack", "movie::Extractor::UnselectTrack",
+    "movie::Extractor::SeekTo", "movie::Extractor::GetTrackIndexForAvailableData", "movie::Extractor::Read",
+    "movie::Extractor::Advance", "movie::Extractor::GetSampleTime", "movie::Extractor::GetSampleMetaData",
+    "movie::Extractor::GetBufferedRange", "movie::Extractor::SetDataSource (stream)"};
+
+// Extractor::Extractor(ContainerType[, CacheSize])
+void ExtractorCtor(CPU& c) {
+    static uint64_t vtable[kExtractorVtable.size()];
+    static std::once_flag once;
+    std::call_once(once, [] {
+        for (size_t k = 0; k < kExtractorVtable.size(); k++) vtable[k] = hle_address(kExtractorVtable[k]);
+    });
+    std::lock_guard lk(g_lock);
+    const uint64_t id = g_next_id++;
+    g_extractors[id] = std::make_unique<Extractor>();
+    st<uint64_t>(c.x[0], reinterpret_cast<uint64_t>(vtable));
+    st<uint64_t>(c.x[0] + 8, id);
+    log("movie: Extractor(container %u) at present %llu", uint32_t(c.x[1]), (unsigned long long)g_frame.load());
+}
+void ExtractorDtor(CPU& c) {
+    std::lock_guard lk(g_lock);
+    g_extractors.erase(ld<uint64_t>(c.x[0] + 8));
+}
+void ExtractorDeletingDtor(CPU& c) {
+    const uint64_t self = c.x[0];
+    ExtractorDtor(c);
+    static const uint64_t del = find_symbol("_ZdlPv");
+    if (del) {
+        c.x[0] = self;
+        call(c, del);
+    }
+}
+
+// Status SetDataSource(const char* path): a guest path ("rom:/data/movie/x.mp4").
+void ExtractorSetDataSource(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    if (!e || !c.x[1]) return void(c.x[0] = kStatusBadArg);
+    e->path = reinterpret_cast<const char*>(c.x[1]);
+    std::string host = guest_to_host_path(e->path), error;
+    auto f = std::make_unique<mp4::File>();
+    if (host.empty() || !f->open(host, error)) {
+        log("movie: Extractor: %s (%s): %s", e->path.c_str(), host.c_str(), error.c_str());
+        return void(c.x[0] = kStatusError);
+    }
+    for (const auto& t : f->tracks)
+        log("movie: Extractor: %s track %s: %zu samples, %.2f s%s, %dx%d, %d Hz x %d", e->path.c_str(), t.mime.c_str(),
+            t.samples.size(), double(t.duration_us) / 1e6, t.video ? " (video)" : t.audio ? " (audio)" : "", t.width,
+            t.height, t.sample_rate, t.channels);
+    e->selected.assign(f->tracks.size(), false);
+    e->cursor.assign(f->tracks.size(), 0);
+    e->file = std::move(f);
+    c.x[0] = 0;
+}
+void ExtractorSetDataSourceOther(CPU& c) {
+    log("movie: Extractor: SetDataSource from memory or a stream reader is not supported");
+    c.x[0] = kStatusError;
+}
+
+// Status GetTrackCount(int* count)
+void ExtractorGetTrackCount(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    if (!e || !e->file) return void(c.x[0] = kStatusError);
+    if (c.x[1]) st<int32_t>(c.x[1], int32_t(e->file->tracks.size()));
+    c.x[0] = 0;
+}
+
+// Status GetTrackConfiguration(int index, MediaData*): what Decoder::Configure takes.
+void ExtractorGetTrackConfiguration(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    const int k = int(c.x[1]);
+    if (!e || !e->file || k < 0 || k >= int(e->file->tracks.size())) return void(c.x[0] = kStatusBadArg);
+    const mp4::Track& t = e->file->tracks[k];
+    const uint64_t md = c.x[2];
+    md_set_str(md, "mime", t.mime.empty() ? std::string("application/octet-stream") : t.mime);
+    md_set(md, "max-input-size", int32_t(t.max_sample_size + 4096 + (t.video ? t.max_sample_size / 8 : 0)));
+    if (t.video) {
+        md_set(md, "width", t.width);
+        md_set(md, "height", t.height);
+        md_set(md, "frame-rate", int32_t(t.frame_rate() + 0.5));
+    }
+    if (t.audio) {
+        md_set(md, "sample-rate", t.sample_rate);
+        md_set(md, "channel-count", t.channels);
+    }
+    if (!t.csd0.empty()) md_set_str(md, "csd-0", std::string(t.csd0.begin(), t.csd0.end()));
+    if (!t.csd1.empty()) md_set_str(md, "csd-1", std::string(t.csd1.begin(), t.csd1.end()));
+    c.x[0] = 0;
+}
+
+void ExtractorSelect(CPU& c, bool on) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    const int k = int(c.x[1]);
+    if (!e || !e->file || k < 0 || k >= int(e->file->tracks.size())) return void(c.x[0] = kStatusBadArg);
+    e->selected[k] = on;
+    c.x[0] = 0;
+}
+void ExtractorSelectTrack(CPU& c) { ExtractorSelect(c, true); }
+void ExtractorUnselectTrack(CPU& c) { ExtractorSelect(c, false); }
+
+// Status SeekTo(int64_t time_us): each selected track to its last sync sample at or before the time.
+void ExtractorSeekTo(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    if (!e || !e->file) return void(c.x[0] = kStatusError);
+    const int64_t us = int64_t(c.x[1]);
+    for (size_t k = 0; k < e->file->tracks.size(); k++) {
+        const auto& s = e->file->tracks[k].samples;
+        size_t pick = 0;
+        for (size_t i = 0; i < s.size() && s[i].time_us <= us; i++)
+            if (s[i].sync) pick = i;
+        e->cursor[k] = pick;
+    }
+    log("movie: Extractor: seek to %.3f s", double(us) / 1e6);
+    c.x[0] = 0;
+}
+
+// Status GetTrackIndexForAvailableData(size_t* index): the track of the next sample.
+void ExtractorGetTrackIndexForAvailableData(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    if (!e || !e->file) return void(c.x[0] = kStatusError);
+    const int k = e->current();
+    if (k < 0) return void(c.x[0] = kStatusEndOfStream);
+    if (c.x[1]) st<uint64_t>(c.x[1], uint64_t(k));
+    c.x[0] = 0;
+}
+
+// Status Read(Buffer*): the next sample at the buffer's start (H.264 with start codes).
+void ExtractorRead(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    if (!e || !e->file || !c.x[1]) return void(c.x[0] = kStatusError);
+    const int k = e->current();
+    if (k < 0) return void(c.x[0] = kStatusEndOfStream);
+    const mp4::Track& t = e->file->tracks[k];
+    if (!e->file->read(t, t.samples[e->cursor[k]], e->scratch)) return void(c.x[0] = kStatusError);
+    uint8_t* base = reinterpret_cast<uint8_t*>(ld<uint64_t>(c.x[1] + kBufBase));
+    const uint64_t cap = ld<uint64_t>(c.x[1] + kBufCapacity);
+    if (!base || e->scratch.size() > cap) {
+        log("movie: Extractor: a %zu-byte sample does not fit a %llu-byte buffer", e->scratch.size(), (unsigned long long)cap);
+        return void(c.x[0] = kStatusBadArg);
+    }
+    std::memcpy(base, e->scratch.data(), e->scratch.size());
+    st<int32_t>(c.x[1] + kBufOffset, 0);
+    st<int32_t>(c.x[1] + kBufSize, int32_t(e->scratch.size()));
+    if (e->reads++ == 0) log("movie: Extractor: first read, track %d, %zu bytes", k, e->scratch.size());
+    c.x[0] = 0;
+}
+
+// Status Advance()
+void ExtractorAdvance(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    if (!e || !e->file) return void(c.x[0] = kStatusError);
+    const int k = e->current();
+    if (k < 0) return void(c.x[0] = kStatusEndOfStream);
+    e->cursor[k]++;
+    c.x[0] = 0;
+}
+
+// Status GetSampleTime(int64_t* time_us)
+void ExtractorGetSampleTime(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    if (!e || !e->file) return void(c.x[0] = kStatusError);
+    const int k = e->current();
+    if (k < 0) return void(c.x[0] = kStatusEndOfStream);
+    if (c.x[1]) st<int64_t>(c.x[1], e->file->tracks[k].samples[e->cursor[k]].time_us);
+    c.x[0] = 0;
+}
+
+void ExtractorGetSampleMetaData(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    const int k = e && e->file ? e->current() : -1;
+    if (k < 0) return void(c.x[0] = kStatusEndOfStream);
+    md_set(c.x[1], "is-sync-frame", e->file->tracks[k].samples[e->cursor[k]].sync ? 1 : 0);
+    c.x[0] = 0;
+}
+
+// Status GetBufferedRange(int64_t* start, int64_t* end): the whole file is local.
+void ExtractorGetBufferedRange(CPU& c) {
+    std::lock_guard lk(g_lock);
+    Extractor* e = extractor(c.x[0]);
+    int64_t end = 0;
+    if (e && e->file)
+        for (const auto& t : e->file->tracks) end = std::max(end, t.duration_us);
+    if (c.x[1]) st<int64_t>(c.x[1], 0);
+    if (c.x[2]) st<int64_t>(c.x[2], end);
+    c.x[0] = 0;
+}
+
+// bool GetH264NalUnitStartPositionAndNalSize(uint8_t** data, size_t* size, uint8_t** nal, size_t* nal_size): the
+// first NAL unit after a 00 00 01 start code in [*data, *data + *size), without trailing zeros; *data / *size move on
+// to the next start code (0 / 0 when there is none). A port of subsdk0's own (0x1215c0).
+void GetH264NalUnitStartPositionAndNalSize(CPU& c) {
+    const uint64_t pd = c.x[0], ps = c.x[1], pn = c.x[2], pz = c.x[3];
+    if (!pd || !ps || !pn || !pz) return void(c.x[0] = 0);
+    const uint64_t n = ld<uint64_t>(ps);
+    const uint8_t* p = reinterpret_cast<const uint8_t*>(ld<uint64_t>(pd));
+    st<uint64_t>(pn, 0);
+    st<uint64_t>(pz, 0);
+    if (n < 3) return void(c.x[0] = 0);
+    uint64_t i = 0;
+    for (; i != n - 2; i++)
+        if (p[i + 2] == 1 && p[i] == 0 && p[i + 1] == 0) break;
+    if (i == n - 2) {
+        st<uint64_t>(pd, reinterpret_cast<uint64_t>(p + n - 2));
+        st<uint64_t>(ps, 2);
+        return void(c.x[0] = 0);
+    }
+    uint64_t j = i + 3, next = n, end = n;  // next: where the next start code begins; end: this NAL's end
+    bool found = false;
+    while (j < n) {
+        if (p[j] == 1 && p[j - 1] == 0 && p[j - 2] == 0) {
+            found = true;
+            break;
+        }
+        j++;
+    }
+    if (found) {
+        next = j - 2, end = j - 2;
+        while (end > i + 4 && p[end - 1] == 0) end--;  // zeros before the start code (4-byte codes, padding)
+    } else {
+        j = n + 2;
+    }
+    st<uint64_t>(pn, reinterpret_cast<uint64_t>(p + i + 3));
+    st<uint64_t>(pz, end - i - 3);
+    if (j + 2 >= n) {
+        st<uint64_t>(pd, 0);
+        st<uint64_t>(ps, 0);
+    } else {
+        st<uint64_t>(pd, reinterpret_cast<uint64_t>(p + next));
+        st<uint64_t>(ps, n - j + 2);
+    }
+    c.x[0] = 1;
+}
+
 }  // namespace
 
 NX_HLE("_ZN5movie12SetAllocatorEPFPvmmS0_EPFvS0_S0_EPFS0_S0_mS0_ES0_", SetAllocator);
@@ -814,6 +1178,29 @@ NX_HLE("_ZN5movie9MediaDataD1Ev", MediaDataDtor);
 NX_HLE("_ZN5movie9MediaData5ClearEv", MediaDataClear);
 NX_HLE("_ZNK5movie9MediaData9FindInt32EPKcPi", MediaDataFindInt32);
 NX_HLE("_ZNK5movie9MediaData8FindRectEPKcPiS3_S3_S3_", MediaDataFindRect);
+NX_HLE("_ZNK5movie9MediaData10FindStringEPKcPS2_", MediaDataFindString);
+NX_HLE("_ZNK5movie6Buffer4SizeEv", BufferSize);
+NX_HLE("_ZNK5movie6Buffer6OffsetEv", BufferOffset);
+NX_HLE("_ZN5movie37GetH264NalUnitStartPositionAndNalSizeEPPhPmS1_S2_", GetH264NalUnitStartPositionAndNalSize);
+NX_HLE("_ZN5movie9ExtractorC1ENS_13ContainerTypeE", ExtractorCtor);
+NX_HLE("_ZN5movie9ExtractorC1ENS_13ContainerTypeENS_9CacheSizeE", ExtractorCtor);
+// The vtable's entries (kExtractorVtable), in its order: subsdk0's _ZTVN5movie9ExtractorE.
+NX_HLE("movie::Extractor::~Extractor", ExtractorDtor);
+NX_HLE("movie::Extractor::~Extractor (deleting)", ExtractorDeletingDtor);
+NX_HLE("movie::Extractor::SetDataSource", ExtractorSetDataSource);
+NX_HLE("movie::Extractor::SetDataSource (memory)", ExtractorSetDataSourceOther);
+NX_HLE("movie::Extractor::GetTrackCount", ExtractorGetTrackCount);
+NX_HLE("movie::Extractor::GetTrackConfiguration", ExtractorGetTrackConfiguration);
+NX_HLE("movie::Extractor::SelectTrack", ExtractorSelectTrack);
+NX_HLE("movie::Extractor::UnselectTrack", ExtractorUnselectTrack);
+NX_HLE("movie::Extractor::SeekTo", ExtractorSeekTo);
+NX_HLE("movie::Extractor::GetTrackIndexForAvailableData", ExtractorGetTrackIndexForAvailableData);
+NX_HLE("movie::Extractor::Read", ExtractorRead);
+NX_HLE("movie::Extractor::Advance", ExtractorAdvance);
+NX_HLE("movie::Extractor::GetSampleTime", ExtractorGetSampleTime);
+NX_HLE("movie::Extractor::GetSampleMetaData", ExtractorGetSampleMetaData);
+NX_HLE("movie::Extractor::GetBufferedRange", ExtractorGetBufferedRange);
+NX_HLE("movie::Extractor::SetDataSource (stream)", ExtractorSetDataSourceOther);
 NX_HLE("_ZN5movie6BufferC1Ev", BufferCtor);
 NX_HLE("_ZN5movie6BufferD1Ev", BufferDtor);
 NX_HLE("_ZN5movie6Buffer18SetDataAndCapacityEPvm", BufferSetDataAndCapacity);

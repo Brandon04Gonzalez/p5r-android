@@ -380,6 +380,8 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
         cx = float(crop[0]), cy = float(crop[1]), cw = float(crop[2]), ch = float(crop[3]);
     p.crop[0] = cx / float(src.width), p.crop[1] = cy / float(src.height);
     p.crop[2] = cw / float(src.width), p.crop[3] = ch / float(src.height);
+    if (origin_lower_left())  // row 0 is the bottom of the picture (and the crop's y counts from it): read upwards
+        p.crop[1] = (cy + ch) / float(src.height), p.crop[3] = -ch / float(src.height);
     bool sideways = r == 1 || r == 3;
     float tw = float(sideways ? g.extent.height : g.extent.width), th = float(sideways ? g.extent.width : g.extent.height);
     float scale = std::min(tw / cw, th / ch), bw = cw * scale / tw, bh = ch * scale / th;

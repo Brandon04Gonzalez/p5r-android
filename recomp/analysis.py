@@ -108,6 +108,9 @@ def analyze(m, log=print):
     # Seeds.
     fdes = [f for f in ehframe.parse(m) if t0 <= f.start < text_end]
     entries = {f.start for f in fdes} | set(an.plt) | set(an.names)
+    # P4AU's main has FDEs of size 0 (main+51310, a constructor, among them): the start is a function, but the
+    # bounds come from the next entry. Kept as FDE bounds, the function was empty and called itself.
+    fdes = [f for f in fdes if f.size > 0]
     entries |= {a for a in m.init_array + m.fini_array if t0 <= a < text_end}
     for r in m.relocs:
         if r.type == nso.R_AARCH64_RELATIVE and t0 <= r.addend < text_end and r.addend in insns:

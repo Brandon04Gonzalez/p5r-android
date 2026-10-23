@@ -75,6 +75,7 @@ KThread* self_thread() { return t_self; }
 uint64_t heap_size() { return g_heap_size; }
 
 CPU& current_cpu() { return t_self->ctx; }
+CPU* current_cpu_or_null() { return t_self ? &t_self->ctx : nullptr; }
 
 uint64_t system_tick() { return plat::monotonic_ns() * 192 / 10000; }  // 19.2 MHz
 

@@ -320,9 +320,11 @@ void frame_dump_write(const GpuImage& img, uint64_t frame) {
         const uint8_t* px = static_cast<const uint8_t*>(p);
         bool bgra = img.format == VK_FORMAT_B8G8R8A8_UNORM;
         std::vector<uint8_t> row(size_t(img.width) * 3);
+        const bool flip = origin_lower_left();  // written upright
         for (uint32_t y = 0; y < img.height; y++) {
+            const uint32_t sy = flip ? img.height - 1 - y : y;
             for (uint32_t x = 0; x < img.width; x++) {
-                const uint8_t* s = px + (size_t(y) * img.width + x) * 4;
+                const uint8_t* s = px + (size_t(sy) * img.width + x) * 4;
                 row[x * 3 + 0] = bgra ? s[2] : s[0];
                 row[x * 3 + 1] = s[1];
                 row[x * 3 + 2] = bgra ? s[0] : s[2];

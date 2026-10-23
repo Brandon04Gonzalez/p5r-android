@@ -249,6 +249,16 @@ std::shared_ptr<Service> application_functions() {
             c.out_copy.push_back(event_handle(std::make_shared<EventState>()));
             return 0u;
         };
+        s.cmds[140] = [](IpcCtx& c) {  // GetFriendInvitationStorageChannelEvent (P4AU polls it every frame)
+            c.out_copy.push_back(event_handle(std::make_shared<EventState>()));
+            return 0u;
+        };
+        s.cmds[141] = [](IpcCtx&) { return 0x2A80u; };  // TryPopFromFriendInvitationStorageChannel: none
+        s.cmds[150] = [](IpcCtx& c) {  // GetNotificationStorageChannelEvent
+            c.out_copy.push_back(event_handle(std::make_shared<EventState>()));
+            return 0u;
+        };
+        s.cmds[151] = [](IpcCtx&) { return 0x2A80u; };  // TryPopFromNotificationStorageChannel: none
         s.cmds[210] = [](IpcCtx&) { return 0u; };  // UnsetGameCardEject... (stub)
     });
 }
