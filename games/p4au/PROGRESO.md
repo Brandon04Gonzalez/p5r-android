@@ -7,8 +7,8 @@
 **P4AU funciona en PC y en Android (emulador)**: logos de ATLUS/Arc System Works, aviso de guardado (crea la
 partida), película de apertura (en Android se decodifica de verdad con `AMediaCodec`; en PC sale negra), pantalla de
 título, menú principal en 3D, submenú de historia y selección de capítulo ("MODO HISTORIA"). PC a 60 fps; emulador
-x86_64 (`P4AU_Dev`, Vulkan 1.3 de gfxstream sobre la RTX 4060) a 46–60 fps. Sonido: `hwopus` implementado con
-libopus (las voces/música Opus del juego). **Los combates funcionan** en PC (60 fps) y en el emulador (Yu contra
+x86_64 (`P4AU_Dev`, Vulkan 1.3 de gfxstream sobre la RTX 4060) a 46–60 fps. **Sonido**: AudioRenderer del SDK en
+proceso (arreglado para el SDK 12.3.3, punto 16) y `hwopus` con libopus (música/voces Opus). **Los combates funcionan** en PC (60 fps) y en el emulador (Yu contra
 Yosuke en la lección 1: personajes, Persona, efectos, HUD y escenario se ven bien).
 
 ## Cómo funciona el port
@@ -132,6 +132,13 @@ Emulador: AVD propia **`P4AU_Dev`** (Android 15 x86_64, 40 GB de datos, 8 núcle
     ninguna prueba se decodificó un solo paquete**: `hwopus: N packets decoded` nunca sale). Siguiente paso: ver qué
     señala ese evento y qué espera la pantalla (desensamblar `main+35a14` y el bucle de la selección).
 15. `hwopus` registra `hwopus: N packets decoded, peak P` (paquete 1, 100 y cada 2000) para saber si suena algo.
+16. **Sonido arreglado** (`hle_audio.cpp`): el runtime buscaba el AudioRenderer interno del SDK con offsets fijos del SDK
+    16 de Wonder (vtable del objeto sf y `ExecuteAudioRendererRendering`). En el SDK 12.3.3 de P4AU no lo encontraba
+    (`renderer opened ..., impl 0`): sin hilo de render nadie señalaba el evento de audio del juego, su hilo de sonido
+    (`main+35a14`, bucle `RequestUpdateAudioRenderer` + `WaitSystemEvent`) se quedaba parado tras la primera
+    actualización y no sonaba nada. Ahora se buscan por símbolo (con los offsets de Wonder de respaldo). Resultado en
+    PC: `audio: N frames rendered` y `hwopus: 100 packets decoded, peak 13786` (sonido real). La selección de capítulo
+    (punto 14) sigue sin responder: no era el audio.
 
 Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (en un submenú
 pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto).
@@ -139,7 +146,7 @@ pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancela
 ## Falta ❌ (por orden)
 
 1. La selección de capítulo de historia que no responde (punto 14) y comprobar Arcade/Versus completos.
-2. Sonido: comprobar de oído en el emulador/móvil qué suena (AudioRenderer del SDK) y por qué no se decodifica Opus.
+2. Sonido: comprobar de oído en el emulador/móvil (ya se renderiza y se decodifica Opus, punto 16).
 3. Probar en un móvil real (arm64: Adreno/Mali/PowerVR) copiando los datos a `Persona 4 Arena Ultimax/`.
 4. Controles táctiles pensados para lucha (ahora son los de P5R sin la mitad de cámara).
 5. Rendimiento en gama media.
