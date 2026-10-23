@@ -8,6 +8,8 @@
 // (bool reset), and 2/5/7/9 for multistream. Input: packets of {u32 size BE, u32 final range BE, data}; output: s16
 // interleaved. Results: consumed bytes, samples per channel[, u64 time].
 #include <algorithm>
+#include <atomic>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <mutex>
@@ -71,6 +73,16 @@ bool decode(OpusState& s, IpcCtx& c, bool reset, bool perf) {
     samples = std::min(max_samples, s.rate / 50);  // 20 ms of silence
     if (pcm && samples > 0) std::memset(pcm, 0, size_t(samples) * 2 * s.channels);
 #endif
+    // Every 2000 packets: how many and the loudest sample since (0 = silence: not decoding).
+    static std::atomic<uint64_t> packets{0};
+    static std::atomic<int> peak{0};
+    for (int k = 0; pcm && k < samples * s.channels; k += 7) {
+        int v = std::abs(int(pcm[k]));
+        if (v > peak.load(std::memory_order_relaxed)) peak.store(v, std::memory_order_relaxed);
+    }
+    const uint64_t n = ++packets;
+    if (n == 1 || n == 100 || n % 2000 == 0)
+        log("hwopus: %llu packets decoded, peak %d since the last line", (unsigned long long)n, peak.exchange(0));
     c.push<uint32_t>(8 + size);
     c.push<uint32_t>(uint32_t(samples));
     if (perf) c.push<uint64_t>(0);
