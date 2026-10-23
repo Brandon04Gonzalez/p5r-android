@@ -6,6 +6,7 @@ param(
     [Parameter(Mandatory)][string]$Name,
     [int]$Seconds = 60,
     [string]$Env = "",
+    [string]$Keys = "",                  # NX_INPUT_SCRIPT ("30:A:0.3;40:DOWN:0.3"): its own config.txt line
     [string]$Serial = "",
     [switch]$Keep
 )
@@ -20,6 +21,7 @@ New-Item -ItemType Directory -Force $run | Out-Null
 
 # -Env first: the runtime keeps the first value of a key (setenv without overwrite), so -Env wins over the defaults.
 $lines = @($Env -split ";" | Where-Object { $_ -match "=" }) + @("NX_FPS_CAP=60", "NX_HANDHELD=1")
+if ($Keys) { $lines += "NX_INPUT_SCRIPT=$Keys" }
 $cfg = "$run\config.txt"
 [System.IO.File]::WriteAllText($cfg, ($lines -join "`n") + "`n")
 & $adb @dev shell am force-stop $pkg 2>$null

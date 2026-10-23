@@ -8,7 +8,8 @@
 partida), película de apertura (en Android se decodifica de verdad con `AMediaCodec`; en PC sale negra), pantalla de
 título, menú principal en 3D, submenú de historia y selección de capítulo ("MODO HISTORIA"). PC a 60 fps; emulador
 x86_64 (`P4AU_Dev`, Vulkan 1.3 de gfxstream sobre la RTX 4060) a 46–60 fps. Sonido: `hwopus` implementado con
-libopus (las voces/música Opus del juego). **Falta comprobar un combate** (no se llegó a entrar en uno).
+libopus (las voces/música Opus del juego). **Los combates funcionan** en PC (60 fps) y en el emulador (Yu contra
+Yosuke en la lección 1: personajes, Persona, efectos, HUD y escenario se ven bien).
 
 ## Cómo funciona el port
 
@@ -61,7 +62,8 @@ cmd /c C:\Users\brand\p4au-port\recomp\games\p4au\tools\build_android.cmd -Abis 
 C:\Users\brand\p4au-port\recomp\games\p4au\tools\run_android.ps1 -Name a1 -Seconds 60 -Serial emulator-5560
 ```
 
-Datos en el teléfono/emulador: `Almacenamiento interno/Persona 4 Arena Ultimax/` con `analysis/`, `spirv/` y
+Para un móvil o tablet: `games\p4au\tools\push_device.ps1 -Serial <serie>` instala el APK, copia los datos (~15,5 GB)
+y da el permiso de archivos. Datos en el teléfono/emulador: `Almacenamiento interno/Persona 4 Arena Ultimax/` con `analysis/`, `spirv/` y
 `extract/romfs/` (copiados desde `private\p4au`). El launcher pide el permiso de "acceso a todos los archivos".
 
 Emulador: AVD propia **`P4AU_Dev`** (Android 15 x86_64, 40 GB de datos, 8 núcleos, 8 GB RAM, GPU del host):
@@ -112,14 +114,24 @@ Emulador: AVD propia **`P4AU_Dev`** (Android 15 x86_64, 40 GB de datos, 8 núcle
     y el evento de entrada se señala cuando hay hueco (hilo de bombeo en Android, `ReleaseOutputBufferIndex` en PC).
     Solo para los flujos MP4 (P5R/CRI como antes).
 
+12. **Combate verificado** (COMBATE → primera opción → lección "No.01 Caminar", Yu Narukami contra Yosuke Hanamura):
+    en PC a 60 fps y en el emulador. Ruta con pulsaciones: `-Keys "10:A:0.2;14:A:0.2;19:RIGHT:0.3;21:A:0.3;24:A:0.3;27:A:0.3;..."`
+    (A cada 3 s hasta los 60 s). En el emulador `run_android.ps1` acepta el mismo `-Keys` (va en su propia línea de
+    `config.txt`).
+13. **Rendimiento en combate**: P4AU dibuja ~7,3 MB de vértices por frame, **100 % iguales** al frame anterior
+    (`NX_UPLOAD_STATS=1`). La caché de búferes entre envíos (`nvn_buffer_cache.cpp`, de P5R sesión 7) los deja en la
+    GPU: de 7,3 a 0,03 MB copiados por frame, imagen idéntica, ~0,5 ms de hash por frame. **Activada por defecto en
+    P4AU** (`game.cpp`; `NX_BUFFER_CACHE=0` en `config.txt` la apaga). En el emulador sin caché el combate iba a ~14 fps
+    (replay 48 ms por frame: copiar a la memoria de gfxstream es lento); **con la caché, 42–47 fps** durante el combate.
+
 Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (B en un
-submenú pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto). En pruebas con
-pulsaciones automáticas, las A en la selección de capítulo abrían ese diálogo y la siguiente lo cancelaba: no se
-llegó a entrar en un capítulo ni en un combate. Probar a mano (COMBATE → Arcade o PRÁCTICA → Entrenamiento).
+submenú pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto). En la selección
+de capítulo de historia, las A automáticas abrían ese diálogo y la siguiente lo cancelaba: no se llegó a entrar en un
+capítulo (probar a mano).
 
 ## Falta ❌ (por orden)
 
-1. **Entrar en un combate** (COMBATE o PRÁCTICA) y en un capítulo de historia; arreglar lo que salga.
+1. Entrar en un capítulo de historia y en Arcade/Versus completos; arreglar lo que salga.
 2. Verificar en pantalla los colores de la película en Android (punto 10) y que el sonido Opus suena (punto 9).
 3. Probar en un móvil real (arm64: Adreno/Mali/PowerVR) copiando los datos a `Persona 4 Arena Ultimax/`.
 4. Controles táctiles pensados para lucha (ahora son los de P5R sin la mitad de cámara).

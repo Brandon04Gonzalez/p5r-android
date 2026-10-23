@@ -78,11 +78,16 @@ NX_HLE("glslcGetDefaultOptions", glslc_nop);
 NX_HLE("glslcGetVersion", glslc_nop);
 
 void game::after_init() {
-    // P4AU never sets the window origin: NVN's default, lower-left (nvn_device.cpp).
+    // P4AU never sets the window origin: NVN's default, lower-left (nvn_device.cpp). In a fight it draws ~7 MB of
+    // vertices a frame that are all the same as the frame before: the buffer cache across submits
+    // (nvn_buffer_cache.cpp) keeps them on the GPU (7.3 -> 0.03 MB copied a frame). config.txt's
+    // NX_BUFFER_CACHE=0 turns it off.
 #if defined(_WIN32)
     if (!std::getenv("NX_ORIGIN_MODE")) _putenv_s("NX_ORIGIN_MODE", "0");
+    if (!std::getenv("NX_BUFFER_CACHE")) _putenv_s("NX_BUFFER_CACHE", "1");
 #else
     setenv("NX_ORIGIN_MODE", "0", 0);
+    setenv("NX_BUFFER_CACHE", "1", 0);
 #endif
     const LoadedModule* m = module_at(find_symbol("nnMain"));
     if (!m) return;
