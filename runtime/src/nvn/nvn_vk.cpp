@@ -52,6 +52,7 @@ VkSurfaceTransformFlagBitsKHR g_sc_transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT
 VkFormat g_sc_format = VK_FORMAT_B8G8R8A8_UNORM;
 VkSemaphore g_acquired = VK_NULL_HANDLE, g_rendered = VK_NULL_HANDLE;
 VkBool32 g_depth_clip_control = VK_FALSE;
+bool g_indirect_count = false;  // VK_KHR_draw_indirect_count (P5R's occlusion culling, nvn_occlusion.cpp)
 bool g_dynamic_rendering = true;  // vkCmdBeginRendering (core 1.3); else render pass objects
 bool g_integrated = false;
 bool g_require_sg32 = false;  // compute pipelines are made with a required subgroup size of 32 (Maxwell's warp)  // the chosen GPU is an integrated one (unified memory, the GPU is the long side)
@@ -205,6 +206,9 @@ bool init() {
         dexts.push_back("VK_EXT_depth_clip_control");
         *tail = &fclip, tail = &fclip.pNext;
     }
+    // Draws counted by an occlusion query's result (nvn_occlusion.cpp): core in 1.2, an extension on the Adreno 610.
+    const bool indirect_count = has_extension(dext, "VK_KHR_draw_indirect_count");
+    if (indirect_count) dexts.push_back("VK_KHR_draw_indirect_count");
     if (has_extension(dext, "VK_KHR_portability_subset")) {
         dexts.push_back("VK_KHR_portability_subset");
         *tail = &fport, tail = &fport.pNext;
@@ -250,6 +254,19 @@ bool init() {
     dci.pNext = &features;
     if (!check(p_create_device(g_physical, &dci, nullptr, &g_device), "vkCreateDevice")) return false;
     p_vkGetDeviceQueue(g_device, g_family, 0, &g_queue);
+    if (indirect_count) {  // device commands of an extension: from the device (the loader may not know them)
+        auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+            reinterpret_cast<PFN_vkGetInstanceProcAddr>(g_gipa)(g_instance, "vkGetDeviceProcAddr"));
+        if (gdpa) {
+            p_vkCmdDrawIndexedIndirectCountKHR = reinterpret_cast<PFN_vkCmdDrawIndexedIndirectCountKHR>(
+                gdpa(g_device, "vkCmdDrawIndexedIndirectCountKHR"));
+            p_vkCmdDrawIndirectCountKHR =
+                reinterpret_cast<PFN_vkCmdDrawIndirectCountKHR>(gdpa(g_device, "vkCmdDrawIndirectCountKHR"));
+        }
+        g_indirect_count = p_vkCmdDrawIndexedIndirectCountKHR && p_vkCmdDrawIndirectCountKHR;
+    }
+    log("nvn/vk: draw indirect count %u, drawIndirectFirstInstance %u", g_indirect_count ? 1u : 0u,
+        g_features.drawIndirectFirstInstance);
 
     VkCommandPoolCreateInfo pci{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     pci.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
@@ -420,6 +437,7 @@ VkPhysicalDevice vk_physical() { return g_physical; }
 VkQueue vk_queue() { return g_queue; }
 uint32_t vk_queue_family() { return g_family; }
 bool vk_depth_clip_control() { return g_depth_clip_control; }
+bool vk_indirect_count() { return g_indirect_count; }
 bool vk_dynamic_rendering() { return g_dynamic_rendering; }
 const VkPhysicalDeviceFeatures& vk_features() { return g_features; }
 bool gpu_is_integrated() { return g_integrated; }
@@ -591,6 +609,7 @@ void gpu_submit(const std::vector<std::shared_ptr<CmdList>>& lists, std::shared_
     draw_begin_submit();
     gpu_profile_begin(g_cb);
     zero_draws_begin_submit(g_cb);
+    occlusion_begin_submit(g_cb);
     // Pipelined: the part up to the last dispatch is queued as soon as it is recorded (nvn_frames.cpp). Not with the
     // profile or the zero-draw queries: they span the submit, which is then waited for whole.
     size_t split_after = gpu_profile_on() || zero_draws_on() ? SIZE_MAX : frame_plan_split(lists);

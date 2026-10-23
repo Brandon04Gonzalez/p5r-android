@@ -25,7 +25,10 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (c.i[0] >= 0 && c.i[0] < kStages && c.i[1] >= 0 && c.i[1] < 16) s.images[c.i[0]][c.i[1]] = c.a[0];
             break;
         case Cmd::DispatchCompute: dispatch_call(cb, c); break;
-        case Cmd::SetRenderEnable: s.render_enable = c.n != 0; break;
+        case Cmd::SetRenderEnable:
+            s.render_enable = c.n != 0;
+            occlusion_render_enable();
+            break;
         case Cmd::SetScissor:
             std::memcpy(s.scissor, c.i, sizeof s.scissor), s.has_scissor = true;
             break;

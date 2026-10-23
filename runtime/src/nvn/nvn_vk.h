@@ -37,6 +37,7 @@ struct GpuImage {
 
 VkDevice vk_device();
 bool vk_depth_clip_control();
+bool vk_indirect_count();  // VK_KHR_draw_indirect_count enabled (nvn_occlusion.cpp)
 bool vk_dynamic_rendering();  // core 1.3 dynamic rendering; without it, render pass objects (nvn_renderpass.cpp)
 // The core features the device was created with (all the GPU has): depthClamp, depthBiasClamp, depthBounds, ...
 const VkPhysicalDeviceFeatures& vk_features();
@@ -240,9 +241,18 @@ void forget_image_views(const GpuImage& img);
 bool debug_snap_wanted(uint64_t draw);
 // nvn_occlusion.cpp: P5R's occlusion queries (ResetCounter / ReportCounter of samples passed) and the draws they
 // make conditional (SetRenderEnableConditional).
+void occlusion_begin_submit(VkCommandBuffer cb);  // the queries of the last submit reset
 void occlusion_reset(VkCommandBuffer cb, const Cmd& c, const Targets& t);
 void occlusion_report(VkCommandBuffer cb, const Cmd& c, const Targets& t);
 void occlusion_conditional(VkCommandBuffer cb, const Cmd& c, const Targets& t);
+void occlusion_render_enable();  // SetRenderEnable: the conditional draws end
+// Around a draw call inside the pass: its query when it is a query pass draw (-1: none).
+int32_t occlusion_query_begin(VkCommandBuffer cb);
+void occlusion_query_end(VkCommandBuffer cb, int32_t q);
+// A conditional draw as an indirect draw counted by its object's query; false: not conditional, draw it as it is.
+bool occlusion_draw(VkCommandBuffer cb, bool indexed, uint32_t count, uint32_t instances, uint32_t first,
+                    int32_t vertex_offset, uint32_t first_instance);
+void occlusion_log();
 
 // nvn_debug.cpp: NX_ZERO_DRAWS, shader pairs whose draws produce no pixel.
 bool zero_draws_on();

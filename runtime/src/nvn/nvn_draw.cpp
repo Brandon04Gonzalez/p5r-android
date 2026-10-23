@@ -541,11 +541,17 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             g_bound.has_index = true, g_bound.index = in.index, g_bound.index_type = in.index_type, g_state_set++;
         }
         bool q = zero_draws_on() && zero_draws_begin(cb, vs->hash + " " + (fs ? fs->hash : std::string("-")));
-        p_vkCmdDrawIndexed(cb, count, uint32_t(std::max(1, c.i[3])), 0, c.i[1], uint32_t(c.i[2]));
+        const int32_t oq = occlusion_query_begin(cb);  // P5R's occlusion culling (nvn_occlusion.cpp)
+        if (!occlusion_draw(cb, true, count, uint32_t(std::max(1, c.i[3])), 0, c.i[1], uint32_t(c.i[2])))
+            p_vkCmdDrawIndexed(cb, count, uint32_t(std::max(1, c.i[3])), 0, c.i[1], uint32_t(c.i[2]));
+        occlusion_query_end(cb, oq);
         if (q) zero_draws_end(cb);
     } else {
         bool q = zero_draws_on() && zero_draws_begin(cb, vs->hash + " " + (fs ? fs->hash : std::string("-")));
-        p_vkCmdDraw(cb, uint32_t(c.i[1]), uint32_t(std::max(1, c.i[3])), uint32_t(c.i[0]), uint32_t(c.i[2]));
+        const int32_t oq = occlusion_query_begin(cb);
+        if (!occlusion_draw(cb, false, uint32_t(c.i[1]), uint32_t(std::max(1, c.i[3])), uint32_t(c.i[0]), 0, uint32_t(c.i[2])))
+            p_vkCmdDraw(cb, uint32_t(c.i[1]), uint32_t(std::max(1, c.i[3])), uint32_t(c.i[0]), uint32_t(c.i[2]));
+        occlusion_query_end(cb, oq);
         if (q) zero_draws_end(cb);
     }
     g_stats.done++;
@@ -626,6 +632,7 @@ void draw_log_stats() {
             (unsigned long long)g_state_kept);
     g_state_set = g_state_kept = 0;
     clears_log();
+    occlusion_log();
     log("nvn passes ended: %llu submit end, %llu draw, %llu dispatch, %llu clear of other targets, %llu clear larger than "
         "the pass, %llu copy, %llu snapshot, %llu SetRenderTargets", (unsigned long long)g_pass_ends[0],
         (unsigned long long)g_pass_ends[1], (unsigned long long)g_pass_ends[2], (unsigned long long)g_pass_ends[3],
