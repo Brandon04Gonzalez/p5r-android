@@ -124,15 +124,22 @@ Emulador: AVD propia **`P4AU_Dev`** (Android 15 x86_64, 40 GB de datos, 8 núcle
     P4AU** (`game.cpp`; `NX_BUFFER_CACHE=0` en `config.txt` la apaga). En el emulador sin caché el combate iba a ~14 fps
     (replay 48 ms por frame: copiar a la memoria de gfxstream es lento); **con la caché, 42–47 fps** durante el combate.
 
-Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (B en un
-submenú pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto). En la selección
-de capítulo de historia, las A automáticas abrían ese diálogo y la siguiente lo cancelaba: no se llegó a entrar en un
-capítulo (probar a mano).
+14. **Selección de capítulo de historia: no responde a nada.** Al entrar, el juego guarda (`bbsave.dat`) y la pantalla
+    se dibuja bien, pero ni la cruceta, ni A (corta o de 1 s), ni + hacen nada (capturas bajo demanda con un archivo
+    `dump_frames` en `private\p4au`: `printf "64 15" > private/p4au/dump_frames` mientras corre). No abre archivos al
+    pulsar y ningún hilo está bloqueado (`NX_THREAD_DUMP_AT`): 5 hilos, el 52 espera un evento en `main+35a14` desde el
+    arranque. Hipótesis: espera a que empiece la música/voz del menú (los 4 decodificadores Opus se abren, pero **en
+    ninguna prueba se decodificó un solo paquete**: `hwopus: N packets decoded` nunca sale). Siguiente paso: ver qué
+    señala ese evento y qué espera la pantalla (desensamblar `main+35a14` y el bucle de la selección).
+15. `hwopus` registra `hwopus: N packets decoded, peak P` (paquete 1, 100 y cada 2000) para saber si suena algo.
+
+Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (en un submenú
+pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto).
 
 ## Falta ❌ (por orden)
 
-1. Entrar en un capítulo de historia y en Arcade/Versus completos; arreglar lo que salga.
-2. Verificar en pantalla los colores de la película en Android (punto 10) y que el sonido Opus suena (punto 9).
+1. La selección de capítulo de historia que no responde (punto 14) y comprobar Arcade/Versus completos.
+2. Sonido: comprobar de oído en el emulador/móvil qué suena (AudioRenderer del SDK) y por qué no se decodifica Opus.
 3. Probar en un móvil real (arm64: Adreno/Mali/PowerVR) copiando los datos a `Persona 4 Arena Ultimax/`.
 4. Controles táctiles pensados para lucha (ahora son los de P5R sin la mitad de cámara).
 5. Rendimiento en gama media.
