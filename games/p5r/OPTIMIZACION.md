@@ -48,6 +48,16 @@ envío por trozos, ADPF.
   defecto (`NX_OCCL=1`).
 - Perfil por pases del título 3D (52 ms): pases 960x540 de 11,8 y 11,4 ms, sombras 4,7, skinning por compute 3,1.
 
+## Sesión 7
+
+- **Menú 3D: de ~7 a ~13,6 fps.** El hilo de render pasaba 55 ms por frame en `apply_write_back`, que comparaba
+  palabra a palabra en el anillo de subida sin caché; ahora copia en bloque primero (PROGRESO, punto 52). El cuello
+  de botella era la CPU, no la GPU.
+- Sombras: el filtro no las reconocía en el título (punto 53). Con el arreglo ahorran ~10 % de GPU; tras el punto 52,
+  ~2 % de fps. Opción del launcher, desactivadas por defecto.
+- Perfil de CPU: `simpleperf` del NDK sobre la app depurable (`--app io.github.p5rrecomp`); los símbolos salen de
+  `private/p5r/ba/libp5r.so` puesto en un `binary_cache` con la ruta del dispositivo.
+
 ## Siguiente (por impacto estimado)
 
 0. ~~Culling por oclusión real~~: hecho en la sesión 6, sin ganancia (los draws condicionados son baratos).

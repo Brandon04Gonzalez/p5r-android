@@ -326,11 +326,43 @@ Notas de la sesión 4:
     tomó por menú en `shots/to_title_last.png`. Si el menú se deja quieto, el juego vuelve a la película: medir en los
     primeros ~25 s. Un arranque con `NX_OCCL=0` se cerró solo al empezar (`runs/oc_v2k1`; sin causa en el log).
 
+52. **El menú 3D pasa de ~7 a ~13,6 fps** (`nvn_written.cpp`, commit `01ece5e`). simpleperf en la tablet
+    (`NDK/simpleperf`, `--app io.github.p5rrecomp`; símbolos con `private/p5r/ba/libp5r.so` en un `binary_cache`)
+    mostró el hilo de render (`g54`) con un núcleo grande al 100 %. El 46 % se iba en `apply_write_back`, que devuelve
+    a la memoria del juego lo que escriben los shaders de cómputo (el skinning). Comparaba palabra a palabra
+    directamente en el anillo de subida, que es memoria sin caché: unos 34 MB/s, 55 ms por frame (el "other" del
+    registro). Ahora copia el bloque con un `memcpy` y compara en memoria normal: 4,5 ms. El anillo con caché
+    (`NX_RING_CACHED=1`) solo no cambiaba nada. `NX_WB_BULK=0` vuelve a lo anterior. El registro trae
+    `nvn: write-backs per frame` (cantidad, MB, % cambiado, ms).
+
+    | Menú 3D (`ab4.sh`, ABBA) | GPU por frame | fps | "other" |
+    |---|---|---|---|
+    | antes (sin sombras) | 69,4 ms | 7,67 | 55 ms |
+    | copia en bloque (sin sombras) | 58,3 ms | 13,94 | 6 ms |
+    | por defecto ahora, con sombras / sin | 59,3 / 58,1 ms | 13,59 / 13,81 | 6 ms |
+
+    Perfil después: el hilo de render sigue al ~97 %. El 20 % es `memmove` (las subidas: ~25 MB por frame de vértices
+    y constantes), 6 % `nx::call`, 4 % `dedup_upload`. Siguiente: la caché persistente de búferes (punto 4 de Falta).
+53. **Sombras**: `NX_SHADOWS=0` no reconocía los mapas de sombras en el título, que P5R enlaza con dos colores vacíos
+    además de la profundidad (`depth_only()` en `nvn_draw.cpp`). Arreglado: antes del punto 52, la GPU bajaba
+    de 78,1 a 70,5 ms por frame (7,34 → 7,65 fps). Después del 52 la diferencia es pequeña (13,6 → 13,8 fps). La
+    opción **"Sombras"** del launcher (desactivadas por defecto) ya está.
+54. **Controles táctiles**: la flecha abajo de la cruceta tocaba el círculo del stick. La cruceta sube (centro y
+    0,40) y el stick baja (0,76). El launcher tiene **"Posición de los controles → Mover"** (`ControlsEditor.java`):
+    se arrastran los controles (la cruceta y A B X Y en grupo, el círculo del stick también), los que se tocan se
+    pintan en rojo, y se guardan en `NX_TOUCH_LAYOUT` (`STICK:x,y,r` es nuevo: el stick toma la mitad de la pantalla
+    donde está su círculo). Comprobado en la tablet: el juego dibuja los controles donde quedaron.
+55. **Icono oficial**: `games/p5r/tools/nsp_icon.py <nsp> <prod.keys> private/p5r/icon` saca `icon_AmericanEnglish.dat`
+    del NCA de control de tu NSP (AES-XTS de la cabecera, la clave de título del ticket, AES-CTR de la RomFS;
+    `pycryptodome` en el venv) y hace los tamaños del launcher y un icono adaptativo. `build_apk.ps1` lo añade si
+    existe `private/<juego>/icon/res`. El icono vive solo en `private/`.
+
 ## Falta ❌ (por orden)
 
-1. **Opción "Sombras"** en el launcher (Desactivadas por defecto / Activadas; `NX_SHADOWS`, punto 46). Medir con
-   `ab4.sh` (el perfil del título les da 4,7 de 52 ms).
-2. Los dos pases 960x540 del título (11,8 + 11,4 ms, punto 50): qué dibujan y si es geometría o relleno.
+1. **Caché persistente de búferes** (vértices e índices que no cambian, en memoria de la GPU e invalidados por
+   write-watch): el `memmove` de las subidas es el 20 % del hilo de render (punto 52), que sigue al ~97 %.
+2. Los dos pases 960x540 del título (11,8 + 11,4 ms, punto 50): qué dibujan y si es geometría o relleno (la GPU va
+   a 58 ms por frame, cerca del hilo de render).
 3. Revisar las barreras de Vulkan con la capa de validación (`private/third_party/vvl`), por los objetos que
    desaparecen un frame (punto 39).
 4. Caché de búferes de vértices (16–22 MB/frame copiados) y precalentado de pipelines (`OPTIMIZACION.md`).
