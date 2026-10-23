@@ -9,7 +9,8 @@ partida), película de apertura (en Android se decodifica de verdad con `AMediaC
 título, menú principal en 3D, submenú de historia y selección de capítulo ("MODO HISTORIA"). PC a 60 fps; emulador
 x86_64 (`P4AU_Dev`, Vulkan 1.3 de gfxstream sobre la RTX 4060) a 46–60 fps. **Sonido**: AudioRenderer del SDK en
 proceso (arreglado para el SDK 12.3.3, punto 16) y `hwopus` con libopus (música/voces Opus). **Los combates funcionan** en PC (60 fps) y en el emulador (Yu contra
-Yosuke en la lección 1: personajes, Persona, efectos, HUD y escenario se ven bien).
+Yosuke en la lección 1: personajes, Persona, efectos, HUD y escenario se ven bien). **El modo historia funciona**
+(punto 18): selección de capítulo y novela visual (Sala Terciopelo con Igor y Margaret).
 
 **En la tablet (Lenovo Tab M11, Adreno 610) también funciona** (sesión 2): menús, Arcade completo hasta el combate,
 controles táctiles y sonido. Pero el combate va a **~30 fps**, y como la lógica cuenta frames, **a media velocidad**
@@ -188,6 +189,35 @@ panel 1200×1920 **solo a 90 Hz** (un único modo de pantalla). Capturas y logs 
 Herramientas nuevas (en `C:\Users\brand\p4au-port\tools`): `tab.sh` (`shot <png>`, `press <botón> [ms]` sobre los
 botones táctiles, `log <destino>`, `fps`) y `tabfight.sh <nombre> "<env>"` (arranca el juego en la tablet y llega solo
 a un combate de Arcade, Yu contra Chie, en ~85 s; necesita la partida ya creada).
+
+### Sesión 2 (2026-10-23, mañana)
+
+18. **La selección de capítulo sí funciona: el punto 14 era un error de la prueba.** No es un menú de lista: hay un
+    **cursor libre** (la flecha amarilla) que se mueve con la cruceta/stick (14 unidades por paso; ZL/ZR acercan y
+    alejan) y A solo abre el capítulo que está **debajo del cursor**. Al entrar, el cursor queda 65 unidades arriba a
+    la izquierda de la tarjeta del capítulo (`main+2a78c4`), justo fuera de su zona (cursor ±32 contra las esquinas
+    de la tarjeta ±32, `main+2a9df0`): hay que moverlo un poco (en la Switch es igual: es el mismo código). Anoche se
+    pulsaba DERECHA y luego IZQUIERDA (vuelve al mismo sitio) y A fuera de la tarjeta; B sí respondía (abre "¿Volver
+    al menú principal?"). Ruta que funciona:
+    `-Keys "10:A:0.2;14:A:0.2;20:A:0.2;24:A:0.2;32:RIGHT:0.15;34:DOWN:0.15;37:A:0.3;45:A:0.3;..."` (A cada 5 s
+    avanza los diálogos). El capítulo 1 ("Un invitado misterioso") empieza con varias líneas sobre negro (es así en
+    el juego) y luego sale la Sala Terciopelo con Igor y Margaret.
+19. Herramientas de depuración nuevas (todas apagadas por defecto):
+    - `NX_P4AU_HOOKS="29868,cc424,..."` (game.cpp): cuenta las llamadas a esas funciones de `main` que pasan por la
+      tabla de funciones (virtuales e indirectas) por llamador, x0, x1 y resultado; lo escribe cada 3 s.
+    - `NX_P4AU_FOCUS=1`: la pila de "foco" de los menús (main+1ade3c0; las ayudas de entrada de menú, `main+8b500`
+      y hermanas, ignoran un botón si `strcmp(foco, pantalla) != 0`) y el bloqueo de entrada. `NX_P4AU_STORY=1`:
+      estado, pestaña, cursor, zoom y tarjeta bajo el cursor de la selección de historia (objeto `main+23bf0b8`).
+      `NX_P4AU_PEEK=<dir>,<n>,<paso>`: palabras de memoria del invitado, cuando cambian.
+    - `NX_WATCH_RW=<dir>[,<dir>...]` (platform_win.cpp, solo PC): hasta 4 puntos de observación de lectura/escritura
+      por hardware en todos los hilos; cada 3 s, quién los tocó (lr del invitado, lr del marco, x19, pc del host).
+    - `hid` registra cada llamador distinto de `GetNpadState`/`GetNpadStyleSet`; `NX_TRACE_TEX_CALLER` y
+      `NX_TRACE_UPLOADS` dan ahora la dirección de la textura y de su memoria, y los cambios de CPU en texturas
+      lineales de 1 MB o más.
+    Cadena de entrada de P4AU: npad (`main+31980`, estado por id en main+7cf1a0) → dispositivo (vtable main+6489c8:
+    Update `main+29418`, IsPressed `main+29868`) → mapeadores de botones (vtables main+64cb88 y main+64cbf0,
+    IsPressed `main+cc424`/`main+cc740`; "recién pulsado" en +0x40) → ayudas de menú (`main+8b500`...) o lectura
+    directa (`main+8a5cc` IsTriggered, `main+8a5e4` IsRepeat).
 
 Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (en un submenú
 pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto).
