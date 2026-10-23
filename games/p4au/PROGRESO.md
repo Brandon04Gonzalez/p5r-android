@@ -4,10 +4,11 @@
 
 ## Estado en una línea
 
-**P4AU arranca en PC hasta los menús**: logos de ATLUS/Arc System Works, aviso de guardado (crea la partida),
-película de apertura (en PC sale negra: no hay decodificador), pantalla de título, menú principal en 3D, selección
-de capítulo y "MODO HISTORIA", a 60 fps. El APK de Android (arm64-v8a para móviles + x86_64 para el emulador) se
-construye con launcher y controles táctiles; ver "Sesión 1 — Android" para lo probado en el emulador.
+**P4AU funciona en PC y en Android (emulador)**: logos de ATLUS/Arc System Works, aviso de guardado (crea la
+partida), película de apertura (en Android se decodifica de verdad con `AMediaCodec`; en PC sale negra), pantalla de
+título, menú principal en 3D, submenú de historia y selección de capítulo ("MODO HISTORIA"). PC a 60 fps; emulador
+x86_64 (`P4AU_Dev`, Vulkan 1.3 de gfxstream sobre la RTX 4060) a 46–60 fps. Sonido: `hwopus` implementado con
+libopus (las voces/música Opus del juego). **Falta comprobar un combate** (no se llegó a entrar en uno).
 
 ## Cómo funciona el port
 
@@ -95,13 +96,33 @@ Emulador: AVD propia **`P4AU_Dev`** (Android 15 x86_64, 40 GB de datos, 8 núcle
 7. Herramientas: `C:\Users\brand\p4au-port\tools\` (`it.sh` compila+prueba, `sheet.py` hoja de capturas, `disas.py`
    desensamblador, `rep.py` reemplazos que respetan CRLF), statusline del proyecto que guarda el % de uso.
 
+### Sesión 1, segunda parte
+
+8. **Funciona en el emulador Android** (APK x86_64): llega al menú de historia a 56–60 fps y la película de apertura
+   se decodifica por hardware (`c2.goldfish.h264.decoder` + `c2.android.aac.decoder`).
+9. **`hwopus` con libopus** (`runtime/src/hle_opus.cpp`; libopus 1.5.2 BSD en `private/third_party/opus-1.5.2`, CMake
+   lo añade si existe y define `NX_HAVE_OPUS`). P4AU abre decodificadores con `OpenHardwareOpusDecoderEx` (cmd 4)
+   al entrar en el menú. El tamaño del búfer de trabajo es simbólico (4 KB por canal): con 80 KB el juego agotaba su
+   heap de sonido y hacía `memset` sobre un puntero nulo (`sdk+53c9d0`).
+10. **Colores de las películas en Android**: el decodificador entrega YUV 4:2:0 "flexible" (planar en los de
+    software); ahora se usa el `image-data` (MediaImage2: offset, paso de columna y de fila de cada plano) del
+    formato de salida para convertir a NV12. Antes salía verde/magenta. (Sin verificar todavía en pantalla.)
+11. **Control de flujo de las películas**: el juego mete datos mientras haya un búfer de entrada libre, mucho más
+    rápido que el tiempo real (2.000+ paquetes en cola). Ahora, con 8 en cola, `AcquireInputBufferIndex` dice "no hay"
+    y el evento de entrada se señala cuando hay hueco (hilo de bombeo en Android, `ReleaseOutputBufferIndex` en PC).
+    Solo para los flujos MP4 (P5R/CRI como antes).
+
+Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (B en un
+submenú pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto). En pruebas con
+pulsaciones automáticas, las A en la selección de capítulo abrían ese diálogo y la siguiente lo cancelaba: no se
+llegó a entrar en un capítulo ni en un combate. Probar a mano (COMBATE → Arcade o PRÁCTICA → Entrenamiento).
+
 ## Falta ❌ (por orden)
 
-1. Probar el APK en el emulador y en un móvil real (Adreno/Mali/PowerVR) y arreglar lo que salga.
-2. Sonido: P4AU usa `hwopus` (decodificador Opus por hardware, servicio sin implementar: `cmd 5` sin respuesta) para
-   voces/efectos y el AudioRenderer. Hace falta un decodificador Opus (libopus) detrás de `hwopus`.
-3. Entrar en un combate y en el modo historia (probado solo hasta el menú de "MODO HISTORIA").
-4. Controles táctiles pensados para lucha (ahora son los de P5R sin cámara).
+1. **Entrar en un combate** (COMBATE o PRÁCTICA) y en un capítulo de historia; arreglar lo que salga.
+2. Verificar en pantalla los colores de la película en Android (punto 10) y que el sonido Opus suena (punto 9).
+3. Probar en un móvil real (arm64: Adreno/Mali/PowerVR) copiando los datos a `Persona 4 Arena Ultimax/`.
+4. Controles táctiles pensados para lucha (ahora son los de P5R sin la mitad de cámara).
 5. Rendimiento en gama media.
 
 ## Notas

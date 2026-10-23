@@ -117,6 +117,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/hle_fiber.cpp
     runtime/src/hle_movie.cpp
     runtime/src/mp4_demux.cpp
+    runtime/src/hle_opus.cpp
     runtime/src/input_script.cpp
     runtime/src/touch_layout.cpp
     runtime/src/perf_hint.cpp
@@ -240,4 +241,18 @@ else()
         # main-thread stack (recompiled calls nest deeply); a link map for tools/symbolize.py.
         target_link_options(${NX_GAME} PRIVATE /STACK:67108864 /HIGHENTROPYVA:NO /MAP)
     endif()
+endif()
+
+# libopus (BSD) for hwopus (runtime/src/hle_opus.cpp), when its source is in private/third_party (P4AU's voices and
+# music). Without it the decoder gives silence.
+set(NX_OPUS_DIR "${CMAKE_SOURCE_DIR}/private/third_party/opus-1.5.2")
+if(EXISTS "${NX_OPUS_DIR}/CMakeLists.txt")
+    set(OPUS_BUILD_PROGRAMS OFF CACHE BOOL "" FORCE)
+    set(OPUS_BUILD_TESTING OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_PKG_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(OPUS_INSTALL_CMAKE_CONFIG_MODULE OFF CACHE BOOL "" FORCE)
+    set(OPUS_DISABLE_INTRINSICS ON CACHE BOOL "" FORCE)
+    add_subdirectory("${NX_OPUS_DIR}" "${CMAKE_BINARY_DIR}/opus" EXCLUDE_FROM_ALL)
+    target_link_libraries(${NX_GAME} PRIVATE opus)
+    target_compile_definitions(${NX_GAME} PRIVATE NX_HAVE_OPUS)
 endif()

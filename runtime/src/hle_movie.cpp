@@ -191,6 +191,19 @@ struct Decoder {
     uint64_t last_got_ns = 0, win_from_ns = 0, last_sent_ns = 0;
     int64_t last_sent_pts = 0, last_got_pts = 0;
     bool starve_logged = false;  // NX_MOVIE_DUMP: threads logged for this pause in the input
+    // Flow control: P4AU's feeders send as long as an input buffer is free, far faster than real time, and every
+    // input used to be free at once (thousands queued for the codec, or of pending black frames). Inputs are refused
+    // while this much waits; `input_wanted` remembers a refusal, to signal the input event when there is room again.
+    bool input_wanted = false;
+    size_t backlog() const {
+#if defined(__ANDROID__)
+        if (codec) return to_codec.size();
+#endif
+        return pending.size() + ready.size();
+    }
+    // 8 stalled the opening film in the emulator (the reader blocked on video while the game held all 16 pictures);
+    // 64 (about 2 s of either stream) still bounds the queue.
+    static constexpr size_t kMaxBacklog = 64;
 #if defined(__ANDROID__)
     AMediaCodec* codec = nullptr;
     struct Input {
@@ -200,6 +213,9 @@ struct Decoder {
     };
     std::deque<Input> to_codec;  // sent by the game, not yet taken by the codec
     int32_t color = 0, codec_stride = 0, codec_rows = 0, crop_left = 0, crop_top = 0;
+    // The output's MediaImage2 ("image-data"), when the codec gives one: offset, column and row step of Y, U, V.
+    bool has_planes = false;
+    uint32_t plane_off[3] = {}, plane_col[3] = {}, plane_row[3] = {};
     bool eos_sent = false;   // the game's end of stream went to the codec
     bool codec_eos = false;  // the end-of-stream picture came out
 #endif
@@ -246,6 +262,27 @@ constexpr int32_t kColorI420 = 19, kColorQcom32m = 0x7FA30C04;
 // Qualcomm/MediaTek variants with aligned strides, which is what ByteBuffer decoders hand out).
 void to_nv12(const Decoder& d, const uint8_t* src, size_t size, std::vector<uint8_t>& out) {
     const int32_t w = d.width, h = d.height;
+    if (d.has_planes) {  // the layout the codec described: any planar or semi-planar YUV 4:2:0, U/V in either order
+        out.resize(size_t(w) * h * 3 / 2);
+        const uint64_t yo = d.plane_off[0] + uint64_t(d.crop_top) * d.plane_row[0] + uint64_t(d.crop_left) * d.plane_col[0];
+        for (int32_t r = 0; r < h; r++) {
+            const uint64_t at = yo + uint64_t(r) * d.plane_row[0];
+            if (at + uint64_t(w - 1) * d.plane_col[0] >= size) return;
+            if (d.plane_col[0] == 1) std::memcpy(out.data() + size_t(r) * w, src + at, size_t(w));
+            else for (int32_t x = 0; x < w; x++) out[size_t(r) * w + x] = src[at + uint64_t(x) * d.plane_col[0]];
+        }
+        uint8_t* uv = out.data() + size_t(w) * h;
+        const uint64_t uo = d.plane_off[1] + uint64_t(d.crop_top / 2) * d.plane_row[1] + uint64_t(d.crop_left / 2) * d.plane_col[1];
+        const uint64_t vo = d.plane_off[2] + uint64_t(d.crop_top / 2) * d.plane_row[2] + uint64_t(d.crop_left / 2) * d.plane_col[2];
+        for (int32_t r = 0; r < h / 2; r++) {
+            const uint64_t ua = uo + uint64_t(r) * d.plane_row[1], va = vo + uint64_t(r) * d.plane_row[2];
+            if (ua + uint64_t(w / 2 - 1) * d.plane_col[1] >= size || va + uint64_t(w / 2 - 1) * d.plane_col[2] >= size) return;
+            uint8_t* row = uv + size_t(r) * w;
+            for (int32_t x = 0; x < w / 2; x++)
+                row[2 * x] = src[ua + uint64_t(x) * d.plane_col[1]], row[2 * x + 1] = src[va + uint64_t(x) * d.plane_col[2]];
+        }
+        return;
+    }
     int32_t stride = d.codec_stride > 0 ? d.codec_stride : w, rows = d.codec_rows > 0 ? d.codec_rows : h;
     if (d.color == kColorQcom32m && d.codec_stride <= 0) stride = (w + 127) & ~127, rows = (h + 31) & ~31;
     out.resize(size_t(w) * h * 3 / 2);
@@ -289,6 +326,22 @@ void read_codec_format(Decoder& d) {
     AMediaFormat_getInt32(f, "slice-height", &d.codec_rows);
     int32_t l = 0, t = 0, r = 0, b = 0;
     if (AMediaFormat_getRect(f, "crop", &l, &t, &r, &b)) d.crop_left = l, d.crop_top = t;
+    // MediaImage2: type, planes, width, height, bit depth, allocated bit depth, then per plane offset, column
+    // increment, row increment, horizontal and vertical subsampling (all uint32). Type 1 = YUV, 8-bit only.
+    void* img = nullptr;
+    size_t img_size = 0;
+    d.has_planes = false;
+    if (AMediaFormat_getBuffer(f, "image-data", &img, &img_size) && img && img_size >= 4 * (6 + 5 * 3)) {
+        uint32_t m[6 + 5 * 4] = {};
+        std::memcpy(m, img, std::min(img_size, sizeof m));
+        if (m[0] == 1 && m[1] >= 3 && m[4] == 8) {
+            for (int p = 0; p < 3; p++) d.plane_off[p] = m[6 + 5 * p], d.plane_col[p] = m[7 + 5 * p], d.plane_row[p] = m[8 + 5 * p];
+            d.has_planes = d.plane_col[0] >= 1 && d.plane_row[0] >= uint32_t(d.width) && d.plane_col[1] >= 1 && d.plane_col[2] >= 1;
+            log("movie: image layout Y %u/%u/%u U %u/%u/%u V %u/%u/%u (offset/column/row)%s", d.plane_off[0], d.plane_col[0],
+                d.plane_row[0], d.plane_off[1], d.plane_col[1], d.plane_row[1], d.plane_off[2], d.plane_col[2], d.plane_row[2],
+                d.has_planes ? "" : ": not used");
+        }
+    }
     log("movie: codec output: color format %#x, stride %d, slice height %d, crop at %d,%d (%s)", d.color,
         d.codec_stride, d.codec_rows, d.crop_left, d.crop_top, AMediaFormat_toString(f));
     AMediaFormat_delete(f);
@@ -518,6 +571,8 @@ void movie_pump_thread(CPU& c) {
             const uint64_t now = plat::monotonic_ns();
             for (auto& [id, d] : g_decoders) {
                 if (d->started && d->codec && pump(*d, 0)) events.push_back(d->events[kOutputAvailable]);
+                if (d->started && d->input_wanted && d->backlog() < Decoder::kMaxBacklog)
+                    d->input_wanted = false, events.push_back(d->events[kInputAvailable]);
                 if (!d->started) continue;
                 // NX_MOVIE_DUMP=<n>: the first n times a playing film gets no input for a second, where every guest
                 // thread is (what the game's reader waits for).
@@ -639,6 +694,10 @@ void DecoderAcquireInputBufferIndex(CPU& c) {
     std::lock_guard lk(g_lock);
     Decoder* d = decoder(c.x[0]);
     if (!d || !d->started || d->free_inputs.empty()) return void(c.x[0] = kTryAgain);
+    if (d->mime.size() && d->backlog() >= Decoder::kMaxBacklog) {  // P4AU's MP4 streams (P5R's CRI: as before)
+        d->input_wanted = true;
+        return void(c.x[0] = kTryAgain);
+    }
     int index = d->free_inputs.front();
     d->free_inputs.pop_front();
     if (c.x[1]) st<int32_t>(c.x[1], index);
@@ -797,7 +856,7 @@ void DecoderGetOutputBufferSize(CPU& c) {
 
 // Status ReleaseOutputBufferIndex(int index)
 void DecoderReleaseOutputBufferIndex(CPU& c) {
-    uint64_t output_event = 0;
+    uint64_t output_event = 0, input_event = 0;
     {
         std::lock_guard lk(g_lock);
         Decoder* d = decoder(c.x[0]);
@@ -812,6 +871,10 @@ void DecoderReleaseOutputBufferIndex(CPU& c) {
                 d->emit(pts, flags);
                 output_event = d->events[kOutputAvailable];
             }
+            if (d->input_wanted && d->backlog() < Decoder::kMaxBacklog) {
+                d->input_wanted = false;
+                input_event = d->events[kInputAvailable];
+            }
 #if defined(__ANDROID__)
             // A picture the codec held for want of a slot; after the end of stream, the last ones are waited for.
             for (int k = 0; k < (d->eos_sent && !d->codec_eos ? 50 : 1) && d->codec; k++)
@@ -823,6 +886,7 @@ void DecoderReleaseOutputBufferIndex(CPU& c) {
         }
     }
     signal(c, output_event);
+    signal(c, input_event);
     c.x[0] = 0;
 }
 
