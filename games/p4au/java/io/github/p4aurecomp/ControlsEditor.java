@@ -22,24 +22,26 @@ import java.util.Map;
 
 /**
  * Drag the on-screen controls where you want them; the game draws them there (NX_TOUCH_LAYOUT in config.txt, read by
- * runtime/src/touch_layout.cpp). The d-pad and the A B X Y diamond move as a whole; L, ZL, R, ZR, - and + one by one;
+ * runtime/src/touch_layout.cpp). The d-pad and the six-button panel (R Y X / ZR B A) move as a whole; L, ZL, - and +
+ * one by one;
  * the stick's ring too (STICK: the stick takes the touches of the half of the screen it is on). Controls that touch
  * each other are drawn red. Full screen like the game (same theme and system bars hidden the same way), so the
  * fractions of the screen mean the same.
  */
 public class ControlsEditor extends Activity {
-    // The game's layout (a copy of kP5R and the stick's place in runtime/src/touch_layout.cpp): name, label, x, y
-    // (0..1 across the landscape screen), radius (a fraction of its height), group (moved together).
+    // The game's layout (a copy of kP4AU and the stick's place in runtime/src/touch_layout.cpp): name, label, x, y
+    // (0..1 across the landscape screen), radius (a fraction of its height), group (moved together: the six-button
+    // panel R Y X / ZR B A is one).
     static final String[] NAMES = {"A", "B", "X", "Y", "R", "ZR", "L", "ZL", "MINUS", "PLUS", "UP", "DOWN", "LEFT",
             "RIGHT", "STICK"};
     static final String[] LABELS = {"A", "B", "X", "Y", "R", "ZR", "L", "ZL", "−", "+", "▲", "▼", "◀", "▶", ""};
     static final float[][] DEFAULTS = {
-            {0.940f, 0.66f, 0.068f}, {0.875f, 0.80f, 0.068f}, {0.875f, 0.52f, 0.068f}, {0.810f, 0.66f, 0.068f},
-            {0.945f, 0.08f, 0.052f}, {0.945f, 0.24f, 0.052f}, {0.055f, 0.08f, 0.052f}, {0.055f, 0.24f, 0.052f},
+            {0.950f, 0.80f, 0.070f}, {0.855f, 0.80f, 0.070f}, {0.925f, 0.58f, 0.070f}, {0.830f, 0.58f, 0.070f},
+            {0.735f, 0.58f, 0.060f}, {0.760f, 0.80f, 0.060f}, {0.055f, 0.08f, 0.052f}, {0.055f, 0.24f, 0.052f},
             {0.440f, 0.07f, 0.045f}, {0.560f, 0.07f, 0.045f},
             {0.135f, 0.31f, 0.048f}, {0.135f, 0.49f, 0.048f}, {0.085f, 0.40f, 0.048f}, {0.185f, 0.40f, 0.048f},
             {0.150f, 0.76f, 0.120f}};
-    static final int[] GROUP = {0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7, 7, 7, 8};
+    static final int[] GROUP = {0, 0, 0, 0, 0, 0, 3, 4, 5, 6, 7, 7, 7, 7, 8};
     static final int STICK = 14;
 
     final boolean es = Locale.getDefault().getLanguage().equals("es");

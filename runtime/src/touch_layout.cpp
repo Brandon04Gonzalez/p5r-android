@@ -12,6 +12,12 @@
 // the right half drags the right stick (the camera). The launcher's editor (games/p5r/java: ControlsEditor.java, which
 // has a copy of this table) moves any of them, the stick's ring included (NX_TOUCH_LAYOUT).
 //
+// Persona 4 Arena Ultimax, landscape: a fighting game, so the face buttons are an arcade six-button panel at the
+// bottom right: Y X (the game's A and B attacks) over B A (C and D, the Persona ones), with R and ZR (the game's
+// shortcuts) at the left of each row, slanted like an arcade stick's. L / ZL in the top-left corner, - and + at the
+// top centre, the d-pad on the left above the stick (menus). The left half is the stick (8 directions for the moves);
+// no camera. The launcher's editor (games/p4au/java: ControlsEditor.java) has a copy of this table.
+//
 // Games without a layout here keep their own touch handling (Hades: zones around the thumb).
 //
 // Elsewhere touch_overlay() draws nothing, except with NX_OVERLAY_DEMO=1 (the buttons at rest), to check the look
@@ -67,6 +73,23 @@ const Named kP5R[] = {
     {"RIGHT", {0.185f, 0.40f, 0.048f, kRight, touch_label(kGlyphRight)}},
 };
 
+const Named kP4AU[] = {
+    {"A", {0.950f, 0.80f, 0.070f, kA, touch_label(kGlyphA)}},
+    {"B", {0.855f, 0.80f, 0.070f, kB, touch_label(kGlyphB)}},
+    {"X", {0.925f, 0.58f, 0.070f, kX, touch_label(kGlyphX)}},
+    {"Y", {0.830f, 0.58f, 0.070f, kY, touch_label(kGlyphY)}},
+    {"R", {0.735f, 0.58f, 0.060f, kR, touch_label(kGlyphR)}},
+    {"ZR", {0.760f, 0.80f, 0.060f, kZR, touch_label(kGlyphZ, kGlyphR)}},
+    {"L", {0.055f, 0.08f, 0.052f, kL, touch_label(kGlyphL)}},
+    {"ZL", {0.055f, 0.24f, 0.052f, kZL, touch_label(kGlyphZ, kGlyphL)}},
+    {"MINUS", {0.440f, 0.07f, 0.045f, kMinus, touch_label(kGlyphMinus)}},
+    {"PLUS", {0.560f, 0.07f, 0.045f, kPlus, touch_label(kGlyphPlus)}},
+    {"UP", {0.135f, 0.31f, 0.048f, kUp, touch_label(kGlyphUp)}},
+    {"DOWN", {0.135f, 0.49f, 0.048f, kDown, touch_label(kGlyphDown)}},
+    {"LEFT", {0.085f, 0.40f, 0.048f, kLeft, touch_label(kGlyphLeft)}},
+    {"RIGHT", {0.185f, 0.40f, 0.048f, kRight, touch_label(kGlyphRight)}},
+};
+
 struct Layout {
     const char* game;
     const Named* buttons;
@@ -79,7 +102,7 @@ struct Layout {
 const Layout kLayouts[] = {
     {"wonder", kWonder, std::size(kWonder), false, kY, 0.15f, 0.72f},
     {"p5r", kP5R, std::size(kP5R), true, 0, 0.15f, 0.76f},
-    {"p4au", kP5R, std::size(kP5R), false, 0, 0.15f, 0.76f},  // P5R's buttons; no camera on the right half
+    {"p4au", kP4AU, std::size(kP4AU), false, 0, 0.15f, 0.76f},
 };
 
 const Layout* layout() {

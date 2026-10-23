@@ -220,6 +220,27 @@ Herramientas nuevas (en `C:\Users\brand\p4au-port\tools`): `tab.sh` (`shot <png>
 botones táctiles, `log <destino>`, `fps`) y `tabfight.sh <nombre> "<env>"` (arranca el juego en la tablet y llega solo
 a un combate de Arcade, Yu contra Chie, en ~85 s; necesita la partida ya creada).
 
+### Sesión 2, tercera parte (2026-10-23, mañana) — historia, controles de lucha
+
+26. **Modo historia largo en PC**: 5 min del capítulo 1 pulsando A cada 0,7 s (`s2-story3`): Sala Terciopelo, Junes
+    (Yu, Yosuke, Chie, Teddie, Yukiko), narraciones, un flashback y cambios de luz; sin errores. R ("Saltar") y ZR
+    ("Saltar rápido") no saltan nada la primera vez (seguramente solo saltan texto ya leído): llegar al primer combate
+    del capítulo pide más tiempo.
+27. **Controles táctiles de lucha** (`touch_layout.cpp` kP4AU y su copia en `ControlsEditor.java`): panel de seis
+    botones de recreativa abajo a la derecha, **R Y X** sobre **ZR B A** (Y X = ataques A y B del juego, B A = los de
+    Persona), inclinado como un stick arcade; el editor del launcher lo mueve entero. L/ZL arriba a la izquierda, − +
+    arriba al centro, la cruceta a la izquierda (menús) y el stick en la mitad izquierda. Probado en el emulador solo
+    con toques (`tab.sh press`, que ya usa las posiciones nuevas: `SERIAL=emulator-5560 SCREEN_W=2400 SCREEN_H=1080`):
+    película → título → menú → BATALLA → Arcade → mando → personaje → dificultad → combate contra Chie, y Y/X atacan
+    ("1 HIT", "COUNTER"). En el emulador (20:9) los botones quedan en gran parte sobre las bandas negras.
+28. **Pista de rendimiento**: en ese combate de Arcade (Chie, escenario de la calle) el emulador va a **~17 fps** (la
+    lección 1 iba a 42–47). La caché de búferes acierta ~5,8 MB por frame y **gasta ~11,6 ms por frame en hashes**
+    (`buffer cache: ... hashing 3488 ms` cada 300 frames); en la lección eran ~0,5 ms. Además replay 33–35 ms. Para el
+    punto 24: evitar rehashear cada frame los rangos estables (vigilancia de escritura por páginas en Android, como
+    las texturas de `write_watch.cpp`, o comprobar los rangos estables cada N frames) puede ahorrar mucho en la CPU.
+    En PC, la ruta de Arcade del punto 12 acabó en "Lección" (el menú recuerda la última categoría): para Arcade,
+    desde el menú principal DERECHA → A (Arcade es la primera opción de BATALLA) → IZQUIERDA → A (mando del lado P1).
+
 Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (en un submenú
 pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto).
 
@@ -229,10 +250,12 @@ pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancela
    `gpu_present` (perfetto con frecuencia de GPU y etapas de render de Adreno; marcas `tl()` dentro de `gpu_present`
    para separar acquire, pase de presentación y `vkQueuePresentKHR`) y por qué la GPU mide 15 ms con esperas y 31 ms
    sin ellas. Si la GPU de verdad no llega, bajar la resolución interna (P4AU ignora `NX_RENDER_RES`: buscar dónde
-   fija 1280×768) o probar la caché de pases.
+   fija 1280×768) o probar la caché de pases. Y en la CPU: el coste de hashes de la caché de búferes en combates de
+   Arcade (punto 28).
 2. Comprobar Versus (y el Modo Historia en la tablet, copiando sus datos de `story/` si hay espacio).
 3. Sonido: comprobar de oído en la tablet (ya se renderiza y se decodifica Opus, puntos 16 y 23).
-4. Controles táctiles pensados para lucha (ahora son los de P5R sin la mitad de cámara; tapan parte de la imagen).
+4. Controles táctiles: el panel de lucha ya está (punto 27); falta probarlo con los dedos en la tablet y ajustar
+   tamaños y opacidad (en 16:10 tapan más imagen que en el emulador).
 5. Probar en otros móviles (Mali/PowerVR) y gama media.
 
 ## Notas
