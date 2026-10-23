@@ -6,6 +6,7 @@
 // readers of a range bind that copy; ranges that meet are merged into a new copy on the GPU (vkCmdCopyBuffer, so in
 // command order); each range is written back once. NX_COMPUTE_SEPARATE=1: the previous behaviour.
 #include <algorithm>
+#include <atomic>
 #include <cstdlib>
 #include <cstring>
 #include <iterator>
@@ -14,6 +15,12 @@
 #include <vector>
 
 #include "nvn_draw_state.h"
+#include "platform.h"
+
+namespace nx::nvn {
+// Write-backs per log window (written_log): count, bytes compared, 8-byte words changed, host ns.
+std::atomic<uint64_t> g_wb_count{0}, g_wb_bytes{0}, g_wb_changed{0}, g_wb_ns{0};
+}  // namespace nx::nvn
 
 namespace nx::nvn::replay {
 
@@ -303,21 +310,48 @@ namespace nx::nvn {
 // rest of those buffers while the submit is replayed. Copying the whole range back put stale bytes over them: meshes
 // exploded into beams and a band of stretched triangles at the horizon, for the rest of the run (DEBUG.md #56). Only
 // the words the GPU changed go back. NX_WRITE_BACK_WHOLE=1: the old whole-range copy.
+// Per frame over the timing window (log_timing, nvn_vk.cpp).
+void write_back_log(uint64_t frames) {
+    const uint64_t n = g_wb_count.exchange(0), bytes = g_wb_bytes.exchange(0), changed = g_wb_changed.exchange(0),
+                   ns = g_wb_ns.exchange(0);
+    if (n && frames)
+        log("nvn: write-backs per frame: %.0f, %.2f MB compared, %.0f%% of the words changed, %.2f ms", double(n) / double(frames),
+            double(bytes) / 1e6 / double(frames), bytes ? 800.0 * double(changed) / double(bytes) : 0.0,
+            double(ns) / 1e6 / double(frames));
+}
+
 void apply_write_back(const WriteBack& w) {
     static const bool whole = std::getenv("NX_WRITE_BACK_WHOLE") != nullptr;
+    const uint64_t t0 = plat::monotonic_ns();
+    g_wb_count++, g_wb_bytes += w.size;
     if (whole || !w.before || w.before->size() < w.size) {
         std::memcpy(w.to, w.from, w.size);
+        g_wb_ns += plat::monotonic_ns() - t0;
         return;
     }
     const uint8_t* was = w.before->data();
-    uint64_t k = 0;
+    // The GPU's bytes copied out of the upload ring in one memcpy first: compared word by word in place, they were
+    // read at ~34 MB/s on the Adreno 610 (55 ms a frame on the 3D title, 7.7 fps; with the copy 6 ms, 13.9 fps;
+    // a host-cached ring alone changed nothing). NX_WB_BULK=0: in place, as before.
+    static const bool bulk = !(std::getenv("NX_WB_BULK") && std::getenv("NX_WB_BULK")[0] == '0');
+    static thread_local std::vector<uint8_t> copy;
+    const uint8_t* from = w.from;
+    if (bulk) {
+        if (copy.size() < w.size) copy.resize(w.size);
+        std::memcpy(copy.data(), w.from, w.size);
+        from = copy.data();
+    }
+    uint64_t k = 0, changed = 0;
     for (; k + 8 <= w.size; k += 8) {
-        if (std::memcmp(w.from + k, was + k, 8) == 0) continue;
+        if (std::memcmp(from + k, was + k, 8) == 0) continue;
+        changed++;
         for (uint64_t b = k; b < k + 8; b += 4)
-            if (std::memcmp(w.from + b, was + b, 4) != 0) std::memcpy(w.to + b, w.from + b, 4);
+            if (std::memcmp(from + b, was + b, 4) != 0) std::memcpy(w.to + b, from + b, 4);
     }
     for (; k < w.size; k++)
-        if (w.from[k] != was[k]) w.to[k] = w.from[k];
+        if (from[k] != was[k]) w.to[k] = from[k];
+    g_wb_changed += changed;
+    g_wb_ns += plat::monotonic_ns() - t0;
 }
 
 }  // namespace nx::nvn

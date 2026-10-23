@@ -116,6 +116,7 @@ struct WriteBack {
     std::shared_ptr<std::vector<uint8_t>> before;
 };
 void apply_write_back(const WriteBack& w);  // nvn_written.cpp
+void write_back_log(uint64_t frames);       // nvn_written.cpp: their volume and time per frame
 std::vector<WriteBack> draw_take_write_backs();  // nvn_draw.cpp: this submit's, for an asynchronous submit
 void debug_dump_textures(uint64_t frame);  // nvn_debug.cpp: NX_DUMP_TEXTURES and the requested ones
 void debug_dump_requested(uint64_t n);      // nvn_debug.cpp: NX_DUMP_ON_TARGET / NX_DUMP_ON_FS
