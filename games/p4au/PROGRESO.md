@@ -128,7 +128,7 @@ Emulador: AVD propia **`P4AU_Dev`** (Android 15 x86_64, 40 GB de datos, 8 núcle
     P4AU** (`game.cpp`; `NX_BUFFER_CACHE=0` en `config.txt` la apaga). En el emulador sin caché el combate iba a ~14 fps
     (replay 48 ms por frame: copiar a la memoria de gfxstream es lento); **con la caché, 42–47 fps** durante el combate.
 
-14. **Selección de capítulo de historia: no responde a nada.** Al entrar, el juego guarda (`bbsave.dat`) y la pantalla
+14. **Selección de capítulo de historia: no responde a nada** (no era cierto: ver punto 18). Al entrar, el juego guarda (`bbsave.dat`) y la pantalla
     se dibuja bien, pero ni la cruceta, ni A (corta o de 1 s), ni + hacen nada (capturas bajo demanda con un archivo
     `dump_frames` en `private\p4au`: `printf "64 15" > private/p4au/dump_frames` mientras corre). No abre archivos al
     pulsar y ningún hilo está bloqueado (`NX_THREAD_DUMP_AT`): 5 hilos, el 52 espera un evento en `main+35a14` desde el

@@ -154,6 +154,21 @@ void focus_check(CPU& c) {
         static std::string story;
         if (story != b) log("p4au story at %.1f s: %s", (plat::monotonic_ns() - t0) / 1e9, b), story = b;
     }
+    // NX_P4AU_PEEK=<hex address>,<count>,<hex step>: those words of guest memory, logged when they change.
+    if (const char* e = std::getenv("NX_P4AU_PEEK")) {
+        unsigned long long a = 0, step = 0;
+        int count = 0;
+        if (std::sscanf(e, "%llx,%d,%llx", &a, &count, &step) == 3 && module_at(a) == nullptr) {
+            std::string v;
+            for (int k = 0; k < count && k < 64; k++) {
+                char w[12];
+                std::snprintf(w, sizeof w, " %08x", ld<uint32_t>(a + step * k));
+                v += w;
+            }
+            static std::string last_peek;
+            if (v != last_peek) log("p4au peek at %.1f s:%s", (plat::monotonic_ns() - t0) / 1e9, v.c_str()), last_peek = v;
+        }
+    }
 }
 
 }  // namespace

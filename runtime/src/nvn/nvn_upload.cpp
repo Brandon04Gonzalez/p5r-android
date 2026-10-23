@@ -173,8 +173,8 @@ void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_
         const uint8_t* m = reinterpret_cast<const uint8_t*>(t.memory);
         size_t nz = 0;
         for (uint64_t k = 0; k < t.storage_size; k += 64) nz += m[k] != 0;
-        log("nvn: upload %ux%u fmt %#x stride %u: %zu of %llu sampled bytes non-zero", t.width, t.height, t.format,
-            t.stride, nz, (unsigned long long)(t.storage_size / 64));
+        log("nvn: upload %llx %ux%u fmt %#x stride %u: %zu of %llu sampled bytes non-zero", (unsigned long long)t.memory,
+            t.width, t.height, t.format, t.stride, nz, (unsigned long long)(t.storage_size / 64));
     }
     uint32_t bw = 1, bh = 1, bytes = 4;
     format_block(t.format, bw, bh, bytes);

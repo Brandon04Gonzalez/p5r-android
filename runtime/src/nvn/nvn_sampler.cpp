@@ -144,6 +144,10 @@ void check_linear_content(Texture& t) {
     // tell a change either (as armed_late above): it counts as one.
     if (t.content_hash ? h != t.content_hash : t.image->uploaded) {
         t.mark_dirty(0, UINT64_MAX);
+        static const bool trace = std::getenv("NX_TRACE_UPLOADS") != nullptr;
+        if (trace && t.storage_size >= (1u << 20))
+            log("nvn: linear texture at %llx %ux%u changed by the CPU (hash %llx -> %llx)", (unsigned long long)t.memory,
+                t.width, t.height, (unsigned long long)t.content_hash, (unsigned long long)h);
         static int logged = 0;
         if (!t.stride && logged++ < 100)
             log("nvn: block-linear texture %llux%u f%x (%llu bytes) changed by the CPU", (unsigned long long)t.width,

@@ -319,7 +319,9 @@ void TextureInitialize(CPU& c) {  // NVNboolean (NVNtexture*, const NVNtextureBu
                 if (next <= fp) break;
                 fp = next;
             }
-            log("nvn: texture %ux%u format %#x flags %#x made from %s", t.width, t.height, t.format, t.flags, chain.c_str());
+            log("nvn: texture %llx %ux%u format %#x flags %#x stride %u pool %llx+%llx made from %s",
+                (unsigned long long)guest, t.width, t.height, t.format, t.flags, t.stride, (unsigned long long)t.pool,
+                (unsigned long long)t.offset, chain.c_str());
         }
     }
     if (old) {
