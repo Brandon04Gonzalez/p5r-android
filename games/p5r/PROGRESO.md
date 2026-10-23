@@ -357,10 +357,35 @@ Notas de la sesión 4:
     `pycryptodome` en el venv) y hace los tamaños del launcher y un icono adaptativo. `build_apk.ps1` lo añade si
     existe `private/<juego>/icon/res`. El icono vive solo en `private/`.
 
+56. **Retrato del HUD "pixelado" en tu turno de batalla**: no es un fallo de texturas. El arte del HUD está hecho para
+    1080p (el retrato son 255×248 texeles del atlas BC3 de 1536×1536 para 255×248 píxeles en 1920×1080). En modo
+    720p el juego dibuja la interfaz en 1280×720, o sea encoge ese arte 1,5× sin mipmaps (el juego ya compensa con un
+    sesgo LOD de -0,585), y el detalle fino del retrato de turno (líneas y tramas) se vuelve motas; luego la tablet lo
+    amplía 1,5×. El retrato de ataque es de formas simples y no se nota. Descartado en vivo: z-fighting (profundidad
+    ALWAYS o sin escritura en la interfaz no cambia nada) y alpha-to-coverage (ningún pipeline lo usa). Arreglo
+    disponible: **Resolución 1080p** en el launcher, que cuesta ~19 % de fps (título 3D 12,6 → 10,15). Alternativa
+    pendiente: escalar solo las capas 2D (interfaz y ventana) a 1080p con el 3D a 720p, como el escalado de Ryujinx
+    (el soporte `render_scale` de los shaders ya existe): trabajo grande.
+57. **Herramientas de diagnóstico en vivo** (sin reiniciar el juego): un archivo `trace_draws` en la carpeta de datos
+    registra todos los dibujos del siguiente frame (destino, profundidad y su formato, mezcla, alpha test, texturas y
+    samplers, primeros vértices con UV); `live_flags` con `ui_always` / `ui_nowrite` cambia la profundidad de los
+    dibujos de interfaz mientras existe. Scripts: `private/p5r/td_capture.sh` (traza + captura cada N s) y
+    `td_cycle.sh` (traza, y capturas con cada experimento). `NX_NVN_STATES=1` lista los estados distintos del juego
+    (P5R: alpha test siempre ALWAYS, profundidad LEQUAL con escritura en la interfaz, polygon offset en algunos sitios).
+58. **Caché de búferes entre envíos** (`nvn_buffer_cache.cpp`, `NX_BUFFER_CACHE=1`, **apagada por defecto**).
+    `NX_UPLOAD_STATS=1` mostró que en el título el 72 % de los bytes de vértices, el 97 % de índices y el 88 % de
+    bloques uniform/storage son iguales a su copia anterior. La primera versión (todo a la caché, reparto first-fit)
+    bajó el título de 12,6 a 10,6 fps en la tablet: los ~900 bloques que cambian cada frame giraban el reparto.
+    La segunda solo guarda lo que se repite dos veces seguidas, en clases de tamaño potencia de dos; en el PC está
+    verificada byte a byte (`NX_BUFFER_CACHE_VERIFY=1`) y ahorra copiar 448 MB frente a 45 MB en una ventana.
+    **Falta medirla en la tablet** (`K=1 bash private/p5r/ab4.sh bc - "NX_BUFFER_CACHE=1" "NX_BUFFER_CACHE=1" -`).
+59. `NX_LOD_BIAS` (Gráficos: Bajos) ya solo afecta a los dibujos 3D (los que prueban profundidad), no a la interfaz.
+
 ## Falta ❌ (por orden)
 
-1. **Caché persistente de búferes** (vértices e índices que no cambian, en memoria de la GPU e invalidados por
-   write-watch): el `memmove` de las subidas es el 20 % del hilo de render (punto 52), que sigue al ~97 %.
+1. **Medir en la tablet la caché de búferes v2** (punto 58) y, si gana, activarla por defecto. El `memmove` de las
+   subidas es el 20 % del hilo de render (punto 52), que sigue al ~97 %.
+1b. HUD nítido en 720p (punto 56): escalar solo las capas 2D a 1080p, o recomendar Resolución 1080p.
 2. Los dos pases 960x540 del título (11,8 + 11,4 ms, punto 50): qué dibujan y si es geometría o relleno (la GPU va
    a 58 ms por frame, cerca del hilo de render).
 3. Revisar las barreras de Vulkan con la capa de validación (`private/third_party/vvl`), por los objetos que

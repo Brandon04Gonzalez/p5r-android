@@ -55,6 +55,8 @@ envío por trozos, ADPF.
   de botella era la CPU, no la GPU.
 - Sombras: el filtro no las reconocía en el título (punto 53). Con el arreglo ahorran ~10 % de GPU; tras el punto 52,
   ~2 % de fps. Opción del launcher, desactivadas por defecto.
+- Resolución 1080p en el título 3D: 12,6 → 10,15 fps (−19 %); quita las motas del HUD en 720p (PROGRESO 56).
+- Caché de búferes v1: 12,6 → 10,6 fps (peor); v2 (solo datos estables, clases de tamaño) sin medir en la tablet.
 - Perfil de CPU: `simpleperf` del NDK sobre la app depurable (`--app io.github.p5rrecomp`); los símbolos salen de
   `private/p5r/ba/libp5r.so` puesto en un `binary_cache` con la ruta del dispositivo.
 
