@@ -1,6 +1,6 @@
 # Port nativo de Persona 5 Royal a Android — progreso
 
-Última actualización: 2026-10-22 (sesión 6)
+Última actualización: 2026-10-23 (sesión 8)
 
 ## Estado en una línea
 
@@ -381,6 +381,28 @@ Notas de la sesión 4:
     **Falta medirla en la tablet** (`K=1 bash private/p5r/ab4.sh bc - "NX_BUFFER_CACHE=1" "NX_BUFFER_CACHE=1" -`).
 59. `NX_LOD_BIAS` (Gráficos: Bajos) ya solo afecta a los dibujos 3D (los que prueban profundidad), no a la interfaz.
 
+### Sesión 8 (2026-10-23) — audio adelantado en las escenas 3D
+
+60. **"Audio adelantado" en escenas 3D** (Joker cae y sale el menú del título; Joker acorralado en el casino): no era
+    latencia, era **el juego a cámara lenta**. Dos relojes:
+    - El bucle del motor (`main+fe75ac`) mide cada frame pero lo **recorta a 0,05 s** (`[[main+0x220a9c0]+0x34]`,
+      puesto por `main+ce39ac`) y lo guarda en `[[main+0x2209f50]+0x50]` (ticks; `+0x48` = inicio del frame), que
+      `main+f730c0` pasa al update. Por debajo de 20 fps, lo que usa ese reloj va lento.
+    - **Casi todo el juego avanza 1/objetivo por frame** (objetivo = `+0x84`, 30). Medido en PC con
+      `NX_P5R_SLOW_MS=80` (~10 fps; sin volcar imágenes, que cuestan ~385 ms cada una): los logos de ATLUS (de
+      confirmar "No" a que empieza la película) tardan 19,0 s a 30 fps y **36,6 s a 10 fps**; subir solo el recorte no
+      cambió nada (35 s con y sin él); con objetivo 10, 17 s.
+    - Arreglo (`games/p5r/game.cpp`): el recorte sube a 150 ms (`NX_P5R_MAX_FRAME_MS`, 50 = el del juego) y **el
+      objetivo de fps sigue a los fps reales** (`auto_target`: ventanas de 0,5 s, media sin tirones > 3× la mediana,
+      banda muerta de ±0,75 fps, sube con una ventana y baja con dos, entre `NX_P5R_MIN_FPS`=10 y el tope 30/60). El
+      intervalo de presentación se queda en el del tope (si bajara con el objetivo, no podría volver a subir).
+      `NX_P5R_AUTO_FPS=0` = lo de antes. A 30 fps reales no cambia nada (el objetivo se queda en 30). A ~10 fps: logos
+      21–25 s (lo que falta es la carga de la película, que avanza un paso por frame) y el log ya no da desfase.
+    - Log: `p5r: game clock X s, steps Y s in Z s real, N fps (target T)` cada 10 s cuando el juego va < 97 % del
+      tiempo real; `p5r: target frame rate A -> B` (las 40 primeras veces).
+    - Con 60 fps (launcher) también corrige el juego a cámara lenta cuando no llega a 60.
+    - **Falta confirmarlo a oído en la tablet** (APK instalado el 2026-10-23).
+
 ## Falta ❌ (por orden)
 
 1. **Medir en la tablet la caché de búferes v2** (punto 58) y, si gana, activarla por defecto. El `memmove` de las
@@ -391,7 +413,8 @@ Notas de la sesión 4:
 3. Revisar las barreras de Vulkan con la capa de validación (`private/third_party/vvl`), por los objetos que
    desaparecen un frame (punto 39).
 4. Caché de búferes de vértices (16–22 MB/frame copiados) y precalentado de pipelines (`OPTIMIZACION.md`).
-5. Verificar a oído el A/V a pocos fps (punto 34) y la velocidad del juego a 60 fps (punto 35).
+5. Verificar a oído en la tablet las escenas 3D con el objetivo de fps automático (punto 60) y el A/V a pocos fps
+   (punto 34). Si algo va raro con objetivos bajos (física, cámaras), subir `NX_P5R_MIN_FPS`.
 6. Bajar la resolución 3D de verdad (punto 37) si deja de ser la geometría lo que limita.
 7. Terminar el casino (salir del almacén de jaulas) y seguir la historia; guardar/cargar partida.
 8. Servicios IPC que pida P5R y Wonder no usaba (`bsd:u`, `ectx:aw`, varios `cmd ... not implemented`).

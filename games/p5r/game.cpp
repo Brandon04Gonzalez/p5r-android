@@ -1,10 +1,13 @@
 // Persona 5 Royal (01005CA01580E000, 1.0.0, BID 708BCACA873EA32B): what the shared runtime needs to know about the
 // game, and what only P5R needs. The game draws through NVN (Atlus' GFD engine); its shaders live in the GFD shader
 // caches BASE/GFDNXHHPRESET*.GSC of ALL_USEU.CPK (tools/gsc_shaders.py). Notes: games/p5r/PROGRESO.md.
+#include <algorithm>
+#include <chrono>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 
 #include <nx/game.h>
 #include <nx/runtime.h>
@@ -44,12 +47,20 @@ void fputs_logged(CPU& c) {
 // all over the game and set by main+f73740(fps), which also resets the engine's frame timer ([[main+0x220a9c0]]).
 // Every frame the game's main thread (main+fd4140) sets the engine's frame interval to 60 / it through a virtual setter
 // (main+1048ee0: vsyncs per frame, 1..4, stored at obj+0x30), which the present (main+1025c9c) hands to
-// nvnWindowSetPresentInterval. The launcher's 60 fps (NX_FPS_CAP=60) sets the target to 60 from that setter: on the PC
+// nvnWindowSetPresentInterval. The launcher's 60 fps (NX_FPS_CAP=60) raises the cap to 60 from that setter: on the PC
 // the game then ran at 45-60 fps instead of 30. (The Atmosphere cheat that ships with the dump writes
-// [[[[main+0x2327B60]+0x10]+0x60]+0x8]+0xF14, a chain that is empty in this port.) NX_P5R_FPS=<15..60>: any target, to
-// study. NX_P5R_TRACE_INTERVAL=1: the setter's calls are logged.
+// [[[[main+0x2327B60]+0x10]+0x60]+0x8]+0xF14, a chain that is empty in this port.)
+//
+// Most of the game steps 1 / target per frame, so under the target it runs slow: at ~10 fps the ATLUS logos took 35 s
+// instead of 15 (with a target of 10, 17 s). On the Adreno 610 (~8-13 fps in the 3D title and the casino's cutscenes)
+// Joker's fall to the title menu and the police corner played at 30-45 % speed while their music and voices kept real
+// time: the sound "ahead". So the target follows the frame rate the device reaches (auto_target), between
+// NX_P5R_MIN_FPS (10) and the cap; the present interval stays the cap's, or a lower target would lower the cap too and
+// never come back up. NX_P5R_AUTO_FPS=0: the old fixed target (the cap). NX_P5R_FPS=<5..60>: a fixed target with its
+// own interval, to study. NX_P5R_TRACE_INTERVAL=1: the setter's calls are logged.
 Fn g_interval_setter = nullptr;
 uint64_t g_main_base = 0;
+constexpr double kTicks = 19.2e6;  // the system tick the engine times its frames with
 
 int target_fps() {
     uint64_t p = ld<uint64_t>(g_main_base + 0x2209f50);
@@ -63,24 +74,124 @@ void set_target_fps(CPU& c, int fps) {
     c = saved;
 }
 
-int wanted_fps() {
+int env_int(const char* name, int fallback) {
+    const char* e = std::getenv(name);
+    return e && *e ? std::atoi(e) : fallback;
+}
+
+int forced_fps() {
     static const int fps = [] {
-        const char* forced = std::getenv("NX_P5R_FPS");
-        const char* cap = std::getenv("NX_FPS_CAP");
-        int v = forced ? std::atoi(forced) : cap && std::atoi(cap) >= 60 ? 60 : 0;
-        return v >= 15 && v <= 60 && 60 % v == 0 ? v : 0;  // 15, 20, 30 or 60: whole vsyncs per frame
+        const int v = env_int("NX_P5R_FPS", 0);
+        return v >= 5 && v <= 60 ? v : 0;
     }();
     return fps;
 }
 
-void interval_setter_hook(CPU& c) {
-    if (const int fps = wanted_fps()) {
-        if (target_fps() != fps) {
-            log("p5r: target frame rate %d -> %d", target_fps(), fps);
-            set_target_fps(c, fps);
+int cap_fps() {
+    static const int fps = env_int("NX_FPS_CAP", 30) >= 60 ? 60 : 30;
+    return fps;
+}
+
+bool auto_fps() {
+    static const bool on = env_int("NX_P5R_AUTO_FPS", 1) != 0;
+    return on;
+}
+
+// The target for the frames the device makes: every half second (at least 3 frames), the mean frame period with
+// hitches left out (over 3x the median: loads) gives a rate. The target goes up as soon as one window is faster (a
+// slow target makes the game run fast: right after a load, a cutscene would race its sound) and down when two windows
+// in a row are slower. `period` is one frame's real length in ticks; returns the target.
+int auto_target(uint64_t period) {
+    static uint64_t window[64];
+    static int n = 0, target = 0, below = 0;
+    static uint64_t sum = 0;
+    if (!target) target = cap_fps();
+    window[n++] = period, sum += period;
+    if (n < 64 && (n < 3 || double(sum) < kTicks / 2)) return target;
+    uint64_t sorted[64];
+    std::copy(window, window + n, sorted);
+    std::nth_element(sorted, sorted + n / 2, sorted + n);
+    const uint64_t limit = sorted[n / 2] * 3;
+    uint64_t kept = 0;
+    int count = 0;
+    for (int i = 0; i < n; i++)
+        if (window[i] <= limit) kept += window[i], count++;
+    n = 0, sum = 0;
+    // A dead band of 0.75 frames per second each way, so a rate of 11.4 stays 11 instead of flipping with 12 or 10.
+    const double lo = std::clamp(env_int("NX_P5R_MIN_FPS", 10), 5, cap_fps());
+    const double rate = std::clamp(kTicks * count / double(kept), lo, double(cap_fps()));
+    if (rate >= target + 0.75) below = 0, target = int(rate + 0.5);
+    else if (rate <= target - 0.75 && below) target = std::max(below, int(rate + 0.5)), below = 0;
+    else below = rate <= target - 0.75 ? int(rate + 0.5) : 0;
+    return target;
+}
+
+// The game clock. The engine's loop (main+fe75ac) times each frame with the system tick, clamps it to the frame
+// timer's [[main+0x220a9c0]+0x34] seconds (0.05, set at boot by main+ce39ac) and stores it in [[main+0x2209f50]+0x50]
+// (ticks; +0x48 is the frame's start), which main+f730c0 hands to the game's update as seconds. The parts of the game
+// that use it ran slow under 20 fps whatever the target: the clamp is raised to NX_P5R_MAX_FRAME_MS (150 by default,
+// real time down to ~7 fps; 50 = the game's own), longer frames (loading hitches) are still cut. The log's
+// `p5r: game clock` says when the game ran under real time: by that clock, and by its steps (frames / target).
+// NX_P5R_SLOW_MS=<ms>: every frame sleeps that long (a slow phone on the PC). Returns the real length of the frame
+// that just started, in ticks, once per frame (0 otherwise).
+float max_frame_s() {
+    static const float s = float(std::clamp(env_int("NX_P5R_MAX_FRAME_MS", 150), 50, 500)) / 1000.0f;
+    return s;
+}
+
+uint64_t game_clock() {
+    if (uint64_t t = ld<uint64_t>(ld<uint64_t>(g_main_base + 0x220a9c0))) {
+        uint32_t bits;
+        const float want = max_frame_s();
+        std::memcpy(&bits, &want, 4);
+        if (const uint32_t old = ld<uint32_t>(t + 0x34); old != bits) {
+            float was;
+            std::memcpy(&was, &old, 4);
+            log("p5r: longest frame the game clock follows %.0f -> %.0f ms", double(was) * 1e3, double(want) * 1e3);
+            st<uint32_t>(t + 0x34, bits);
         }
-        c.x[1] = uint32_t(60 / fps);
     }
+    static const int slow_ms = env_int("NX_P5R_SLOW_MS", 0);
+    if (slow_ms > 0) std::this_thread::sleep_for(std::chrono::milliseconds(slow_ms));
+
+    // A frame is a new start in +0x48: its real length is the step between starts, the game's is +0x50.
+    const uint64_t g = ld<uint64_t>(g_main_base + 0x2209f50);
+    if (!g) return 0;
+    static uint64_t last_start = 0, real = 0, game = 0, frames = 0, cut = 0, longest = 0;
+    static double steps = 0;
+    const uint64_t start = ld<uint64_t>(g + 0x48);
+    if (start == last_start) return 0;
+    uint64_t r = 0;
+    if (last_start && start > last_start) {
+        const uint64_t d = ld<uint64_t>(g + 0x50);
+        r = start - last_start;
+        real += r, game += d, frames++;
+        if (const int fps = target_fps(); fps > 0) steps += kTicks / fps;
+        if (d + 19200 < r) cut++;
+        longest = std::max(longest, r);
+    }
+    last_start = start;
+    if (real < 10 * uint64_t(kTicks)) return r;
+    if (game * 100 < real * 97 || steps * 100 < double(real) * 97)
+        log("p5r: game clock %.1f s, steps %.1f s in %.1f s real, %.1f fps (target %d), %llu of %llu frames cut "
+            "(longest %.0f ms)", double(game) / kTicks, steps / kTicks, double(real) / kTicks,
+            double(frames) * kTicks / double(real), target_fps(), (unsigned long long)cut,
+            (unsigned long long)frames, double(longest) * 1e3 / kTicks);
+    real = game = frames = cut = longest = 0, steps = 0;
+    return r;
+}
+
+void interval_setter_hook(CPU& c) {
+    const uint64_t period = game_clock();
+    int fps = forced_fps();
+    const int interval = fps ? std::clamp(60 / fps, 1, 4) : 60 / cap_fps();
+    if (!fps) fps = auto_fps() ? (period ? auto_target(period) : target_fps()) : cap_fps();
+    if (const int now = target_fps(); fps > 0 && now > 0 && now != fps) {
+        static int logged = 0;
+        if (logged++ < 40) log("p5r: target frame rate %d -> %d", now, fps);
+        set_target_fps(c, fps);
+    }
+    c.x[1] = uint32_t(interval);
     static int traced = 0;
     if (std::getenv("NX_P5R_TRACE_INTERVAL") && traced++ < 40)
         log("p5r: frame interval set to %u on %llx from %s", uint32_t(c.x[1]), (unsigned long long)c.x[0], describe(c.x[30]).c_str());
