@@ -3,6 +3,7 @@
 // caches BASE/GFDNXHHPRESET*.GSC of ALL_USEU.CPK (tools/gsc_shaders.py). Notes: games/p5r/PROGRESO.md.
 #include <algorithm>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -54,7 +55,7 @@ void fputs_logged(CPU& c) {
 // Most of the game steps 1 / target per frame, so under the target it runs slow: at ~10 fps the ATLUS logos took 35 s
 // instead of 15 (with a target of 10, 17 s). On the Adreno 610 (~8-13 fps in the 3D title and the casino's cutscenes)
 // Joker's fall to the title menu and the police corner played at 30-45 % speed while their music and voices kept real
-// time: the sound "ahead". So the target follows the frame rate the device reaches (auto_target), between
+// time: the sound "ahead". So the target follows the frame rate the device reaches (paced_target), between
 // NX_P5R_MIN_FPS (10) and the cap; the present interval stays the cap's, or a lower target would lower the cap too and
 // never come back up. NX_P5R_AUTO_FPS=0: the old fixed target (the cap). NX_P5R_FPS=<5..60>: a fixed target with its
 // own interval, to study. NX_P5R_TRACE_INTERVAL=1: the setter's calls are logged.
@@ -97,33 +98,20 @@ bool auto_fps() {
     return on;
 }
 
-// The target for the frames the device makes: every half second (at least 3 frames), the mean frame period with
-// hitches left out (over 3x the median: loads) gives a rate. The target goes up as soon as one window is faster (a
-// slow target makes the game run fast: right after a load, a cutscene would race its sound) and down when two windows
-// in a row are slower. `period` is one frame's real length in ticks; returns the target.
-int auto_target(uint64_t period) {
-    static uint64_t window[64];
-    static int n = 0, target = 0, below = 0;
-    static uint64_t sum = 0;
-    if (!target) target = cap_fps();
-    window[n++] = period, sum += period;
-    if (n < 64 && (n < 3 || double(sum) < kTicks / 2)) return target;
-    uint64_t sorted[64];
-    std::copy(window, window + n, sorted);
-    std::nth_element(sorted, sorted + n / 2, sorted + n);
-    const uint64_t limit = sorted[n / 2] * 3;
-    uint64_t kept = 0;
-    int count = 0;
-    for (int i = 0; i < n; i++)
-        if (window[i] <= limit) kept += window[i], count++;
-    n = 0, sum = 0;
-    // A dead band of 0.75 frames per second each way, so a rate of 11.4 stays 11 instead of flipping with 12 or 10.
-    const double lo = std::clamp(env_int("NX_P5R_MIN_FPS", 10), 5, cap_fps());
-    const double rate = std::clamp(kTicks * count / double(kept), lo, double(cap_fps()));
-    if (rate >= target + 0.75) below = 0, target = int(rate + 0.5);
-    else if (rate <= target - 0.75 && below) target = std::max(below, int(rate + 0.5)), below = 0;
-    else below = rate <= target - 0.75 ? int(rate + 0.5) : 0;
-    return target;
+// The target for the frames the device makes, chosen every frame so the game's steps (1 / target each) add up to the
+// real time. A debt (real time minus steps; a frame counts at most the slowest step, 1 / NX_P5R_MIN_FPS, so a load's
+// hitch is not made up) and the expected frame period (smoothed) give the next step: period + debt / 4, as a whole
+// frame rate between NX_P5R_MIN_FPS (10) and the cap. The first version (a half-second window's mean with a dead band)
+// left the target 0.5-1 fps over the device's on the tablet: the game ran at 94-97 % of real time at 15-24 fps and the
+// sound still drifted ahead through a scene. `period`: the frame that just ended, in ticks; `used`: its target.
+int paced_target(uint64_t period, int used) {
+    static const int cap = cap_fps(), lo = std::clamp(env_int("NX_P5R_MIN_FPS", 10), 5, cap);
+    static double debt = 0, expect = 0;
+    const double r = std::min(double(period) / kTicks, 1.0 / lo);
+    expect = expect > 0 ? expect + (r - expect) * 0.25 : r;
+    if (used > 0) debt = std::clamp(debt + r - 1.0 / used, -0.15, 0.15);
+    const double step = std::max(expect + debt * 0.25, 1.0 / cap);
+    return std::clamp(int(1.0 / step + 0.5), lo, cap);
 }
 
 // The game clock. The engine's loop (main+fe75ac) times each frame with the system tick, clamps it to the frame
@@ -159,6 +147,7 @@ uint64_t game_clock() {
     if (!g) return 0;
     static uint64_t last_start = 0, real = 0, game = 0, frames = 0, cut = 0, longest = 0;
     static double steps = 0;
+    static int lowest = 0, highest = 0;
     const uint64_t start = ld<uint64_t>(g + 0x48);
     if (start == last_start) return 0;
     uint64_t r = 0;
@@ -166,29 +155,34 @@ uint64_t game_clock() {
         const uint64_t d = ld<uint64_t>(g + 0x50);
         r = start - last_start;
         real += r, game += d, frames++;
-        if (const int fps = target_fps(); fps > 0) steps += kTicks / fps;
+        if (const int fps = target_fps(); fps > 0) {
+            steps += kTicks / fps;
+            lowest = lowest ? std::min(lowest, fps) : fps, highest = std::max(highest, fps);
+        }
         if (d + 19200 < r) cut++;
         longest = std::max(longest, r);
     }
     last_start = start;
     if (real < 10 * uint64_t(kTicks)) return r;
-    if (game * 100 < real * 97 || steps * 100 < double(real) * 97)
-        log("p5r: game clock %.1f s, steps %.1f s in %.1f s real, %.1f fps (target %d), %llu of %llu frames cut "
-            "(longest %.0f ms)", double(game) / kTicks, steps / kTicks, double(real) / kTicks,
-            double(frames) * kTicks / double(real), target_fps(), (unsigned long long)cut,
-            (unsigned long long)frames, double(longest) * 1e3 / kTicks);
-    real = game = frames = cut = longest = 0, steps = 0;
+    // Logged when the game is off real time or the device under the cap (the target then moves).
+    const double fps = double(frames) * kTicks / double(real);
+    if (game * 100 < real * 97 || std::abs(steps / double(real) - 1.0) > 0.02 || fps < cap_fps() * 0.95)
+        log("p5r: game clock %.1f s, steps %.1f s in %.1f s real, %.1f fps (target %d-%d), %llu of %llu frames cut "
+            "(longest %.0f ms)", double(game) / kTicks, steps / kTicks, double(real) / kTicks, fps, lowest, highest,
+            (unsigned long long)cut, (unsigned long long)frames, double(longest) * 1e3 / kTicks);
+    real = game = frames = cut = longest = 0, steps = 0, lowest = highest = 0;
     return r;
 }
 
 void interval_setter_hook(CPU& c) {
     const uint64_t period = game_clock();
+    const int now = target_fps();
     int fps = forced_fps();
     const int interval = fps ? std::clamp(60 / fps, 1, 4) : 60 / cap_fps();
-    if (!fps) fps = auto_fps() ? (period ? auto_target(period) : target_fps()) : cap_fps();
-    if (const int now = target_fps(); fps > 0 && now > 0 && now != fps) {
-        static int logged = 0;
-        if (logged++ < 40) log("p5r: target frame rate %d -> %d", now, fps);
+    if (!fps) fps = !auto_fps() ? cap_fps() : period ? paced_target(period, now) : now;
+    if (fps > 0 && now > 0 && now != fps) {
+        static int logged = 0;  // the automatic target moves every frame: only the first changes
+        if (logged++ < 3) log("p5r: target frame rate %d -> %d%s", now, fps, auto_fps() && !forced_fps() ? " (follows the device)" : "");
         set_target_fps(c, fps);
     }
     c.x[1] = uint32_t(interval);

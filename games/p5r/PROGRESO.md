@@ -401,7 +401,16 @@ Notas de la sesión 4:
     - Log: `p5r: game clock X s, steps Y s in Z s real, N fps (target T)` cada 10 s cuando el juego va < 97 % del
       tiempo real; `p5r: target frame rate A -> B` (las 40 primeras veces).
     - Con 60 fps (launcher) también corrige el juego a cámara lenta cuando no llega a 60.
-    - **Falta confirmarlo a oído en la tablet** (APK instalado el 2026-10-23).
+    - Primera prueba en la tablet ("mejoró, pero sigue un poquito adelantado"): iba a 15-24 fps y el juego avanzaba
+      el 94-97 % del tiempo real (`steps 9,4-9,7 s in 10 s`): la media por ventanas con banda muerta dejaba el
+      objetivo 0,5-1 fps por encima. **Ahora se elige cada frame** (`paced_target`): una deuda (tiempo real menos
+      pasos; cada frame cuenta como mucho 1/`NX_P5R_MIN_FPS`, así no se recuperan los tirones de carga) y el periodo
+      esperado dan el siguiente paso, periodo + deuda/4, redondeado a fps enteros. En PC a ~15 fps: `steps 10,0 s in
+      10,0 s real` en todas las ventanas, y capturando la ventana desde fuera cada 0,5 s (sin el coste de
+      `NX_DUMP_*`), los logos de ATLUS coinciden con los de 30 fps hasta ~0,5 s en 17 s. Lo que queda hasta la
+      película es su carga, que avanza un paso por frame. El log da ahora `(target A-B)` por ventana de 10 s.
+    - Si aún se oye adelantado: medir en la tablet la latencia real de la imagen (lógica -> pantalla) frente al
+      sonido; `av_sync` (punto 34) supone 3 periodos de imagen y ~100 ms de sonido.
 
 ## Falta ❌ (por orden)
 
