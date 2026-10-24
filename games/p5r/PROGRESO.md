@@ -419,8 +419,7 @@ Notas de la sesión 4:
     (`adb shell touch ".../Persona 5 Royal/dump_threads"`): ningún hilo bloqueado; el principal espera su frame
     (`main+fe7508 -> f732b0 -> fc5acc`) y el de render (hilo 54) trabaja: es la lógica de la batalla la que espera
     algo que no llega. El juego está hecho para pasos de 1/30 y 1/60 s; con pasos de 1/20 algún "hasta llegar"
-    no se cumple. (El explorador automático de la sesión 4 nunca llegó a esta batalla, así que no está probado que
-    con 30 fijos pase: **falta confirmarlo jugando**.)
+    no se cumple. **Confirmado jugando (2026-10-23): con el objetivo en 30 Violet se une y la batalla sigue.**
     - Ahora **el objetivo no baja de 30 por defecto** (`NX_P5R_MIN_FPS`, 30): en modo 30 fps es el juego original
       (cámara lenta y sonido adelantado por debajo de 30 fps); con 60 fps en el launcher sigue a la tablet entre 30
       y 60 (pasos dentro de lo que el juego conoce). El recorte del reloj medido es 1,5/suelo (50 ms con 30, el del
@@ -442,8 +441,8 @@ Notas de la sesión 4:
 3. Revisar las barreras de Vulkan con la capa de validación (`private/third_party/vvl`), por los objetos que
    desaparecen un frame (punto 39).
 4. Caché de búferes de vértices (16–22 MB/frame copiados) y precalentado de pipelines (`OPTIMIZACION.md`).
-5. Confirmar que la batalla de Violet pasa con el objetivo en 30 (punto 61). Sincronía A/V por debajo de 30 fps:
-   saltar frames (punto 61) y medir la latencia real imagen/sonido (punto 60).
+5. Sincronía A/V por debajo de 30 fps: saltar frames (punto 61; bajar el objetivo bloquea la batalla de Violet) y
+   medir la latencia real imagen/sonido (punto 60).
 6. Bajar la resolución 3D de verdad (punto 37) si deja de ser la geometría lo que limita.
 7. Terminar el casino (salir del almacén de jaulas) y seguir la historia; guardar/cargar partida.
 8. Servicios IPC que pida P5R y Wonder no usaba (`bsd:u`, `ectx:aw`, varios `cmd ... not implemented`).
