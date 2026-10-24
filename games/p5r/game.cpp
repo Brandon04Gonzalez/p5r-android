@@ -13,6 +13,8 @@
 #include <nx/game.h>
 #include <nx/runtime.h>
 
+#include "platform.h"
+
 namespace nx {
 
 const game::Info game::kInfo = {"p5r", "Persona 5 Royal", 0x01005CA01580E000ull, "io.github.p5rrecomp",
@@ -55,10 +57,14 @@ void fputs_logged(CPU& c) {
 // Most of the game steps 1 / target per frame, so under the target it runs slow: at ~10 fps the ATLUS logos took 35 s
 // instead of 15 (with a target of 10, 17 s). On the Adreno 610 (~8-13 fps in the 3D title and the casino's cutscenes)
 // Joker's fall to the title menu and the police corner played at 30-45 % speed while their music and voices kept real
-// time: the sound "ahead". So the target follows the frame rate the device reaches (paced_target), between
-// NX_P5R_MIN_FPS (10) and the cap; the present interval stays the cap's, or a lower target would lower the cap too and
-// never come back up. NX_P5R_AUTO_FPS=0: the old fixed target (the cap). NX_P5R_FPS=<5..60>: a fixed target with its
-// own interval, to study. NX_P5R_TRACE_INTERVAL=1: the setter's calls are logged.
+// time: the sound "ahead". A target that follows the device's frame rate (paced_target) keeps real time, but the game
+// is made for steps of 1/30 and 1/60 s: with targets of 19-21 the casino battle where Violet joins never reached its
+// command menu (shadows idle, buttons dead; no thread blocked, the battle's logic waited for good), twice. So the
+// target stays between NX_P5R_MIN_FPS (30 by default: the Switch's own steps) and the cap, which only moves it with the
+// launcher's 60 fps (30..60); the present interval stays the cap's. Lower floors (the sync experiment, 10 = the
+// version that hung) go in NX_P5R_MIN_FPS or, live, in a file named p5r_fps in the data folder (read every ~2 s;
+// removing it goes back). NX_P5R_AUTO_FPS=0: the target is the cap. NX_P5R_FPS=<5..60>: a fixed target with its own
+// interval, to study. NX_P5R_TRACE_INTERVAL=1: the setter's calls are logged.
 Fn g_interval_setter = nullptr;
 uint64_t g_main_base = 0;
 constexpr double kTicks = 19.2e6;  // the system tick the engine times its frames with
@@ -98,14 +104,31 @@ bool auto_fps() {
     return on;
 }
 
+// The lowest target: NX_P5R_MIN_FPS (30), or the number in the data folder's p5r_fps file, looked at every 64 calls.
+int min_fps() {
+    static const int base = std::clamp(env_int("NX_P5R_MIN_FPS", 30), 5, cap_fps());
+    static int live = 0, calls = 0;
+    if (calls++ % 64 == 0) {
+        int v = 0;
+        if (FILE* f = plat::fopen_utf8(plat::data_root() + "/p5r_fps", "rb")) {
+            if (std::fscanf(f, "%d", &v) != 1) v = 0;
+            std::fclose(f);
+        }
+        v = v ? std::clamp(v, 5, cap_fps()) : 0;
+        if (v != live) log("p5r: lowest target frame rate %d (%s)", v ? v : base, v ? "p5r_fps file" : "default");
+        live = v;
+    }
+    return live ? live : base;
+}
+
 // The target for the frames the device makes, chosen every frame so the game's steps (1 / target each) add up to the
 // real time. A debt (real time minus steps; a frame counts at most the slowest step, 1 / NX_P5R_MIN_FPS, so a load's
 // hitch is not made up) and the expected frame period (smoothed) give the next step: period + debt / 4, as a whole
-// frame rate between NX_P5R_MIN_FPS (10) and the cap. The first version (a half-second window's mean with a dead band)
+// frame rate between min_fps() and the cap. The first version (a half-second window's mean with a dead band)
 // left the target 0.5-1 fps over the device's on the tablet: the game ran at 94-97 % of real time at 15-24 fps and the
 // sound still drifted ahead through a scene. `period`: the frame that just ended, in ticks; `used`: its target.
 int paced_target(uint64_t period, int used) {
-    static const int cap = cap_fps(), lo = std::clamp(env_int("NX_P5R_MIN_FPS", 10), 5, cap);
+    const int cap = cap_fps(), lo = min_fps();
     static double debt = 0, expect = 0;
     const double r = std::min(double(period) / kTicks, 1.0 / lo);
     expect = expect > 0 ? expect + (r - expect) * 0.25 : r;
@@ -117,14 +140,15 @@ int paced_target(uint64_t period, int used) {
 // The game clock. The engine's loop (main+fe75ac) times each frame with the system tick, clamps it to the frame
 // timer's [[main+0x220a9c0]+0x34] seconds (0.05, set at boot by main+ce39ac) and stores it in [[main+0x2209f50]+0x50]
 // (ticks; +0x48 is the frame's start), which main+f730c0 hands to the game's update as seconds. The parts of the game
-// that use it ran slow under 20 fps whatever the target: the clamp is raised to NX_P5R_MAX_FRAME_MS (150 by default,
-// real time down to ~7 fps; 50 = the game's own), longer frames (loading hitches) are still cut. The log's
-// `p5r: game clock` says when the game ran under real time: by that clock, and by its steps (frames / target).
-// NX_P5R_SLOW_MS=<ms>: every frame sleeps that long (a slow phone on the PC). Returns the real length of the frame
-// that just started, in ticks, once per frame (0 otherwise).
+// that use it run slow under 20 fps whatever the target. With a floor under 30 (the sync experiment) the clamp goes up
+// with it, 1.5 / floor (150 ms at 10); NX_P5R_MAX_FRAME_MS=<ms> sets it. The log's `p5r: game clock` says when the game
+// ran under real time: by that clock, and by its steps (frames / target). NX_P5R_SLOW_MS=<ms>: every frame sleeps that
+// long (a slow phone on the PC). Returns the real length of the frame that just started, in ticks, once per frame (0
+// otherwise).
 float max_frame_s() {
-    static const float s = float(std::clamp(env_int("NX_P5R_MAX_FRAME_MS", 150), 50, 500)) / 1000.0f;
-    return s;
+    static const int ms = env_int("NX_P5R_MAX_FRAME_MS", 0);
+    if (ms > 0) return float(std::clamp(ms, 50, 500)) / 1000.0f;
+    return std::max(0.05f, 1.5f / float(min_fps()));
 }
 
 uint64_t game_clock() {
