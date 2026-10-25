@@ -1,6 +1,6 @@
 # Port nativo de Persona 4 Arena Ultimax a Android — progreso
 
-Última actualización: 2026-10-23 (sesión 2, mañana: prueba en la tablet)
+Última actualización: 2026-10-25 (sesión 3: la película de apertura en la tablet)
 
 ## Estado en una línea
 
@@ -243,6 +243,29 @@ a un combate de Arcade, Yu contra Chie, en ~85 s; necesita la partida ya creada)
 
 Menú principal de P4AU (3D): categorías HISTORIA, COMBATE, RED, PRÁCTICA, OPCIONES. A entra, B vuelve (en un submenú
 pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancelar" por defecto).
+
+### Sesión 3 (2026-10-25, noche) — la película de apertura en la tablet
+
+29. **La película de apertura se congelaba en su primera imagen en la tablet** (el usuario: "la cinemática no
+    reproduce"; en `runs/tab2`, `tab4` y en las del emulador pasaba lo mismo: solo avanzaba un segundo). El sonido de
+    las películas sale por un AudioOut que el juego abre con `OpenDefaultAudioOut(AudioOut*, const
+    AudioOutParameter&)`, la variante **sin evento**, que no estaba interceptada: iba al sdk y al stub de `audout:u`,
+    nuestro hilo de AudioOut no arrancaba, ningún búfer volvía al juego, el audio del vídeo se paraba y el vídeo (que
+    se sincroniza con él) también. Arreglado en `hle_audio.cpp` (commit `fc92b5b`): esa variante y las dos de
+    `OpenAudioOut` con nombre son nuestras. Además P4AU tiene a la vez el AudioRenderer (el sonido del juego) y el
+    AudioOut (el de las películas) sobre el único flujo del dispositivo: ahora el hilo del renderer **mezcla** las
+    muestras del AudioOut en cada trama de 5 ms y devuelve cada búfer gastado (antes se habrían turnado, cada uno a
+    media velocidad). P5R (solo AudioOut) no cambia. En la tablet la película va entera hasta el título: 30 imágenes
+    y 47 tramas AAC por segundo (`runs/look2`).
+    - Queda: la pantalla muestra ~15 imágenes nuevas por segundo de las 30 que el juego toma (las toma a ráfagas,
+      huecos de hasta ~200 ms).
+30. **Ritmo de pantalla en la tablet**: el panel de la Tab M11 solo va a 90 Hz y el juego pide 60 Hz: Android lo
+    deja en 45 Hz (todos los intervalos entre 19 y 25 ms, `runs/f1`). En la selección de capítulo de historia, con la
+    configuración del usuario (`NX_FIFO=1`, `NX_HANDHELD=0`, `GRAPHICS=high`): 42 fps, GPU 23,5 ms por frame.
+    - El "aviso que sale varias veces al inicio" que vio el usuario no apareció en estas pruebas (la partida ya
+      existe): falta que diga cuál es.
+    - `tabfight.sh` ya no llega a Arcade (acabó en el Modo Historia: el menú recuerda la categoría) y **sobrescribe
+      `config.txt` sin copia**: la del usuario está en `private/p4au/runs/user_1024/config.txt`.
 
 ## Falta ❌ (por orden)
 
