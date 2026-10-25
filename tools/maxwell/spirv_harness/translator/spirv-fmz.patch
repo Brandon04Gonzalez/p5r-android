@@ -1,0 +1,158 @@
+Ryujinx shader translator: honour Maxwell's FMZ mode on FMUL/FFMA (FP32). Ryujinx decodes the Fmz field and
+ignores it, so 0 * Inf/NaN gave NaN where the hardware gives 0 (FFMA: c). See docs/nvn/DEBUG.md #49.
+Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a copy in private/build; the
+checkout in private/third_party stays untouched. The Ryujinx code in the context lines is MIT.
+--- a/Instructions/InstEmitFloatArithmetic.cs	2026-09-30 05:24:53
++++ b/Instructions/InstEmitFloatArithmetic.cs	2026-09-30 05:24:53
+@@ -161,7 +161,7 @@
+             Operand srcB = GetSrcReg(context, op.SrcB);
+             Operand srcC = GetSrcReg(context, op.SrcC);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FfmaI(EmitterContext context)
+@@ -172,7 +172,7 @@
+             Operand srcB = GetSrcImm(context, Imm20ToFloat(op.Imm20));
+             Operand srcC = GetSrcReg(context, op.SrcC);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FfmaC(EmitterContext context)
+@@ -183,7 +183,7 @@
+             Operand srcB = GetSrcCbuf(context, op.CbufSlot, op.CbufOffset);
+             Operand srcC = GetSrcReg(context, op.SrcC);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FfmaRc(EmitterContext context)
+@@ -194,7 +194,7 @@
+             Operand srcB = GetSrcReg(context, op.SrcC);
+             Operand srcC = GetSrcCbuf(context, op.CbufSlot, op.CbufOffset);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void Ffma32i(EmitterContext context)
+@@ -205,7 +205,7 @@
+             Operand srcB = GetSrcImm(context, op.Imm32);
+             Operand srcC = GetSrcReg(context, op.Dest);
+ 
+-            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC);
++            EmitFfma(context, Instruction.FP32, srcA, srcB, srcC, op.Dest, op.NegA, op.NegC, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FmulR(EmitterContext context)
+@@ -215,7 +215,7 @@
+             Operand srcA = GetSrcReg(context, op.SrcA);
+             Operand srcB = GetSrcReg(context, op.SrcB);
+ 
+-            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC);
++            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FmulI(EmitterContext context)
+@@ -225,7 +225,7 @@
+             Operand srcA = GetSrcReg(context, op.SrcA);
+             Operand srcB = GetSrcImm(context, Imm20ToFloat(op.Imm20));
+ 
+-            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC);
++            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void FmulC(EmitterContext context)
+@@ -235,7 +235,7 @@
+             Operand srcA = GetSrcReg(context, op.SrcA);
+             Operand srcB = GetSrcCbuf(context, op.CbufSlot, op.CbufOffset);
+ 
+-            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC);
++            EmitFmul(context, Instruction.FP32, op.Scale, srcA, srcB, op.Dest, op.NegA, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void Fmul32i(EmitterContext context)
+@@ -245,7 +245,7 @@
+             Operand srcA = GetSrcReg(context, op.SrcA);
+             Operand srcB = GetSrcImm(context, op.Imm32);
+ 
+-            EmitFmul(context, Instruction.FP32, MultiplyScale.NoScale, srcA, srcB, op.Dest, false, op.Sat, op.WriteCC);
++            EmitFmul(context, Instruction.FP32, MultiplyScale.NoScale, srcA, srcB, op.Dest, false, op.Sat, op.WriteCC, op.Fmz);
+         }
+ 
+         public static void Hadd2R(EmitterContext context)
+@@ -408,6 +408,11 @@
+             SetFPZnFlags(context, res, writeCC, fpType);
+         }
+ 
++        private static Operand FmzZero(EmitterContext context, Operand a, Operand b)
++        {
++            return context.BitwiseOr(context.FPCompareEqual(a, ConstF(0f)), context.FPCompareEqual(b, ConstF(0f)));
++        }
++
+         private static void EmitFfma(
+             EmitterContext context,
+             Instruction fpType,
+@@ -418,15 +423,24 @@
+             bool negateB,
+             bool negateC,
+             bool saturate,
+-            bool writeCC)
++            bool writeCC,
++            Fmz fmz = 0)
+         {
+             bool isFP64 = fpType == Instruction.FP64;
+ 
+             srcB = context.FPNegate(srcB, negateB, fpType);
+             srcC = context.FPNegate(srcC, negateC, fpType);
+ 
+-            Operand res = context.FPSaturate(context.FPFusedMultiplyAdd(srcA, srcB, srcC, fpType), saturate, fpType);
++            Operand fma = context.FPFusedMultiplyAdd(srcA, srcB, srcC, fpType);
+ 
++            if (fmz == Fmz.Fmz && !isFP64)
++            {
++                // Maxwell's FMZ: a zero factor makes the product 0, even times Inf or NaN (so the result is c).
++                fma = context.ConditionalSelect(FmzZero(context, srcA, srcB), srcC, fma);
++            }
++
++            Operand res = context.FPSaturate(fma, saturate, fpType);
++
+             SetDest(context, res, rd, isFP64);
+ 
+             SetFPZnFlags(context, res, writeCC, fpType);
+@@ -441,11 +455,13 @@
+             int rd,
+             bool negateB,
+             bool saturate,
+-            bool writeCC)
++            bool writeCC,
++            Fmz fmz = 0)
+         {
+             bool isFP64 = fpType == Instruction.FP64;
+ 
+             srcB = context.FPNegate(srcB, negateB, fpType);
++            Operand zeroFactor = fmz == Fmz.Fmz && !isFP64 ? FmzZero(context, srcA, srcB) : null;
+ 
+             if (scale != MultiplyScale.NoScale)
+             {
+@@ -473,8 +489,15 @@
+                 srcA = context.FPMultiply(srcA, scaleConst, fpType);
+             }
+ 
+-            Operand res = context.FPSaturate(context.FPMultiply(srcA, srcB, fpType), saturate, fpType);
++            Operand product = context.FPMultiply(srcA, srcB, fpType);
+ 
++            if (zeroFactor != null)
++            {
++                product = context.ConditionalSelect(zeroFactor, ConstF(0f), product);  // Maxwell's FMZ, as in EmitFfma
++            }
++
++            Operand res = context.FPSaturate(product, saturate, fpType);
++
+             SetDest(context, res, rd, isFP64);
+ 
+             SetFPZnFlags(context, res, writeCC, fpType);

@@ -1,0 +1,162 @@
+#!/usr/bin/env python3
+"""Generate AArch64 -> host Vulkan call bridges from the Vulkan registry (vk.xml).
+
+Usage: python tools/gen_vk.py <vk.xml> runtime/src/vk_gen.cpp
+
+For every command the headers declare (core + extensions for no platform, win32 and vi), emits:
+  - a host function pointer p_vkXxx (filled from the host loader)
+  - a wrapper w_vkXxx(nx::CPU&) that reads the arguments the AAPCS64 way (integers/pointers in x0-x7, floats in
+    v0-v7, the rest in 8-byte stack slots), calls the host driver and puts the result in x0
+  - an NX_HLE registration under the command's name (so imports and vkGet*ProcAddr resolve to it)
+Guest memory is host memory and both ABIs are LP64 little endian, so structures pass through untouched.
+pAllocator arguments are replaced by nullptr (they hold guest function pointers).
+Commands in SPECIAL are written by hand in vk_bridge.cpp.
+"""
+import sys
+import xml.etree.ElementTree as ET
+
+SPECIAL = {
+    "vkGetInstanceProcAddr", "vkGetDeviceProcAddr", "vkCreateInstance", "vkEnumerateInstanceExtensionProperties",
+    "vkEnumerateInstanceLayerProperties", "vkCreateDevice", "vkCreateViSurfaceNN", "vkCreateDebugUtilsMessengerEXT",
+    "vkCreateDebugReportCallbackEXT", "vkDestroyInstance", "vkEnumeratePhysicalDevices",
+    "vkDestroyDebugUtilsMessengerEXT", "vkDestroyDebugReportCallbackEXT",
+    "vkGetPhysicalDeviceQueueFamilyProperties", "vkGetPhysicalDeviceQueueFamilyProperties2",
+    "vkGetPhysicalDeviceQueueFamilyProperties2KHR", "vkQueuePresentKHR", "vkGetDeviceQueue", "vkCreateSwapchainKHR",
+    "vkAcquireNextImageKHR", "vkGetSwapchainImagesKHR", "vkDestroySwapchainKHR", "vkWaitForFences",
+    "vkGetPhysicalDeviceSurfaceSupportKHR", "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR", "vkGetPhysicalDeviceSurfacePresentModesKHR", "vkDestroySurfaceKHR",
+}
+# Host pointers the hand-written bridges still need are declared anyway (without a wrapper).
+POINTER_ONLY = {"vkGetPhysicalDeviceQueueFamilyProperties", "vkGetPhysicalDeviceQueueFamilyProperties2",
+                "vkQueuePresentKHR", "vkGetDeviceQueue", "vkCreateSwapchainKHR", "vkAcquireNextImageKHR",
+                "vkGetSwapchainImagesKHR", "vkDestroySwapchainKHR", "vkWaitForFences",
+                "vkGetPhysicalDeviceSurfaceSupportKHR", "vkGetPhysicalDeviceSurfaceCapabilitiesKHR", "vkGetPhysicalDeviceSurfaceFormatsKHR", "vkGetPhysicalDeviceSurfacePresentModesKHR", "vkDestroySurfaceKHR"}
+PLATFORMS = {None, "win32", "vi", "android"}
+FLOAT_TYPES = {"float", "double"}
+
+
+def main():
+    root = ET.parse(sys.argv[1]).getroot()
+    structs = {t.get("name") for t in root.iter("type") if t.get("category") in ("struct", "union")}
+
+    # Commands available in the headers we compile with.
+    wanted = set()
+    for feat in root.findall("feature"):
+        if "vulkan" not in feat.get("api", "vulkan").split(","):
+            continue
+        for req in feat.findall("require"):
+            wanted |= {c.get("name") for c in req.findall("command")}
+    platform_of = {}
+    for ext in root.find("extensions").findall("extension"):
+        if "vulkan" not in ext.get("supported", "").split(","):
+            continue
+        plat = ext.get("platform")
+        if plat not in PLATFORMS:
+            continue
+        for req in ext.findall("require"):
+            if "vulkan" not in req.get("api", "vulkan").split(","):
+                continue
+            for c in req.findall("command"):
+                wanted.add(c.get("name"))
+                if plat:
+                    platform_of[c.get("name")] = plat
+    protect = {p.get("name"): p.get("protect") for p in root.find("platforms").findall("platform")}
+
+    def guard(name):
+        p = platform_of.get(name)
+        return (f"#if defined({protect[p]})", "#endif") if p else ("", "")
+
+    commands = {}
+    aliases = {}
+    for cmd in root.find("commands").findall("command"):
+        if cmd.get("alias"):
+            aliases[cmd.get("name")] = cmd.get("alias")
+            continue
+        if "vulkan" not in cmd.get("api", "vulkan").split(","):
+            continue
+        proto = cmd.find("proto")
+        ret = "".join(proto.itertext()).rsplit(proto.find("name").text, 1)[0].strip()
+        params = []
+        for p in cmd.findall("param"):
+            if "vulkan" not in p.get("api", "vulkan").split(","):
+                continue
+            name = p.find("name").text
+            text = "".join(p.itertext())
+            before, after = text.split(name, 1)
+            ctype = before.strip()
+            base = p.find("type").text
+            is_ptr = "*" in ctype or "[" in after
+            if "[" in after:
+                ctype = ctype + "*"
+            params.append((ctype, name, base, is_ptr))
+        commands[proto.find("name").text] = (ret, params)
+    for a, target in aliases.items():
+        if target in commands:
+            commands[a] = commands[target]
+
+    out = []
+    out.append("// Generated by tools/gen_vk.py from vk.xml. Do not edit.\n")
+    out.append('#include "vk_bridge.h"\n\nnamespace nx::vk {\n')
+    table = []
+    skipped = []
+    for name in sorted(wanted):
+        g0, g1 = guard(name)
+        if name in POINTER_ONLY:
+            out += [g0, f"PFN_{name} p_{name} = nullptr;", g1]
+            table.append(name)
+            continue
+        if name not in commands or name in SPECIAL:
+            continue
+        ret, params = commands[name]
+        ngr = nfr = nst = 0
+        args = []
+        ok = True
+        for ctype, pname, base, is_ptr in params:
+            if not is_ptr and base in structs:
+                ok = False
+                break
+            if ctype == "const VkAllocationCallbacks*":
+                expr = "nullptr"
+                ngr += 1
+            elif not is_ptr and base in FLOAT_TYPES:
+                if nfr < 8:
+                    expr = f"c.v[{nfr}].{'f32' if base == 'float' else 'f64'}[0]"
+                    nfr += 1
+                else:
+                    expr = f"stack_arg<{ctype}>(c, {nst})"
+                    nst += 1
+            else:
+                if ngr < 8:
+                    expr = f"arg<{ctype}>(c.x[{ngr}])"
+                    ngr += 1
+                else:
+                    expr = f"stack_arg<{ctype}>(c, {nst})"
+                    nst += 1
+            args.append(expr)
+        if not ok:
+            skipped.append(name)
+            continue
+        call = f"p_{name}({', '.join(args)})"
+        body = f"{call};" if ret == "void" else f"c.x[0] = ret_u64({call});"
+        out += [g0, f"PFN_{name} p_{name} = nullptr;", f"static void w_{name}(CPU& c) {{ {body} }}",
+                f'NX_HLE("{name}", w_{name});', g1, ""]
+        table.append(name)
+    hdr = ["// Generated by tools/gen_vk.py. Host function pointers of every bridged command.", "#pragma once",
+           '#include "vk_bridge.h"', "", "namespace nx::vk {"]
+    for n in table:
+        g0, g1 = guard(n)
+        hdr += [g0, f"extern PFN_{n} p_{n};", g1]
+    hdr += ["}  // namespace nx::vk", ""]
+    open(sys.argv[2].replace(".cpp", ".h"), "w").write("\n".join(hdr))
+    out.append("const Entry g_entries[] = {")
+    for n in table:
+        g0, g1 = guard(n)
+        out += [g0, f'    {{"{n}", reinterpret_cast<PFN_vkVoidFunction*>(&p_{n})}},', g1]
+    out.append("};")
+    out.append("const size_t g_entry_count = sizeof(g_entries) / sizeof(g_entries[0]);\n")
+    out.append("}  // namespace nx::vk")
+    open(sys.argv[2], "w").write("\n".join(out) + "\n")
+    print(f"{len(table)} commands bridged, {len(skipped)} skipped (struct by value): {skipped}")
+
+
+if __name__ == "__main__":
+    main()

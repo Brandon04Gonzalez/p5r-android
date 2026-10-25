@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Offline Maxwell -> SPIR-V through Ryujinx's shader translator (MIT). See docs/nvn/TRANSLATOR.md.
+       The translator is not vendored: translator/Ryujinx.Graphics.Shader.csproj builds it from the local checkout in
+       private/third_party/ryubing, with the patches in translator/ applied to copies of the files they touch. -->
+
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>spirv_harness</AssemblyName>
+    <RootNamespace>SpirvHarness</RootNamespace>
+    <InvariantGlobalization>true</InvariantGlobalization>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <Compile Remove="translator/**" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="translator/Ryujinx.Graphics.Shader.csproj" />
+  </ItemGroup>
+
+</Project>

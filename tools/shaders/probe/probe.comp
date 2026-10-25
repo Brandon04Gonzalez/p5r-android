@@ -1,0 +1,25 @@
+#version 450
+// The GPU probe (runtime/src/nvn/nvn_gpu_probe.cpp). mode 0: a chain of multiply-adds that touches no memory, so its
+// time follows the GPU clock only. mode 1: every invocation sums its share of a device-local buffer, so its time
+// follows the memory bandwidth the GPU gets.
+layout(local_size_x = 64) in;
+layout(std430, set = 0, binding = 0) writeonly buffer Out { vec4 o[]; };
+layout(std430, set = 0, binding = 1) readonly buffer In { vec4 v[]; };
+layout(push_constant) uniform P { uint mode; uint iters; uint count; uint pad; };
+void main() {
+    uint id = gl_GlobalInvocationID.x;
+    if (mode == 0u) {
+        vec4 a = vec4(float(id) * 1e-5) + vec4(0.1, 0.2, 0.3, 0.4);
+        vec4 b = vec4(0.5);
+        for (uint i = 0u; i < iters; i++) {
+            a = a * 0.99951 + b;
+            b = b * 0.99973 + a * 1e-6;
+        }
+        o[id] = a + b;
+    } else {
+        uint stride = gl_NumWorkGroups.x * 64u;
+        vec4 s = vec4(0.0);
+        for (uint i = id; i < count; i += stride) s += v[i];
+        o[id] = s;
+    }
+}

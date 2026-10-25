@@ -1,0 +1,40 @@
+Ryujinx shader translator: Maxwell float clamp/min/max drop NaN. .SAT maps NaN to 0 and FMNMX returns the
+non-NaN operand, but Ryujinx emitted GLSL.std.450 FClamp/FMin/FMax, whose NaN result is undefined (SPIRV-Cross
+turns them into Metal fast::clamp/min/max), so NaN reached render targets. Float Clamp/Minimum/Maximum now use
+NClamp/NMin/NMax (MSL precise::clamp/min/max). The IR makes float Clamp only in FPSaturate and float
+Minimum/Maximum only in FMNMX and the unsigned F2I clamp, which want the same semantics. See
+docs/nvn/GLITCH-PLAN.md G9. Applied at build time by translator/Ryujinx.Graphics.Shader.csproj to a copy in
+private/build; the checkout in private/third_party stays untouched. The Ryujinx code in the context lines is MIT.
+--- a/CodeGen/Spirv/Instructions.cs	2026-09-30 07:06:08
++++ b/CodeGen/Spirv/Instructions.cs	2026-09-30 07:06:19
+@@ -333,7 +333,9 @@
+ 
+         private static OperationResult GenerateClamp(CodeGenContext context, AstOperation operation)
+         {
+-            return GenerateTernary(context, operation, context.Delegates.GlslFClamp, context.Delegates.GlslSClamp);
++            // Maxwell .SAT maps NaN to the low bound: NClamp (NMin/NMax semantics) does; FClamp leaves NaN
++            // undefined, and SPIRV-Cross turns it into Metal fast::clamp.
++            return GenerateTernary(context, operation, context.GlslNClamp, context.Delegates.GlslSClamp);
+         }
+ 
+         private static OperationResult GenerateClampU32(CodeGenContext context, AstOperation operation)
+@@ -953,7 +955,8 @@
+ 
+         private static OperationResult GenerateMaximum(CodeGenContext context, AstOperation operation)
+         {
+-            return GenerateBinary(context, operation, context.Delegates.GlslFMax, context.Delegates.GlslSMax);
++            // FMNMX returns the non-NaN operand: NMax (FMax is undefined for NaN; Metal fast::max).
++            return GenerateBinary(context, operation, context.GlslNMax, context.Delegates.GlslSMax);
+         }
+ 
+         private static OperationResult GenerateMaximumU32(CodeGenContext context, AstOperation operation)
+@@ -969,7 +972,8 @@
+ 
+         private static OperationResult GenerateMinimum(CodeGenContext context, AstOperation operation)
+         {
+-            return GenerateBinary(context, operation, context.Delegates.GlslFMin, context.Delegates.GlslSMin);
++            // FMNMX returns the non-NaN operand: NMin (FMin is undefined for NaN; Metal fast::min).
++            return GenerateBinary(context, operation, context.GlslNMin, context.Delegates.GlslSMin);
+         }
+ 
+         private static OperationResult GenerateMinimumU32(CodeGenContext context, AstOperation operation)

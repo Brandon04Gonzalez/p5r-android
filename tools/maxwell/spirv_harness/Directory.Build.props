@@ -1,0 +1,9 @@
+<Project>
+  <!-- Build products go to private/build/spirv_harness, never next to the sources. Must be set before the SDK is
+       imported, which is why it lives here and not in the .csproj. One obj directory per project (the harness and
+       translator/); both write their binaries to the same bin directory. -->
+  <PropertyGroup>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)../../../private/build/spirv_harness/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)../../../private/build/spirv_harness/bin/</BaseOutputPath>
+  </PropertyGroup>
+</Project>

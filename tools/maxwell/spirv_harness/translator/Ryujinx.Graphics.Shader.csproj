@@ -1,0 +1,58 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <!-- Ryujinx's shader translator (MIT), built from the checkout in private/third_party/ryubing with our patches.
+       Same assembly name as upstream, so Ryujinx.Common finds the GLSL helper resources by assembly name. Each
+       patch applies to a copy of one source file under private/build; the checkout itself is never modified.
+       See docs/nvn/TRANSLATOR.md ("Local patches"). -->
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <LangVersion>preview</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>Ryujinx.Graphics.Shader</AssemblyName>
+    <RootNamespace>Ryujinx.Graphics.Shader</RootNamespace>
+    <EnableDefaultItems>false</EnableDefaultItems>
+    <NoWarn>$(NoWarn);CS1591</NoWarn>
+    <RyuSrc>$(MSBuildThisFileDirectory)../../../../private/third_party/ryubing/src/</RyuSrc>
+    <ShaderSrc>$(RyuSrc)Ryujinx.Graphics.Shader/</ShaderSrc>
+    <PatchedDir>$(BaseIntermediateOutputPath)patched/</PatchedDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <ProjectReference Include="$(RyuSrc)Ryujinx.Common/Ryujinx.Common.csproj" />
+    <ProjectReference Include="$(RyuSrc)Spv.Generator/Spv.Generator.csproj" />
+  </ItemGroup>
+
+  <!-- Patched files: upstream path (relative to the shader project) and the patch that applies to it. -->
+  <ItemGroup>
+    <ShaderPatch Include="spirv-else-if.patch" File="CodeGen/Spirv/SpirvGenerator.cs" />
+    <ShaderPatch Include="spirv-fmz.patch" File="Instructions/InstEmitFloatArithmetic.cs" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Compile Include="$(ShaderSrc)**/*.cs"
+             Exclude="$(ShaderSrc)bin/**;$(ShaderSrc)obj/**;$(ShaderSrc)CodeGen/Spirv/SpirvGenerator.cs;$(ShaderSrc)Instructions/InstEmitFloatArithmetic.cs" />
+    <Compile Include="$(PatchedDir)CodeGen/Spirv/SpirvGenerator.cs" />
+    <Compile Include="$(PatchedDir)Instructions/InstEmitFloatArithmetic.cs" />
+    <EmbeddedResource Include="$(ShaderSrc)CodeGen/Glsl/HelperFunctions/*.glsl"
+                      LogicalName="Ryujinx.Graphics.Shader.CodeGen.Glsl.HelperFunctions.%(Filename)%(Extension)" />
+  </ItemGroup>
+
+  <Target Name="ApplyShaderPatches" BeforeTargets="BeforeBuild;CoreCompile"
+          Inputs="@(ShaderPatch);@(ShaderPatch->'$(ShaderSrc)%(File)')"
+          Outputs="@(ShaderPatch->'$(PatchedDir)%(File)')">
+    <MakeDir Directories="@(ShaderPatch->'$(PatchedDir)%(File)'->'%(RootDir)%(Directory)')" />
+    <Exec Condition="'$(OS)' != 'Windows_NT'"
+          Command="patch --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot;" />
+    <!-- Windows has no `patch`: tools/maxwell/apply_patch.py does the same (unified diff, exact hunks, -o).
+         Python: the repo's venv if present, else `python` on PATH (override with -p:PatchPython=...). -->
+    <PropertyGroup Condition="'$(OS)' == 'Windows_NT' And '$(PatchPython)' == ''">
+      <PatchPython Condition="Exists('$(MSBuildThisFileDirectory)../../../../private/venv/Scripts/python.exe')">$(MSBuildThisFileDirectory)../../../../private/venv/Scripts/python.exe</PatchPython>
+      <PatchPython Condition="'$(PatchPython)' == ''">python</PatchPython>
+    </PropertyGroup>
+    <Exec Condition="'$(OS)' == 'Windows_NT'"
+          Command="&quot;$(PatchPython)&quot; &quot;$(MSBuildThisFileDirectory)../../apply_patch.py&quot; --quiet --forward -o &quot;$(PatchedDir)%(ShaderPatch.File)&quot; &quot;$(ShaderSrc)%(ShaderPatch.File)&quot; &quot;%(ShaderPatch.FullPath)&quot;" />
+  </Target>
+
+</Project>
