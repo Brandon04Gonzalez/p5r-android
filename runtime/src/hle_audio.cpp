@@ -30,8 +30,13 @@ struct Out {
     std::mutex lock;
     std::condition_variable cv;
     std::deque<uint64_t> queued, released;
+    uint64_t front_used = 0;  // bytes of queued.front() already mixed (into_render)
     std::shared_ptr<EventState> event = std::make_shared<EventState>();
     bool started = false;
+    // With an AudioRenderer running (P4AU: the game's sound on the renderer, its films' sound on an AudioOut) both go
+    // to the one device: queued one after the other they took turns and each played at half speed, so the render
+    // thread mixes AudioOut's samples into its own frames instead (mix_audio_out) and the player thread stands by.
+    bool into_render = false;
     // statistics since the last log (every 1000 buffers)
     uint64_t buffers = 0, silent = 0;
     int peak = 0;
@@ -53,12 +58,16 @@ void out_stats(uint64_t buf) {
     }
 }
 
-void release(void* ctx) {
-    std::lock_guard lk(g_out.lock);
-    g_out.released.push_back(reinterpret_cast<uint64_t>(ctx));
+void release_locked(uint64_t buf) {  // g_out.lock held
+    g_out.released.push_back(buf);
     g_out.event->signaled = true;
     notify_all();
     g_out.cv.notify_all();
+}
+
+void release(void* ctx) {
+    std::lock_guard lk(g_out.lock);
+    release_locked(reinterpret_cast<uint64_t>(ctx));
 }
 
 // The platform device has one completion callback: AudioOut buffers are guest addresses, the renderer's blocks
@@ -88,7 +97,8 @@ void player() {
         {
             std::unique_lock lk(g_out.lock);
             auto ready = [&] {
-                return g_out.started && !g_out.queued.empty() && (!device || plat::audio_queued() < kMaxInFlight);
+                return g_out.started && !g_out.into_render && !g_out.queued.empty() &&
+                       (!device || plat::audio_queued() < kMaxInFlight);
             };
             g_out.cv.wait_for(lk, std::chrono::milliseconds(5), ready);
             if (!ready()) continue;
@@ -135,6 +145,27 @@ void OpenDefaultAudioOut(CPU& c) {  // (AudioOut*, os::SystemEvent*, const Audio
     static std::once_flag once;
     std::call_once(once, [] { std::thread(player).detach(); });
     c.x[0] = 0;
+}
+
+// The variants without a system event (P4AU's films: the game polls GetReleasedAudioOutBuffer) and with a device
+// name: the same output. Before these were taken, P4AU's no-event open went to the sdk's own code and the audout:u
+// stub, our player thread never started, no buffer came back and the opening film froze after its first second.
+void OpenDefaultAudioOutNoEvent(CPU& c) {  // (AudioOut*, const AudioOutParameter&)
+    st<uint64_t>(c.x[0], 0xA0D10);  // opaque
+    static std::once_flag once;
+    std::call_once(once, [] { std::thread(player).detach(); });
+    static bool said = false;
+    if (!said) said = true, log("audio: AudioOut opened (no event: the game polls for released buffers)");
+    c.x[0] = 0;
+}
+
+void OpenAudioOutNamed(CPU& c) {  // (AudioOut*, SystemEvent*, const char* name, const AudioOutParameter&)
+    c.x[2] = c.x[3];
+    OpenDefaultAudioOut(c);
+}
+
+void OpenAudioOutNamedNoEvent(CPU& c) {  // (AudioOut*, const char* name, const AudioOutParameter&)
+    OpenDefaultAudioOutNoEvent(c);
 }
 
 void StartAudioOut(CPU& c) {
@@ -407,11 +438,38 @@ void write_wav(const char* path, const std::vector<int16_t>& pcm) {
 }
 
 // Called by the render thread after each 5 ms frame.
+// One 5 ms frame of the AudioOut's queued s16 stereo samples added to the renderer's mix; each buffer used up goes
+// back to the game. True when something was added.
+bool mix_audio_out(int32_t* mix) {
+    std::lock_guard lk(g_out.lock);
+    g_out.into_render = true;
+    if (!g_out.started) return false;
+    int s = 0;
+    while (s < kFrame && !g_out.queued.empty()) {
+        uint64_t buf = g_out.queued.front();
+        const auto* pcm = reinterpret_cast<const int16_t*>(ld<uint64_t>(buf));
+        uint64_t size = ld<uint64_t>(buf + 16) & ~3ull;
+        uint64_t frames = (size - std::min(size, g_out.front_used)) / 4;
+        uint64_t take = std::min<uint64_t>(frames, uint64_t(kFrame - s));
+        const int16_t* p = pcm ? pcm + g_out.front_used / 2 : nullptr;
+        for (uint64_t k = 0; p && k < take; k++, s++) mix[2 * s] += p[2 * k], mix[2 * s + 1] += p[2 * k + 1];
+        if (!p) s += int(take);
+        g_out.front_used += take * 4;
+        if (g_out.front_used >= size) {
+            g_out.queued.pop_front();
+            g_out.front_used = 0;
+            release_locked(buf);
+        }
+    }
+    return s > 0;
+}
+
 void render_submit() {
     static const bool device = device_open();
     static const char* dump_path = std::getenv("NX_AUDIO_DUMP");
     std::lock_guard lk(g_render.lock);
     RenderOut& o = g_render;
+    if (mix_audio_out(o.mix)) o.mixed = true;
     if (!o.mixed) return;
     o.mixed = false;
     int16_t pcm[kFrame * 2];
@@ -589,6 +647,9 @@ NX_HLE("_ZN2nn5audio26SetAudioDeviceOutputVolumeEPKNS0_15AudioDeviceNameEf", zer
 NX_HLE("_ZN2nn5audio41GetActiveAudioDeviceChannelCountForOutputEv", two);
 NX_HLE("_ZN2nn5audio27InitializeAudioOutParameterEPNS0_17AudioOutParameterE", InitializeAudioOutParameter);
 NX_HLE("_ZN2nn5audio19OpenDefaultAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventERKNS0_17AudioOutParameterE", OpenDefaultAudioOut);
+NX_HLE("_ZN2nn5audio19OpenDefaultAudioOutEPNS0_8AudioOutERKNS0_17AudioOutParameterE", OpenDefaultAudioOutNoEvent);
+NX_HLE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPNS_2os11SystemEventEPKcRKNS0_17AudioOutParameterE", OpenAudioOutNamed);
+NX_HLE("_ZN2nn5audio12OpenAudioOutEPNS0_8AudioOutEPKcRKNS0_17AudioOutParameterE", OpenAudioOutNamedNoEvent);
 NX_HLE("_ZN2nn5audio13StartAudioOutEPNS0_8AudioOutE", StartAudioOut);
 NX_HLE("_ZN2nn5audio12StopAudioOutEPNS0_8AudioOutE", StopAudioOut);
 NX_HLE("_ZN2nn5audio13CloseAudioOutEPNS0_8AudioOutE", CloseAudioOut);
