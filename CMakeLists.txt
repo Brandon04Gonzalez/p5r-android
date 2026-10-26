@@ -191,6 +191,14 @@ set(NX_RUNTIME_SOURCES
 )
 file(GLOB NX_GAME_SOURCES CONFIGURE_DEPENDS "${NX_GAME_DIR}/*.cpp")
 list(APPEND NX_RUNTIME_SOURCES ${NX_GAME_SOURCES})
+# The game read in place from the player's NSP/XCI (runtime/src/game_image.cpp): the importer's NCA/RomFS reader.
+set(NX_IMPORTER_DIR "${CMAKE_SOURCE_DIR}/android/wonder/importer")
+list(APPEND NX_RUNTIME_SOURCES runtime/src/game_image.cpp "${NX_IMPORTER_DIR}/nximport.cpp" "${NX_IMPORTER_DIR}/nxcrypto.cpp")
+if(WIN32)  # its POSIX calls, on Windows (only these two files see the shim)
+    set_source_files_properties("${NX_IMPORTER_DIR}/nximport.cpp" "${NX_IMPORTER_DIR}/nxcrypto.cpp" PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/games/p5r/tools/win_compat"
+        COMPILE_DEFINITIONS "_CRT_NONSTDC_NO_WARNINGS")
+endif()
 if(NX_NCE)
     list(APPEND NX_RUNTIME_SOURCES runtime/src/nce/nce.cpp runtime/src/nce/nso.cpp)
 endif()
@@ -208,7 +216,7 @@ if(ANDROID)
     add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
         runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
         "${GLUE}/android_native_app_glue.c")
-    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/Include" "${GLUE}")
+    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_IMPORTER_DIR}" "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/Include" "${GLUE}")
     # Our ANativeActivity_onCreate (platform_android.cpp) runs first, on the UI thread, then calls the glue's.
     set_source_files_properties("${GLUE}/android_native_app_glue.c" PROPERTIES
         COMPILE_DEFINITIONS "ANativeActivity_onCreate=glue_ANativeActivity_onCreate")
@@ -222,7 +230,7 @@ elseif(APPLE)
     find_package(SDL3 REQUIRED CONFIG)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS /opt/homebrew/include /usr/local/include)
     add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_mac.cpp runtime/src/memguard_mac.cpp)
-    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
+    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_IMPORTER_DIR}" "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE ${NX_GAME_LIBS} SDL3::SDL3)
     target_compile_options(${NX_GAME} PRIVATE -fvisibility=hidden)
     # The executable loads near 0x1_0000_0000, below the guest ranges (0x40_0000_0000 and up). The game runs on its
@@ -234,14 +242,14 @@ elseif(UNIX)
     find_package(Threads REQUIRED)
     find_path(NX_VULKAN_INCLUDE vulkan/vulkan.h HINTS "${NX_VULKAN_SDK}/include" /usr/include /usr/local/include)
     add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_linux.cpp runtime/src/memguard_linux.cpp)
-    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
+    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_IMPORTER_DIR}" "${NX_GAME_DIR}" "${NX_VULKAN_INCLUDE}")
     target_link_libraries(${NX_GAME} PRIVATE ${NX_GAME_LIBS} SDL3::SDL3 Threads::Threads ${CMAKE_DL_LIBS})
     target_compile_options(${NX_GAME} PRIVATE -fvisibility=hidden -march=x86-64-v3 -ffp-contract=off)
     # The executable (PIE) loads near 0x55_5555_0000_0000, far above the guest ranges (0x40_0000_0000 and up). The
     # game runs on its own thread with a 64 MiB stack (platform_linux.cpp).
 else()
     add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win.cpp runtime/src/memguard_win.cpp)
-    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/Include")
+    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_IMPORTER_DIR}" "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/Include")
     target_link_libraries(${NX_GAME} PRIVATE ${NX_GAME_LIBS} xinput xaudio2 ole32 psapi)
     # The runtime uses the portable C library (getenv, fopen, ...) on every host: no "_s" variants.
     target_compile_definitions(${NX_GAME} PRIVATE _CRT_SECURE_NO_WARNINGS _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING)
@@ -250,6 +258,17 @@ else()
         # main-thread stack (recompiled calls nest deeply); a link map for tools/symbolize.py.
         target_link_options(${NX_GAME} PRIVATE /STACK:67108864 /HIGHENTROPYVA:NO /MAP)
     endif()
+endif()
+
+# P5R's import on the phone (games/p5r/import, ImportActivity): the game file checked and its shaders extracted;
+# the translation itself is libspirvharness.so (games/p5r/tools/build_harness_android.sh).
+if(ANDROID AND NX_GAME STREQUAL "p5r")
+    add_library(p5rimport SHARED games/p5r/import/p5r_import_jni.cpp games/p5r/import/p5r_shaders.cpp
+        "${NX_IMPORTER_DIR}/nximport.cpp" "${NX_IMPORTER_DIR}/nxcrypto.cpp")
+    target_include_directories(p5rimport PRIVATE "${NX_IMPORTER_DIR}" games/p5r/import)
+    target_compile_options(p5rimport PRIVATE -O2 -fvisibility=hidden -march=armv8-a+crypto)
+    target_link_libraries(p5rimport PRIVATE log dl)
+    target_link_options(p5rimport PRIVATE -Wl,-z,max-page-size=16384)
 endif()
 
 # NX_RELEASE: the runtime and the game's glue only (the recompiled game code does not change with it).

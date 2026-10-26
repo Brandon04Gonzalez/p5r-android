@@ -73,6 +73,11 @@ std::unique_ptr<NsoModule> load_nso(const std::string& path, const std::string& 
         }
         std::fclose(f);
     }
+    return load_nso_bytes(raw, path, name, base, error);
+}
+
+std::unique_ptr<NsoModule> load_nso_bytes(const std::vector<uint8_t>& raw, const std::string& path,
+                                          const std::string& name, uint64_t base, std::string& error) {
     if (raw.size() < 0x100 || std::memcmp(raw.data(), "NSO0", 4) != 0) {
         error = path + ": not an NSO file";
         return nullptr;

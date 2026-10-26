@@ -6,8 +6,8 @@
      The recompiled build (analysis/ and the game's code compiled in) is private to the owner of the game. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.p5rrecomp"
-    android:versionCode="3"
-    android:versionName="0.3.0">
+    android:versionCode="4"
+    android:versionName="0.4.0">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -39,6 +39,16 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- Prepares the game once: checks the player's NSP and keys and translates its shaders (libp5rimport.so with
+             libspirvharness.so, the shader translator). Its own process, so the translator's runtime never shares
+             the game's. -->
+        <activity
+            android:name=".ImportActivity"
+            android:exported="false"
+            android:process=":import"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
         <!-- Where the on-screen controls go (NX_TOUCH_LAYOUT), full screen like the game. -->
         <activity
             android:name=".ControlsEditor"

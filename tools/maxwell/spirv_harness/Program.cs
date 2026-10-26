@@ -45,7 +45,12 @@ namespace SpirvHarness
         static bool NoRetry;   // --no-retry: report attempt 1 only (the translator as Ryujinx runs it)
         static bool Debug;     // --debug-mode: DebugMode from attempt 1 (also reports undecodable opcodes)
 
-        static int Main(string[] args)
+        // Progress of the batch for the native library (Exports.cs): blocks done, and how many.
+        public static int Done, Total;
+
+        static int Main(string[] args) => Run(args);
+
+        public static int Run(string[] args)
         {
             NoRetry = args.Contains("--no-retry");
             Debug = args.Contains("--debug-mode");
@@ -198,6 +203,8 @@ namespace SpirvHarness
 
             List<Job> jobs = LoadJobs(root);
             if (limit > 0) jobs = jobs.Take(limit).ToList();
+            Volatile.Write(ref Done, 0);
+            Volatile.Write(ref Total, jobs.Count);
             Console.WriteLine($"{jobs.Count} distinct code blocks, {jobsN} jobs, validation {(validate ? targetEnv : "off")}");
 
             ConcurrentBag<Result> results = new();
@@ -230,6 +237,7 @@ namespace SpirvHarness
                 }
                 results.Add(r);
                 int n = Interlocked.Increment(ref done);
+                Volatile.Write(ref Done, n);
                 if (n % 500 == 0) Console.WriteLine($"  {n}/{jobs.Count}  {total.Elapsed.TotalSeconds:F0} s");
             });
 

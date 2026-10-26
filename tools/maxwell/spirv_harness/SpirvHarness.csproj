@@ -12,6 +12,7 @@
     <AssemblyName>spirv_harness</AssemblyName>
     <RootNamespace>SpirvHarness</RootNamespace>
     <InvariantGlobalization>true</InvariantGlobalization>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
   </PropertyGroup>
 
   <ItemGroup>

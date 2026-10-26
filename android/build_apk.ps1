@@ -27,12 +27,27 @@ if (-not (Test-Path "$build\build.ninja")) {
         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static "-DNX_GAME=$Game" "-DNX_NCE=$nceFlag"
 }
 if ($Release) { cmake -B $build -DNX_RELEASE=ON | Out-Null }
-cmake --build $build --target $Game
+# Libraries packed with lib<game>.so: the P5R native build prepares the game on the phone (libp5rimport.so) with the
+# shader translator (libspirvharness.so, built in Docker by games/p5r/tools/build_harness_android.sh).
+$extraLibs = @()
+$targets = @($Game)
+if ($Nce -and $Game -eq "p5r") {
+    $harness = "$root\private\build\spirv_harness_android\libspirvharness.so"
+    if (-not (Test-Path $harness)) {
+        throw "missing $harness. Build it once, with Docker Desktop running, from the repository root: docker run --rm -v ""${root}:/src"" -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh games/p5r/tools/build_harness_android.sh"
+    }
+    $targets += "p5rimport"
+    $extraLibs += @("$build\libp5rimport.so", $harness)
+}
+cmake --build $build --target @targets
 if ($LASTEXITCODE) { throw "native build failed" }
 
 Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$out\lib\arm64-v8a", "$out\res" | Out-Null
 & "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" --strip-unneeded -o "$out\lib\arm64-v8a\lib$Game.so" "$build\lib$Game.so"
+foreach ($lib in $extraLibs) {
+    & "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" --strip-unneeded -o "$out\lib\arm64-v8a\$(Split-Path $lib -Leaf)" $lib
+}
 
 & "$bt\aapt2.exe" compile --dir "$PSScriptRoot\res" -o "$out\res.zip"
 # The launcher icon: the project's own (games\<game>\icon\res, e.g. games\p5r\tools\make_icon.py), else the game's,
@@ -65,7 +80,9 @@ Compress-Archive -Path "lib" -DestinationPath "$out\lib.zip" -Force
 Pop-Location
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $apk = [System.IO.Compression.ZipFile]::Open("$out\base.apk", "Update")
-[System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk, "$out\lib\arm64-v8a\lib$Game.so", "lib/arm64-v8a/lib$Game.so", "Optimal") | Out-Null
+foreach ($so in Get-ChildItem "$out\lib\arm64-v8a" -Filter *.so) {
+    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk, $so.FullName, "lib/arm64-v8a/$($so.Name)", "Optimal") | Out-Null
+}
 # Java of the game's own (games\<game>\java, e.g. Wonder's home screen): javac against android.jar, d8 to classes.dex.
 $java = "$root\games\$Game\java"
 if (Test-Path $java) {

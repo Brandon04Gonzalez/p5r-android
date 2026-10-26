@@ -2,15 +2,27 @@ package io.github.p5rrecomp;
 
 import android.app.Activity;
 import android.app.AlertDialog;
+import android.content.ClipData;
+import android.content.Context;
 import android.content.DialogInterface;
 import android.content.Intent;
+import android.content.SharedPreferences;
+import android.content.pm.ShortcutInfo;
+import android.content.pm.ShortcutManager;
+import android.database.Cursor;
+import android.graphics.Bitmap;
+import android.graphics.BitmapFactory;
 import android.graphics.Color;
 import android.graphics.Typeface;
+import android.graphics.drawable.Icon;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.os.Environment;
+import android.os.ParcelFileDescriptor;
+import android.provider.OpenableColumns;
 import android.provider.Settings;
+import android.system.Os;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -22,7 +34,10 @@ import android.widget.TextView;
 import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileReader;
+import java.io.FileOutputStream;
 import java.io.FileWriter;
+import java.io.InputStream;
+import java.io.OutputStream;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -46,6 +61,12 @@ import java.util.Map;
  *   on-screen controls on (default) or off (NX_TOUCH_SHOW), their size (NX_TOUCH_SIZE) and opacity (NX_TOUCH_OPACITY),
  *               and where they are (NX_TOUCH_LAYOUT, written by ControlsEditor)
  * and imports or exports the saves (user/save, SaveFiles.java): a ZIP or a folder in, a ZIP in Download out.
+ * The game: the player picks their own NSP or XCI (Persona 5 Royal 1.0.0) and prod.keys here; ImportActivity checks
+ * them and translates the game's shaders once, and every start reads the game from that file as it is (the runtime's
+ * game_image.cpp, through NX_GAME_FD / NX_GAME_NAME / NX_KEYS). Nothing of the game is copied but its shaders. A data
+ * folder made on a PC (exefs/ or analysis/, extract/romfs, spirv/) still works when no file was picked.
+ * The icon: a home screen shortcut with a picture of the player's own (Android lets an app pin shortcuts, not change
+ * its own icon).
  * Other lines of config.txt are kept as they were. The launcher itself speaks the device's language (Lang.java:
  * Spanish, English, French, German, Italian, Portuguese, Japanese, Korean, Chinese; English otherwise).
  */
@@ -72,7 +93,7 @@ public class Launcher extends Activity {
     final Map<String, String> config = new LinkedHashMap<>();
     TextView status;
     Button play;
-    static final int PICK_ZIP = 1, PICK_FOLDER = 2;
+    static final int PICK_ZIP = 1, PICK_FOLDER = 2, PICK_GAME = 3, PICK_KEYS = 4, PICK_ICON = 5, PREPARE = 6;
 
     String t(String spanish, String english) { return Lang.t(spanish, english); }
 
@@ -81,6 +102,157 @@ public class Launcher extends Activity {
     static File dataDir() { return new File(Environment.getExternalStorageDirectory(), DATA); }
 
     boolean hasAccess() { return Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager(); }
+
+    // ---- the game file, read in place at every start ----
+
+    SharedPreferences prefs() { return getSharedPreferences("game", MODE_PRIVATE); }
+
+    String gameUri() { return prefs().getString("uri", null); }
+
+    String gameName() { return prefs().getString("name", ""); }
+
+    static File keysFile(Context c, String name) { return new File(new File(c.getFilesDir(), "keys"), name); }
+
+    boolean hasKeys() { return keysFile(this, "prod.keys").length() > 0; }
+
+    boolean gameReadable() {
+        try (ParcelFileDescriptor f = getContentResolver().openFileDescriptor(Uri.parse(gameUri()), "r")) {
+            return f != null;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // The shaders were translated from this game file (ImportActivity writes spirv/import.txt last).
+    boolean prepared() {
+        File note = new File(dataDir(), "spirv/import.txt");
+        if (!note.canRead()) return false;
+        try (BufferedReader r = new BufferedReader(new FileReader(note))) {
+            return gameName().equals(r.readLine());
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    String displayName(Uri uri) {
+        try (Cursor c = getContentResolver().query(uri, new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst()) return c.getString(0);
+        } catch (Exception ignored) {
+        }
+        String last = uri.getLastPathSegment();
+        return last == null ? "" : last.substring(last.lastIndexOf('/') + 1);
+    }
+
+    void pick(int request, String type, boolean multiple) {
+        Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+        i.addCategory(Intent.CATEGORY_OPENABLE);
+        i.setType(type);
+        if (multiple) i.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, true);
+        startActivityForResult(i, request);
+    }
+
+    void onGamePicked(Uri uri) {
+        String name = displayName(uri);
+        String lower = name.toLowerCase(Locale.ROOT);
+        if (!lower.endsWith(".nsp") && !lower.endsWith(".xci")) {
+            tell(t("Archivo no válido", "Not a game file"),
+                    t("Elige el archivo .nsp o .xci del juego base (no el de la actualización).",
+                            "Choose the base game's .nsp or .xci file (not the update's)."));
+            return;
+        }
+        try {
+            getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (Exception ignored) {  // a provider without persistable grants: works while the app runs
+        }
+        prefs().edit().putString("uri", uri.toString()).putString("name", name).apply();
+    }
+
+    // prod.keys (and title.keys, when the dump needs it): copied into the app's own storage, never shared or logged.
+    void onKeysPicked(Intent data) {
+        List<Uri> uris = new ArrayList<>();
+        ClipData clip = data.getClipData();
+        if (clip != null)
+            for (int k = 0; k < clip.getItemCount(); k++) uris.add(clip.getItemAt(k).getUri());
+        else if (data.getData() != null) uris.add(data.getData());
+        boolean prod = false;
+        for (Uri uri : uris) {
+            String name = displayName(uri).toLowerCase(Locale.ROOT);
+            String target = name.contains("title") ? "title.keys" : "prod.keys";
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                byte[] buf = new byte[1 << 20];
+                int n = 0, r;
+                while (in != null && n < buf.length && (r = in.read(buf, n, buf.length - n)) > 0) n += r;
+                String text = new String(buf, 0, n, "UTF-8");
+                if (target.equals("prod.keys") && !text.contains("header_key") && !text.contains("master_key_00")) continue;
+                File f = keysFile(this, target);
+                f.getParentFile().mkdirs();
+                try (OutputStream out = new FileOutputStream(f)) {
+                    out.write(buf, 0, n);
+                }
+                prod |= target.equals("prod.keys");
+            } catch (Exception ignored) {
+            }
+        }
+        if (!prod && !hasKeys())
+            tell(t("Claves no válidas", "Not a keys file"),
+                    t("Ese archivo no tiene las claves (header_key). Elige el prod.keys de tu consola.",
+                            "That file has no keys (header_key). Choose your console's prod.keys."));
+    }
+
+    void prepare() {
+        Intent i = new Intent(this, ImportActivity.class);
+        i.putExtra(ImportActivity.EXTRA_URI, gameUri());
+        i.putExtra(ImportActivity.EXTRA_NAME, gameName());
+        startActivityForResult(i, PREPARE);
+    }
+
+    // The runtime reads the game from this descriptor (same process: the NativeActivity runs in the launcher's).
+    boolean openGameForRuntime() {
+        try {
+            ParcelFileDescriptor f = getContentResolver().openFileDescriptor(Uri.parse(gameUri()), "r");
+            if (f == null) return false;
+            Os.setenv("NX_GAME_FD", String.valueOf(f.detachFd()), true);
+            Os.setenv("NX_GAME_NAME", gameName(), true);
+            Os.setenv("NX_KEYS", keysFile(this, "prod.keys").getPath(), true);
+            File tk = keysFile(this, "title.keys");
+            if (tk.exists()) Os.setenv("NX_TITLE_KEYS", tk.getPath(), true);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // A home screen shortcut with the player's picture (cropped to a square; an adaptive icon, so the home screen gives
+    // it its own shape).
+    void onIconPicked(Uri uri) {
+        try {
+            Bitmap src;
+            try (InputStream in = getContentResolver().openInputStream(uri)) {
+                src = BitmapFactory.decodeStream(in);
+            }
+            if (src == null) throw new IllegalArgumentException("not a picture");
+            int side = Math.min(src.getWidth(), src.getHeight());
+            Bitmap square = Bitmap.createBitmap(src, (src.getWidth() - side) / 2, (src.getHeight() - side) / 2, side, side);
+            Bitmap icon = Bitmap.createScaledBitmap(square, 432, 432, true);
+            ShortcutManager sm = getSystemService(ShortcutManager.class);
+            if (sm == null || !sm.isRequestPinShortcutSupported()) {
+                tell(t("Icono", "Icon"), t("Tu pantalla de inicio no admite accesos directos.",
+                        "Your home screen does not support shortcuts."));
+                return;
+            }
+            Intent launch = new Intent(this, Launcher.class).setAction(Intent.ACTION_MAIN);
+            ShortcutInfo info = new ShortcutInfo.Builder(this, "picture_" + System.currentTimeMillis())
+                    .setShortLabel("P5R").setLongLabel("Persona 5 Royal").setIcon(Icon.createWithAdaptiveBitmap(icon))
+                    .setIntent(launch).build();
+            sm.requestPinShortcut(info, null);
+            tell(t("Icono", "Icon"), t("Acepta el aviso para poner el acceso directo con tu imagen en la pantalla de inicio. "
+                            + "El icono del cajón de apps no cambia: Android no deja que una app cambie el suyo.",
+                    "Accept the prompt to put the shortcut with your picture on the home screen. The icon in the app "
+                            + "drawer stays: Android does not let an app change its own."));
+        } catch (Exception e) {
+            tell(t("Icono", "Icon"), t("No se pudo usar esa imagen.", "That picture could not be used."));
+        }
+    }
 
     // The recompiled build reads analysis/main.bin, the native one (the game's own code) exefs/main.
     boolean hasData() {
@@ -167,6 +339,26 @@ public class Launcher extends Activity {
         status.setTextSize(14);
         status.setPadding(0, dp(6), 0, dp(14));
         root.addView(status);
+
+        addRow(root, t("Archivo del juego (.nsp / .xci)", "Game file (.nsp / .xci)"), t("Elegir", "Choose"),
+                new View.OnClickListener() {
+                    @Override
+                    public void onClick(View v) {
+                        pick(PICK_GAME, "*/*", false);
+                    }
+                });
+        addRow(root, t("Claves (prod.keys)", "Keys (prod.keys)"), t("Elegir", "Choose"), new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pick(PICK_KEYS, "*/*", true);
+            }
+        });
+        addRow(root, t("Icono", "Icon"), t("Elegir imagen", "Choose a picture"), new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pick(PICK_ICON, "image/*", false);
+            }
+        });
 
         for (final Option o : options) {
             LinearLayout row = new LinearLayout(this);
@@ -278,7 +470,23 @@ public class Launcher extends Activity {
                     askAccess();
                     return;
                 }
-                if (!hasData() || wrongBuild() != null) {
+                if (gameUri() != null) {  // the game file the player picked
+                    if (!gameReadable()) pick(PICK_GAME, "*/*", false);
+                    else if (!hasKeys()) pick(PICK_KEYS, "*/*", true);
+                    else if (!prepared()) prepare();
+                    else if (openGameForRuntime()) {
+                        save();
+                        startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
+                    } else {
+                        tell(t("No se pudo abrir el juego", "The game could not be opened"), gameName());
+                    }
+                    return;
+                }
+                if (!hasData()) {
+                    pick(PICK_GAME, "*/*", false);
+                    return;
+                }
+                if (wrongBuild() != null) {
                     refresh();
                     return;
                 }
@@ -304,12 +512,24 @@ public class Launcher extends Activity {
             status.setText(t("Hace falta el permiso de acceso a todos los archivos para leer los datos del juego.",
                     "All-files access is needed to read the game data."));
             play.setText(t("Dar permiso", "Grant access"));
+        } else if (gameUri() != null && !gameReadable()) {
+            status.setText(Lang.f("Ya no se puede leer el archivo del juego (%s): vuelve a elegirlo.",
+                    "The game file can no longer be read (%s): choose it again.", gameName()));
+            play.setText(t("Elegir el juego", "Choose the game"));
+        } else if (gameUri() != null && !hasKeys()) {
+            status.setText(t("Falta tu archivo prod.keys.", "Your prod.keys file is missing."));
+            play.setText(t("Elegir prod.keys", "Choose prod.keys"));
+        } else if (gameUri() != null && !prepared()) {
+            status.setText(Lang.f("Juego: %s. Falta prepararlo: solo una vez, unos minutos.",
+                    "Game: %s. It needs preparing: once, a few minutes.", gameName()));
+            play.setText(t("Preparar el juego", "Prepare the game"));
+        } else if (gameUri() != null) {
+            status.setText(Lang.f("Juego listo: %s", "Game ready: %s", gameName()));
+            play.setText(t("Jugar", "Play"));
         } else if (!hasData()) {
-            status.setText(Lang.f("No se encontraron los datos en Almacenamiento interno/%s (exefs, extract, spirv) "
-                            + "de tu propia copia del juego.",
-                    "No game data found in Internal storage/%s (exefs, extract, spirv) from your own copy of the game.",
-                    DATA));
-            play.setText(t("Volver a buscar", "Look again"));
+            status.setText(t("Elige el archivo de tu juego (.nsp o .xci de Persona 5 Royal 1.0.0) y tu prod.keys.",
+                    "Choose your game file (a Persona 5 Royal 1.0.0 .nsp or .xci) and your prod.keys."));
+            play.setText(t("Elegir el juego", "Choose the game"));
         } else if (wrongBuild() != null) {
             status.setText(Lang.f("Almacenamiento interno/%s/exefs/main no es Persona 5 Royal 1.0.0 (build %s). Copia el "
                             + "exefs del juego base, sin la actualización.",
@@ -369,7 +589,26 @@ public class Launcher extends Activity {
     @Override
     protected void onActivityResult(int request, int result, Intent data) {
         super.onActivityResult(request, result, data);
-        if (result != RESULT_OK || data == null || data.getData() == null) return;
+        if (request == PREPARE) {
+            refresh();
+            return;
+        }
+        if (result != RESULT_OK || data == null) return;
+        if (request == PICK_KEYS) {
+            onKeysPicked(data);
+            refresh();
+            return;
+        }
+        if (data.getData() == null) return;
+        if (request == PICK_GAME) {
+            onGamePicked(data.getData());
+            refresh();
+            return;
+        }
+        if (request == PICK_ICON) {
+            onIconPicked(data.getData());
+            return;
+        }
         try {
             SaveFiles.Result r = request == PICK_ZIP ? SaveFiles.importZip(getContentResolver(), data.getData())
                     : request == PICK_FOLDER ? SaveFiles.importTree(getContentResolver(), data.getData()) : null;
@@ -444,7 +683,9 @@ public class Launcher extends Activity {
     }
 
     void save() {
-        if (!hasAccess() || !dataDir().isDirectory()) return;
+        if (!hasAccess()) return;
+        dataDir().mkdirs();
+        if (!dataDir().isDirectory()) return;
         load();
         for (Option o : options) config.put(o.key, o.values[o.pick]);
         // GRAPHICS is the launcher's own key: the preset's switches are written with it (and removed for "high").
@@ -458,4 +699,23 @@ public class Launcher extends Activity {
     }
 
     int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+
+    void addRow(LinearLayout root, String label, String button, View.OnClickListener click) {
+        LinearLayout row = new LinearLayout(this);
+        row.setOrientation(LinearLayout.HORIZONTAL);
+        row.setGravity(Gravity.CENTER_VERTICAL);
+        row.setPadding(0, dp(4), 0, dp(4));
+        TextView name = new TextView(this);
+        name.setText(label);
+        name.setTextColor(Color.WHITE);
+        name.setTextSize(17);
+        row.addView(name, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        Button b = new Button(this);
+        b.setAllCaps(false);
+        b.setMinWidth(dp(180));
+        b.setText(button);
+        b.setOnClickListener(click);
+        row.addView(b);
+        root.addView(row);
+    }
 }

@@ -3,7 +3,10 @@
        imported, which is why it lives here and not in the .csproj. One obj directory per project (the harness and
        translator/); both write their binaries to the same bin directory. -->
   <PropertyGroup>
-    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)../../../private/build/spirv_harness/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
-    <BaseOutputPath>$(MSBuildThisFileDirectory)../../../private/build/spirv_harness/bin/</BaseOutputPath>
+    <!-- NxBuildDir (a global property): another directory for another kind of build, e.g. the Android library
+         (games/p5r/tools/build_harness_android.sh), so its restore never mixes with the PC build's. -->
+    <NxBuildDir Condition="'$(NxBuildDir)' == ''">spirv_harness</NxBuildDir>
+    <BaseIntermediateOutputPath>$(MSBuildThisFileDirectory)../../../private/build/$(NxBuildDir)/obj/$(MSBuildProjectName)/</BaseIntermediateOutputPath>
+    <BaseOutputPath>$(MSBuildThisFileDirectory)../../../private/build/$(NxBuildDir)/bin/</BaseOutputPath>
   </PropertyGroup>
 </Project>

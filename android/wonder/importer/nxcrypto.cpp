@@ -3,6 +3,10 @@
 // only used on a few kilobytes (NCA headers, key unwrapping) and is the plain byte-wise inverse cipher.
 #include "nxcrypto.h"
 
+#if defined(__aarch64__) && defined(__ARM_FEATURE_AES)
+#include <arm_neon.h>
+#endif
+
 #include <cstring>
 
 namespace nxi {
@@ -138,7 +142,48 @@ void aes_ecb_decrypt(const Aes128& k, uint8_t* data, size_t n) {
     for (size_t i = 0; i + 16 <= n; i += 16) k.decrypt_block(data + i, data + i);
 }
 
+#if defined(__aarch64__) && defined(__ARM_FEATURE_AES)
+// AArch64 with the crypto extension (every arm64 phone the port runs on; the build says -march=armv8-a+crypto):
+// the AES instructions, four blocks at a time. The P5R port decrypts the game's RomFS this way at every read.
+static void aes_ctr_arm(const Aes128& k, const uint8_t iv[16], uint8_t* data, size_t n) {
+    uint8x16_t rk[11];
+    for (int i = 0; i < 11; i++) rk[i] = vld1q_u8(reinterpret_cast<const uint8_t*>(k.round_keys() + 4 * i));
+    uint8_t ctr[16];
+    std::memcpy(ctr, iv, 16);
+    auto next = [&](uint8x16_t& out) {
+        out = vld1q_u8(ctr);
+        for (int j = 15; j >= 0 && ++ctr[j] == 0; j--) {
+        }
+    };
+    auto enc = [&](uint8x16_t s) {
+        for (int r = 0; r < 9; r++) s = vaesmcq_u8(vaeseq_u8(s, rk[r]));
+        return veorq_u8(vaeseq_u8(s, rk[9]), rk[10]);
+    };
+    size_t i = 0;
+    for (; i + 64 <= n; i += 64) {
+        uint8x16_t c0, c1, c2, c3;
+        next(c0), next(c1), next(c2), next(c3);
+        c0 = enc(c0), c1 = enc(c1), c2 = enc(c2), c3 = enc(c3);
+        vst1q_u8(data + i, veorq_u8(vld1q_u8(data + i), c0));
+        vst1q_u8(data + i + 16, veorq_u8(vld1q_u8(data + i + 16), c1));
+        vst1q_u8(data + i + 32, veorq_u8(vld1q_u8(data + i + 32), c2));
+        vst1q_u8(data + i + 48, veorq_u8(vld1q_u8(data + i + 48), c3));
+    }
+    for (; i < n; i += 16) {
+        uint8x16_t c;
+        next(c);
+        uint8_t ks[16];
+        vst1q_u8(ks, enc(c));
+        size_t m = n - i < 16 ? n - i : 16;
+        for (size_t j = 0; j < m; j++) data[i + j] ^= ks[j];
+    }
+}
+#endif
+
 void aes_ctr(const Aes128& k, const uint8_t iv[16], uint8_t* data, size_t n) {
+#if defined(__aarch64__) && defined(__ARM_FEATURE_AES)
+    return aes_ctr_arm(k, iv, data, n);
+#endif
     uint8_t ctr[16], ks[16];
     std::memcpy(ctr, iv, 16);
     for (size_t i = 0; i < n; i += 16) {

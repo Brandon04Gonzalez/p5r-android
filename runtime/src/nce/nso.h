@@ -27,7 +27,10 @@ struct NsoModule {
 // LZ4 block decompression into exactly `out_size` bytes; false on a malformed block.
 bool lz4_block_decompress(const uint8_t* in, size_t in_size, uint8_t* out, size_t out_size);
 
-// Parses an NSO file; `base` is where it will be loaded (stored in info.base). Null with `error` set on failure.
+// Parses an NSO file (or its bytes, `path` naming it in errors); `base` is where it will be loaded (stored in
+// info.base). Null with `error` set on failure.
+std::unique_ptr<NsoModule> load_nso_bytes(const std::vector<uint8_t>& raw, const std::string& path,
+                                          const std::string& name, uint64_t base, std::string& error);
 std::unique_ptr<NsoModule> load_nso(const std::string& path, const std::string& name, uint64_t base,
                                     std::string& error);
 

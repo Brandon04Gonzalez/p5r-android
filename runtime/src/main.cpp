@@ -14,6 +14,7 @@
 #include "platform.h"
 
 #if NX_NCE
+#include "game_image.h"
 #include "nce/nce.h"
 #include "nce/nso.h"
 #else
@@ -153,14 +154,23 @@ void boot() {
     memory_init();
     kernel_init();
 #if NX_NCE
-    // The player's own exefs (main and sdk as they are on the cartridge or in the eShop download).
+    // The player's own ExeFS (main and sdk as they are on the cartridge or in the eShop download): from the game file
+    // read in place (game_image.h), else from the data folder's exefs/.
     nce::init();
     static std::unique_ptr<nce::NsoModule> nso[2];
     const std::string exefs = plat::data_root() + "/exefs";
     const char* names[2] = {"main", "sdk"};
+    const nxi::GameImage* image = game_image();
     for (int i = 0; i < 2; i++) {
         std::string error;
-        nso[i] = nce::load_nso(exefs + "/" + names[i], names[i], kModuleBase + uint64_t(i) * 0x10000000, error);
+        const uint64_t base = kModuleBase + uint64_t(i) * 0x10000000;
+        if (image) {
+            auto it = image->exefs().find(names[i]);
+            if (it == image->exefs().end()) fatal("the game file's ExeFS has no %s", names[i]);
+            nso[i] = nce::load_nso_bytes(it->second, std::string("ExeFS/") + names[i], names[i], base, error);
+        } else {
+            nso[i] = nce::load_nso(exefs + "/" + names[i], names[i], base, error);
+        }
         if (!nso[i]) fatal("%s (copy the exefs folder of your own dump of the game there)", error.c_str());
     }
     if (const char* want = game::kInfo.main_build_id) {
