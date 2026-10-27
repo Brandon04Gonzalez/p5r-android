@@ -34,7 +34,21 @@ void memory_init() {
     // Xiaomi 24069PC21G) something sat at 0x6F00000000 and this was fatal: the app closed as soon as the game started.
 #if NX_NCE
     // Native execution: the thunks are real code there (a stub per 16 bytes, nce.cpp), and their common code after.
-    if (!plat::reserve(kThunkBase, kThunkSize + 0x10000))
+    bool thunks_ok = plat::reserve(kThunkBase, kThunkSize + 0x10000);
+#if defined(__ANDROID__)
+    // If that address is taken on this device, use another free one (the thunks are called by absolute address from
+    // the GOT and from hooks far from the modules, so any range far from them works). All before the first thunk is handed out.
+    static const uint64_t kThunkFallback[] = {0x4800000000ull, 0x3800000000ull, 0x6E00000000ull,
+                                              0x6D00000000ull, 0x6C00000000ull, 0x6F00000000ull};
+    for (size_t i = 0; !thunks_ok && i < sizeof kThunkFallback / sizeof *kThunkFallback; i++) {
+        if (!plat::reserve(kThunkFallback[i], kThunkSize + 0x10000)) continue;
+        log("memory: the HLE range %llx is in use on this device: using %llx", (unsigned long long)kThunkBase,
+            (unsigned long long)kThunkFallback[i]);
+        kThunkBase = kThunkFallback[i];
+        thunks_ok = true;
+    }
+#endif
+    if (!thunks_ok)
         fatal("cannot reserve the HLE range at %llx: the range is in use on this device", (unsigned long long)kThunkBase);
 #else
     if (!plat::reserve(kThunkBase, kThunkSize))

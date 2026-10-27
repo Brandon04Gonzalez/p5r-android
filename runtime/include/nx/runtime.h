@@ -42,14 +42,18 @@ constexpr uint64_t kHeapBase = 0x5000000000ull;
 // ("the range is in use", app_process64 at 0x5f_0972_b000). Below the modules nothing is mapped (ART keeps to the
 // low 4 GiB), so the alias region goes there. The guest learns it from svcGetInfo, like every region but the modules.
 constexpr uint64_t kAliasBase = 0x2000000000ull;
+// 0x6F_0000_0000 collides with system libraries and the dynamic linker on many 39-bit Android devices
+// (Xiaomi HyperOS / POCO F6, Poco F7, Redmi Note 14, Realme GT Neo 3T). 0x44_0000_0000 sits safely between modules
+// and heap, and memory_init() can fall back to another free range if needed.
+inline uint64_t kThunkBase = 0x4400000000ull;
 #else
 constexpr uint64_t kAliasBase = 0x5800000000ull;
+constexpr uint64_t kThunkBase = 0x6F00000000ull;
 #endif
 constexpr uint64_t kAliasSize = 0x1000000000ull;
 constexpr uint64_t kStackBase = 0x6800000000ull;
 // Kept below 0x70_0000_0000: Android (39-bit address space) maps the process's own libraries and heap up there.
 constexpr uint64_t kKernelBase = 0x6A00000000ull;
-constexpr uint64_t kThunkBase = 0x6F00000000ull;
 #endif
 // kKernelBase: TLS pages, main thread stack (memory we hand out). kThunkBase: HLE function addresses (never mapped).
 

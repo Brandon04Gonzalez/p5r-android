@@ -3,6 +3,7 @@
 //   save:  -> private/user/save/<mount>
 //   cache: -> private/user/cache<index>
 #include <cctype>
+#include <algorithm>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
@@ -11,6 +12,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #if defined(_WIN32)
@@ -148,6 +150,62 @@ bool image_rel(const std::string& guest, std::string& rel) {
     return true;
 }
 
+// ---- mods (LayeredFS style) -----------------------------------------------------------------------------------
+// <data folder>/mods/<ModName>/romfs/<same path as in the game's RomFS>. A file there replaces the game's file of the
+// same path (or adds one). Folders whose name starts with '.' or '_' are ignored (rename to _Name to disable a mod).
+// Mods apply in alphabetical order; the last one wins. Paths are case sensitive on Android: copy the game's case.
+// Callers hold g_fs.
+std::vector<fs::path> g_mod_roots;  // low priority first
+const nxi::GameImage::Entry kModDir{0, 0, true};
+
+void scan_mods() {
+    g_mod_roots.clear();
+    std::error_code ec;
+    fs::path root = data_root() / "mods";
+    if (!fs::is_directory(root, ec)) return;
+    std::vector<fs::path> found;
+    for (auto& e : fs::directory_iterator(root, ec)) {
+        if (!e.is_directory(ec)) continue;
+        auto u8 = e.path().filename().u8string();
+        std::string name(u8.begin(), u8.end());
+        if (name.empty() || name[0] == '.' || name[0] == '_') continue;
+        if (fs::is_directory(e.path() / "romfs", ec)) found.push_back(e.path() / "romfs");
+    }
+    std::sort(found.begin(), found.end());
+    g_mod_roots = std::move(found);
+    for (auto& r : g_mod_roots) log("fs: mod active: %s", r.parent_path().filename().string().c_str());
+}
+
+bool safe_rel(const std::string& rel) {  // no ".." part: a mod path never leaves its folder
+    size_t i = 0;
+    while (i <= rel.size()) {
+        size_t j = rel.find('/', i);
+        if (j == std::string::npos) j = rel.size();
+        if (rel.compare(i, j - i, "..") == 0) return false;
+        i = j + 1;
+    }
+    return true;
+}
+
+// The host file of the highest priority mod that has `rel`, or empty.
+fs::path mod_file(const std::string& rel) {
+    if (g_mod_roots.empty() || rel.empty() || !safe_rel(rel)) return {};
+    std::error_code ec;
+    for (auto it = g_mod_roots.rbegin(); it != g_mod_roots.rend(); ++it) {
+        fs::path p = *it / fs::u8path(rel);
+        if (fs::is_regular_file(p, ec)) return p;
+    }
+    return {};
+}
+
+bool mod_has_dir(const std::string& rel) {
+    if (g_mod_roots.empty() || !safe_rel(rel)) return false;
+    std::error_code ec;
+    for (auto& r : g_mod_roots)
+        if (fs::is_directory(rel.empty() ? r : r / fs::u8path(rel), ec)) return true;
+    return false;
+}
+
 // ---- mounts ---------------------------------------------------------------------------------------------------
 
 void QueryMountRomCacheSize(CPU& c) {
@@ -158,6 +216,7 @@ void QueryMountRomCacheSize(CPU& c) {
 void MountRom(CPU& c) {
     std::lock_guard lk(g_fs);
     std::string name = cstr(c.x[0]);
+    scan_mods();
     if (game_image()) {
         g_mounts[name] = data_root() / "extract" / "romfs";
         g_image_mounts[name] = true;
@@ -257,8 +316,14 @@ void GetEntryType(CPU& c) {  // (DirectoryEntryType* out, path)
         return;
     }
     if (std::string rel; image_rel(cstr(c.x[1]), rel)) {
+        if (!mod_file(rel).empty()) {
+            st<uint32_t>(c.x[0], 1);
+            c.x[0] = kOk;
+            return;
+        }
         const nxi::GameImage::Entry* e = game_image()->find(rel);
         if (e) st<uint32_t>(c.x[0], e->dir ? 0 : 1);
+        else if (mod_has_dir(rel)) st<uint32_t>(c.x[0], 0), e = &kModDir;
         c.x[0] = e ? kOk : kPathNotFound;
         return;
     }
@@ -293,6 +358,17 @@ void OpenFile(CPU& c) {  // (FileHandle* out, path, int mode: 1 read, 2 write, 4
         return;
     }
     if (std::string rel; image_rel(guest, rel)) {  // the game image's RomFS: read only
+        if (fs::path mp = mod_file(rel); !mp.empty()) {  // a mod's file replaces (or adds to) the game's
+            if (FILE* f = plat::fopen_utf8(utf8(mp), "rb")) {
+                uint64_t h = g_next++;
+                g_files[h] = std::make_shared<File>(f, guest);
+                st<uint64_t>(c.x[0], h);
+                note_open("OpenFile", guest, "ok (mod)");
+                log("fs: mod file %s", rel.c_str());
+                c.x[0] = kOk;
+                return;
+            }
+        }
         const nxi::GameImage::Entry* e = game_image()->find(rel);
         if (!e || e->dir) {
             note_open("OpenFile", guest, "not in the game file");
@@ -431,14 +507,38 @@ void OpenDirectory(CPU& c) {  // (DirectoryHandle* out, path, int mode: 1 dirs, 
     int mode = int(c.x[2]);
     if (std::string rel; image_rel(cstr(c.x[1]), rel)) {
         const nxi::GameImage::Entry* e = game_image()->find(rel);
-        note_open("OpenDirectory", cstr(c.x[1]), e && e->dir ? "ok (game file)" : "not in the game file");
-        if (!e || !e->dir) {
+        bool in_game = e && e->dir, in_mod = mod_has_dir(rel);
+        note_open("OpenDirectory", cstr(c.x[1]), in_game || in_mod ? "ok (game file)" : "not in the game file");
+        if (!in_game && !in_mod) {
             c.x[0] = kPathNotFound;
             return;
         }
         Dir d;
         d.from_image = true;
-        for (auto& kid : game_image()->list(rel))
+        // The game's folder merged with the same folder of each mod (a mod's file wins; new names are added).
+        std::vector<std::pair<std::string, nxi::GameImage::Entry>> all;
+        std::unordered_map<std::string, size_t> at;
+        if (in_game) all = game_image()->list(rel);
+        for (size_t i = 0; i < all.size(); i++) at[all[i].first] = i;
+        std::error_code ec;
+        for (auto& root : g_mod_roots) {
+            fs::path dir = rel.empty() ? root : root / fs::u8path(rel);
+            if (!safe_rel(rel) || !fs::is_directory(dir, ec)) continue;
+            for (auto& me : fs::directory_iterator(dir, ec)) {
+                auto u8 = me.path().filename().u8string();
+                std::string name(u8.begin(), u8.end());
+                nxi::GameImage::Entry en;
+                en.dir = me.is_directory(ec);
+                en.size = en.dir ? 0 : uint64_t(me.file_size(ec));
+                if (auto f = at.find(name); f != at.end()) {
+                    if (!(all[f->second].second.dir && en.dir)) all[f->second].second = en;  // dir + dir: keep
+                } else {
+                    at[name] = all.size();
+                    all.emplace_back(name, en);
+                }
+            }
+        }
+        for (auto& kid : all)
             if ((kid.second.dir && (mode & 1)) || (!kid.second.dir && (mode & 2))) d.image.push_back(kid);
         uint64_t h = g_next++;
         g_dirs[h] = std::move(d);
@@ -619,6 +719,19 @@ void add_virtual_file(const std::string& path, std::string data) {
 }
 
 std::string read_game_file(const std::string& relative_to_romfs) {
+    {
+        std::lock_guard lk(g_fs);
+        if (fs::path mp = mod_file(game_image_path(relative_to_romfs)); !mp.empty()) {
+            if (FILE* f = plat::fopen_utf8(utf8(mp), "rb")) {
+                std::string s;
+                char buf[65536];
+                size_t n;
+                while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) s.append(buf, n);
+                std::fclose(f);
+                return s;
+            }
+        }
+    }
     if (const nxi::GameImage* img = game_image()) {
         const nxi::GameImage::Entry* e = img->find(game_image_path(relative_to_romfs));
         if (!e || e->dir) return {};

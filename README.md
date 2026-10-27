@@ -32,7 +32,8 @@ SEGA or Nintendo.
 6. Press **Play**.
 
 Keep the game file where it is: every start reads the game from it. Saves are kept in
-`Internal storage/Persona 5 Royal/user/save`; the home screen can import and export them.
+`Internal storage/Persona 5 Royal/user/save`; the home screen can import and export them. Mods (LayeredFS style) can be
+placed in `Internal storage/Persona 5 Royal/mods/<ModName>/romfs/...` (see [docs/MODS.md](docs/MODS.md)).
 
 ### Options
 
@@ -134,8 +135,9 @@ móvil o tablet arm64. **No hace falta PC.** El APK no lleva nada del juego: lo 
    sola vez).
 6. Pulsa **Jugar**.
 
-No borres ni muevas el archivo del juego: cada vez que juegas se lee de ahí. En **Icono → Elegir imagen** puedes crear
-un acceso directo con la imagen que quieras. No se proporcionan juegos ni claves.
+No borres ni muevas el archivo del juego: cada vez que juegas se lee de ahí. Puedes poner mods (estilo LayeredFS) en
+`Almacenamiento interno/Persona 5 Royal/mods/<Nombre>/romfs/...` (ver [docs/MODS.md](docs/MODS.md)). En **Icono → Elegir
+imagen** puedes crear un acceso directo con la imagen que quieras. No se proporcionan juegos ni claves.
 
 ## Credits and license
 

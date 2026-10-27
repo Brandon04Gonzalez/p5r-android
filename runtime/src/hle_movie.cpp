@@ -169,6 +169,8 @@ struct Decoder {
     };
     std::deque<Input> to_codec;  // sent by the game, not yet taken by the codec
     int32_t color = 0, codec_stride = 0, codec_rows = 0, crop_left = 0, crop_top = 0;
+    std::string codec_name;
+    bool is_planar = false;
     bool eos_sent = false;   // the game's end of stream went to the codec
     bool codec_eos = false;  // the end-of-stream picture came out
 #endif
@@ -208,7 +210,7 @@ struct Decoder {
 };
 
 #if defined(__ANDROID__)
-constexpr int32_t kColorI420 = 19, kColorQcom32m = 0x7FA30C04;
+constexpr int32_t kColorI420 = 19, kColorNV12 = 21, kColorFlexible = 0x7F420888, kColorQcom32m = 0x7FA30C04;
 
 // The codec's picture (color format `color`, rows of `stride` bytes, `rows` rows per plane) into tight NV12 of the
 // video's size, from the crop origin. I420 is interleaved; every other format is taken as semi-planar (NV12 and the
@@ -226,7 +228,7 @@ void to_nv12(const Decoder& d, const uint8_t* src, size_t size, std::vector<uint
     }
     uint8_t* uv = out.data() + size_t(w) * h;
     const size_t chroma = size_t(stride) * rows;
-    if (d.color == kColorI420) {
+    if (d.is_planar || d.color == kColorI420) {
         const size_t cs = size_t(stride) / 2, plane = cs * (size_t(rows) / 2);
         for (int32_t r = 0; r < h / 2; r++) {
             size_t at = chroma + size_t(d.crop_top / 2 + r) * cs + d.crop_left / 2;
@@ -251,8 +253,24 @@ void read_codec_format(Decoder& d) {
     AMediaFormat_getInt32(f, "slice-height", &d.codec_rows);
     int32_t l = 0, t = 0, r = 0, b = 0;
     if (AMediaFormat_getRect(f, "crop", &l, &t, &r, &b)) d.crop_left = l, d.crop_top = t;
-    log("movie: codec output: color format %#x, stride %d, slice height %d, crop at %d,%d (%s)", d.color,
-        d.codec_stride, d.codec_rows, d.crop_left, d.crop_top, AMediaFormat_toString(f));
+
+    // COLOR_FormatYUV420Flexible (0x7F420888) is requested in make_codec().
+    // MediaTek (c2.mtk.*, OMX.MTK.*) and Google software decoders (c2.android.*, OMX.google.*)
+    // output Planar I420 in ByteBuffer mode while leaving color-format as 0x7F420888.
+    // Qualcomm (c2.qti.*, OMX.qcom.*) and Exynos output Semi-Planar NV12.
+    if (d.color == kColorI420) {
+        d.is_planar = true;
+    } else if (d.color == kColorFlexible || d.color == 0) {
+        d.is_planar = (d.codec_name.find(".mtk.") != std::string::npos ||
+                       d.codec_name.find(".MTK.") != std::string::npos ||
+                       d.codec_name.find(".android.") != std::string::npos ||
+                       d.codec_name.find(".google.") != std::string::npos);
+    } else {
+        d.is_planar = false;
+    }
+
+    log("movie: codec output: color format %#x (planar %d), stride %d, slice height %d, crop at %d,%d (%s)", d.color,
+        d.is_planar, d.codec_stride, d.codec_rows, d.crop_left, d.crop_top, AMediaFormat_toString(f));
     AMediaFormat_delete(f);
 }
 
@@ -303,7 +321,7 @@ bool pump(Decoder& d, int64_t wait_us) {
 }
 
 // The device's VP9 decoder, configured for the video (null: none, black frames).
-AMediaCodec* make_codec(const Decoder& d) {
+AMediaCodec* make_codec(Decoder& d) {
     AMediaCodec* c = AMediaCodec_createDecoderByType("video/x-vnd.on2.vp9");
     if (!c) return nullptr;
     AMediaFormat* f = AMediaFormat_new();
@@ -322,6 +340,11 @@ AMediaCodec* make_codec(const Decoder& d) {
     char* name = nullptr;
     if (AMediaCodec_getName(c, &name) == AMEDIA_OK && name) {
         log("movie: VP9 decoder %s", name);
+        d.codec_name = name;
+        d.is_planar = (d.codec_name.find(".mtk.") != std::string::npos ||
+                       d.codec_name.find(".MTK.") != std::string::npos ||
+                       d.codec_name.find(".android.") != std::string::npos ||
+                       d.codec_name.find(".google.") != std::string::npos);
         AMediaCodec_releaseName(c, name);
     }
     return c;
