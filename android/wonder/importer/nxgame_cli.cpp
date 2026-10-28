@@ -13,6 +13,25 @@
 
 #include "nxgame.h"
 
+namespace {
+void print_build_id(const std::map<std::string, std::vector<uint8_t>>& exefs) {
+    auto it = exefs.find("main");
+    if (it == exefs.end()) {
+        printf("  main Build ID: unavailable (no ExeFS main file)\\n");
+        return;
+    }
+    const auto& bytes = it->second;
+    // NSO0 header: magic at 0x00, 32-byte Build ID at 0x40.
+    if (bytes.size() < 0x60 || memcmp(bytes.data(), "NSO0", 4) != 0) {
+        printf("  main Build ID: unavailable (main is not a recognized NSO0 image)\\n");
+        return;
+    }
+    printf("  main Build ID: ");
+    for (size_t i = 0x40; i < 0x60; ++i) printf("%02X", bytes[i]);
+    printf("\\n");
+}
+}
+
 int main(int argc, char** argv) {
     std::vector<nxi::InputFile> in;
     std::string compare, read_path;
