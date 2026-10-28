@@ -317,15 +317,29 @@ void screen_size(uint32_t& w, uint32_t& h) {
 // The render size: resolution=WxH if set, else the screen's size times the render scale (render_scale=0.5..1, or
 // the GPU's default), never taller than 1080 (the game's art is made for 720p/1080p; more only costs GPU time).
 void window_size(uint32_t& w, uint32_t& h) {
+    uint32_t sw = 0, sh = 0;
+    screen_size(sw, sh);
     std::string r = setting("resolution");
+    if (r.empty()) r = setting("NX_RES");
+    if (r.empty()) r = setting("RESOLUTION");
     unsigned cw = 0, ch = 0;
     if (!r.empty() && std::sscanf(r.c_str(), "%ux%u", &cw, &ch) == 2 && cw && ch) {
         w = cw;
         h = ch;
         return;
     }
-    uint32_t sw = 0, sh = 0;
-    screen_size(sw, sh);
+    uint32_t target_h = 0;
+    if (r == "360p" || r == "360") target_h = 360;
+    else if (r == "480p" || r == "480") target_h = 480;
+    else if (r == "720p" || r == "720") target_h = 720;
+    else if (r == "1080p" || r == "1080") target_h = 1080;
+
+    if (target_h && sh) {
+        float scale = float(target_h) / float(sh);
+        w = uint32_t(float(sw) * scale + 0.5f) & ~1u;
+        h = target_h & ~1u;
+        return;
+    }
     std::string rs = setting("render_scale");
     float scale = rs.empty() ? default_render_scale() : std::strtof(rs.c_str(), nullptr);
     scale = std::clamp(scale, 0.25f, 1.0f);
@@ -385,10 +399,21 @@ void* vulkan_get_instance_proc_addr() {
 const char* vulkan_surface_extension() { return VK_KHR_ANDROID_SURFACE_EXTENSION_NAME; }
 
 int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface, void* gipa) {
+    ANativeWindow* win = static_cast<ANativeWindow*>(native_window);
+    uint32_t rw = 0, rh = 0;
+    window_size(rw, rh);
+    if (win && rw && rh) {
+        int32_t cur_w = ANativeWindow_getWidth(win), cur_h = ANativeWindow_getHeight(win);
+        bool portrait = cur_w < cur_h;
+        int32_t bw = int32_t(portrait ? std::min(rw, rh) : std::max(rw, rh));
+        int32_t bh = int32_t(portrait ? std::max(rw, rh) : std::min(rw, rh));
+        int r_geom = ANativeWindow_setBuffersGeometry(win, bw, bh, 0);
+        nx::log("android: setBuffersGeometry %dx%d (screen %dx%d) -> %d", bw, bh, cur_w, cur_h, r_geom);
+    }
     auto create = reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(reinterpret_cast<PFN_vkGetInstanceProcAddr>(gipa)(
         static_cast<VkInstance>(instance), "vkCreateAndroidSurfaceKHR"));
     VkAndroidSurfaceCreateInfoKHR ci{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
-    ci.window = static_cast<ANativeWindow*>(native_window);
+    ci.window = win;
     VkSurfaceKHR s = VK_NULL_HANDLE;
     VkResult r = create(static_cast<VkInstance>(instance), &ci, nullptr, &s);
     *surface = reinterpret_cast<uint64_t>(s);
