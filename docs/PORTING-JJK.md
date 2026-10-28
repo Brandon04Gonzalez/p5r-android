@@ -29,7 +29,7 @@ Therefore changing only the Title ID would not make the importer work: it would 
 ## Safe investigation sequence
 
 1. Add a read-only metadata inspection path to report the selected XCI's Title ID, executable Build ID, NCA/ExeFS presence and version without copying game content into the repository.
-2. Use the exact local base-game dump to record its real Build ID. Do not guess the base game's Build ID from an update listing.
+2. Use the exact local base-game dump to record its real Build ID. Do not guess the base game's Build ID from an update listing. After extracting the base game's ExeFS locally with the existing importer (`nximport --exefs`), run `python tools/nso_build_id.py <path-to-extracted-main>`; the tool reads only the NSO header and prints the Build ID. It does not need or accept keys.
 3. Inspect the game's ExeFS metadata and imports/strings to establish the executable type, SDK expectations, graphics API usage and required system services.
 4. Determine how the Switch version stores and loads shaders. Do not reuse P5R's GSC parser unless the dump proves the formats match.
 5. Only after the previous checks, create a separate `games/jjk/` target and Android launcher/importer. Keep the P5R target unchanged.
