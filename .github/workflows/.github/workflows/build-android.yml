@@ -1,0 +1,41 @@
+
+name: Runtime Preflight
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "CMakeLists.txt"
+      - "runtime/**"
+      - "tests/**"
+      - ".github/workflows/build-android.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-tests:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++
+
+      - name: Configure runtime tests
+        run: |
+          cmake -S . -B build \
+            -G Ninja \
+            -DNX_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build build
+
+      - name: Run tests
+        run: ctest --test-dir build --output-o
+        n-failure
