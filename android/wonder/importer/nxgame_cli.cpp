@@ -52,6 +52,7 @@ int main(int argc, char** argv) {
     double ms = std::chrono::duration<double, std::milli>(std::chrono::steady_clock::now() - t0).count();
     if (!g) return fprintf(stderr, "open failed: %s\n", err.c_str()), 1;
     printf("title %016llx opened in %.0f ms; %zu RomFS files\n", (unsigned long long)g->title_id(), ms, g->file_count());
+    print_build_id(g->exefs());
     for (auto& [n, v] : g->exefs()) printf("  exefs %s: %zu bytes\n", n.c_str(), v.size());
     for (auto& [n, e] : g->list("")) printf("  / %s%s %llu\n", n.c_str(), e.dir ? "/" : "", (unsigned long long)e.size);
     if (!compare.empty()) {
