@@ -368,7 +368,7 @@ public final class Launcher extends Activity {
                 .setPositiveButton("OK", null).show();
             return;
         }
-        gameStatus.setText("Starting import…\\nPreparing the container reader. Keep the app open.");
+        gameStatus.setText("Starting import…\nPreparing the container reader. Keep the app open.");
         importRunning = true;
         importHandler.post(importProgressTicker);
         new Thread(() -> {
