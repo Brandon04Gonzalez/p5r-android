@@ -161,6 +161,9 @@ void boot() {
     const std::string exefs = plat::data_root() + "/exefs";
     const char* names[2] = {"main", "sdk"};
     const nxi::GameImage* image = game_image();
+    if (image && image->title_id() != game::kInfo.program_id)
+        fatal("selected game title %016llx does not match this runtime's title %016llx",
+              (unsigned long long)image->title_id(), (unsigned long long)game::kInfo.program_id);
     for (int i = 0; i < 2; i++) {
         std::string error;
         const uint64_t base = kModuleBase + uint64_t(i) * 0x10000000;
