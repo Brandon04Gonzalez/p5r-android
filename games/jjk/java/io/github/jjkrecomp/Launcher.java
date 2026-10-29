@@ -4,6 +4,14 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
+import android.database.Cursor;
+import android.provider.OpenableColumns;
+import android.os.ParcelFileDescriptor;
+import java.io.FileInputStream;
+import java.io.InputStream;
+import java.io.BufferedReader;
+import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
@@ -122,14 +130,11 @@ public final class Launcher extends Activity {
         TextView shaderNote = text("Shader preparation: JJK-specific shader extraction is not implemented yet. First launch may compile graphics pipelines and stutter; cached pipelines depend on the driver.", 13, Color.LTGRAY, false);
         root.addView(shaderNote, new LinearLayout.LayoutParams(-1, dp(70)));
 
-        Button play = button("Start runtime test");
+        Button play = button("Validate selected files");
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(-1, dp(56));
         playParams.topMargin = dp(24);
         root.addView(play, playParams);
-        play.setOnClickListener(v -> new AlertDialog.Builder(this)
-            .setTitle("Experimental runtime")
-            .setMessage("The launcher UI is ready, but JJK dump validation/import and game startup are not implemented yet. This build will not launch the game.")
-            .setPositiveButton("OK", null).show());
+        play.setOnClickListener(v -> validateSelectedFiles());
         writeRuntimeConfig();
         setContentView(scroll);
     }
@@ -204,9 +209,96 @@ public final class Launcher extends Activity {
 
     private String name(String uriString) {
         if (uriString == null) return "Not selected";
-        Uri u = Uri.parse(uriString);
-        String segment = u.getLastPathSegment();
-        return segment == null ? u.toString() : segment;
+        Uri uri = Uri.parse(uriString);
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int column = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME);
+                if (column >= 0) {
+                    String display = cursor.getString(column);
+                    if (display != null && !display.trim().isEmpty()) return display;
+                }
+            }
+        } catch (Exception ignored) {}
+        String segment = uri.getLastPathSegment();
+        return segment == null ? "Selected file" : segment;
+    }
+
+    private long fileSize(Uri uri) throws Exception {
+        try (Cursor cursor = getContentResolver().query(uri, new String[]{OpenableColumns.SIZE}, null, null, null)) {
+            if (cursor != null && cursor.moveToFirst()) {
+                int column = cursor.getColumnIndex(OpenableColumns.SIZE);
+                if (column >= 0 && !cursor.isNull(column)) return cursor.getLong(column);
+            }
+        }
+        try (ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "r")) {
+            return pfd == null ? -1 : pfd.getStatSize();
+        }
+    }
+
+    private String validateGameFile(Uri uri) throws Exception {
+        long size = fileSize(uri);
+        if (size <= 0) return "Game file is empty or its size cannot be read.";
+        try (InputStream in = getContentResolver().openInputStream(uri)) {
+            if (in == null) return "Android could not open the selected game file.";
+            byte[] header = new byte[0x104];
+            int total = 0;
+            while (total < header.length) {
+                int n = in.read(header, total, header.length - total);
+                if (n < 0) break;
+                total += n;
+            }
+            boolean nsp = total >= 4 && header[0] == 'P' && header[1] == 'F' && header[2] == 'S' && header[3] == '0';
+            boolean xci = total >= 0x104 && header[0x100] == 'H' && header[0x101] == 'E' && header[0x102] == 'A' && header[0x103] == 'D';
+            if (!nsp && !xci) return "File header is not a recognized NSP (PFS0) or XCI (HEAD) header. The file may be wrong, split, encrypted differently, or damaged.";
+            return (nsp ? "NSP/PFS0" : "XCI/HEAD") + " header recognized; size " + android.text.format.Formatter.formatShortFileSize(this, size) + ". Title ID, keys, and integrity are not verified yet.";
+        }
+    }
+
+    private String validateKeys(Uri uri) throws Exception {
+        long size = fileSize(uri);
+        if (size <= 0 || size > 4L * 1024 * 1024) return "prod.keys is empty or unexpectedly large.";
+        int valid = 0;
+        try (BufferedReader reader = new BufferedReader(new InputStreamReader(getContentResolver().openInputStream(uri), StandardCharsets.UTF_8))) {
+            String line;
+            while ((line = reader.readLine()) != null) {
+                String s = line.trim();
+                if (s.isEmpty() || s.startsWith("#")) continue;
+                int eq = s.indexOf('=');
+                if (eq <= 0 || eq == s.length() - 1) return "prod.keys format error: expected key=value lines.";
+                String value = s.substring(eq + 1).trim();
+                if (!value.matches("(?i)[0-9a-f]+")) return "prod.keys contains a value that is not hexadecimal.";
+                valid++;
+            }
+        }
+        return valid > 0 ? "Keys file syntax looks valid (" + valid + " entries). Key correctness is not verified." : "No key entries found in prod.keys.";
+    }
+
+    private void validateSelectedFiles() {
+        String gameString = prefs.getString("game_uri", null);
+        String keysString = prefs.getString("keys_uri", null);
+        if (gameString == null || keysString == null) {
+            new AlertDialog.Builder(this).setTitle("Files missing")
+                .setMessage("Choose both your own game dump and prod.keys first.")
+                .setPositiveButton("OK", null).show();
+            return;
+        }
+        gameStatus.setText("Validating selected files…");
+        new Thread(() -> {
+            String result;
+            try {
+                String gameResult = validateGameFile(Uri.parse(gameString));
+                String keyResult = validateKeys(Uri.parse(keysString));
+                result = "Game: " + gameResult + "\\n\\nKeys: " + keyResult;
+            } catch (Exception e) {
+                result = "Validation failed: " + e.getClass().getSimpleName() + ": " + (e.getMessage() == null ? "cannot read selected file" : e.getMessage());
+            }
+            final String message = result;
+            runOnUiThread(() -> {
+                gameStatus.setText(message.startsWith("Validation failed") ? "Validation failed. See details." : "Basic file checks complete. Import and game startup are not implemented yet.");
+                new AlertDialog.Builder(this).setTitle("File validation").setMessage(message)
+                    .setPositiveButton("OK", null).show();
+            });
+        }).start();
     }
 
     private void refresh() {
