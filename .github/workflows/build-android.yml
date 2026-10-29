@@ -134,3 +134,44 @@ jobs:
       - name: Compile JJK game metadata
         run: |
           g++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only -Iruntime/include games/jjk/game.cpp
+
+
+  android-jjk-nce:
+    name: Android ARM64 JJK runtime compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;28.2.13676358"
+
+      - name: Install CMake and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build git
+
+      - name: Get Vulkan headers
+        run: |
+          mkdir -p private/third_party
+          git clone --depth 1 --branch v1.4.357 https://github.com/KhronosGroup/Vulkan-Headers.git private/third_party/Vulkan-Headers-1.4.357
+          ln -s include private/third_party/Vulkan-Headers-1.4.357/Include
+
+      - name: Configure JJK Android ARM64 native execution build
+        env:
+          VULKAN_SDK: ${{ github.workspace }}/private/third_party/Vulkan-Headers-1.4.357
+        run: |
+          cmake -S . -B build-jjk-android -G Ninja \\
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \\
+            -DANDROID_ABI=arm64-v8a \\
+            -DANDROID_PLATFORM=android-29 \\
+            -DANDROID_STL=c++_static \\
+            -DNX_GAME=jjk \\
+            -DNX_NCE=ON \\
+            -DNX_RELEASE=ON
+
+      - name: Compile JJK native library
+        run: cmake --build build-jjk-android --target jjk --parallel 2
