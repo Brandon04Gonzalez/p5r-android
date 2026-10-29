@@ -216,8 +216,8 @@ public final class Launcher extends Activity {
 
     private void writeRuntimeConfig() {
         try {
-            java.io.File dir = getExternalFilesDir(null);
-            if (dir == null) dir = getFilesDir();
+            java.io.File dir = new java.io.File(getFilesDir(), "private/jjk");
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new java.io.IOException("cannot create JJK data directory");
             java.io.File file = new java.io.File(dir, "config.txt");
             java.io.FileWriter writer = new java.io.FileWriter(file, false);
             String resolution = prefs.getString("setting_resolution", "1280x720");
