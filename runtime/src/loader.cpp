@@ -100,6 +100,7 @@ static void set_user_exception_handler(CPU& c);
 
 NX_HLE("nnosGetDefaultUserExceptionStackForApplication", get_default_user_exception_stack);
 NX_HLE("_ZN2nn2os23SetUserExceptionHandlerEPFvPNS0_17UserExceptionInfoEEPvmS2_", set_user_exception_handler);
+NX_HLE("_ZN2nn2os29IsVirtualAddressMemoryEnabledEv", is_virtual_address_memory_enabled);
 
 
 static void missing_stub(CPU& c) {
@@ -125,6 +126,14 @@ static void get_default_user_exception_stack(CPU& c) {
 // The Android runtime does not expose Horizon's user-exception handler registration. Keep startup working;
 // exceptions remain handled by the host/runtime rather than installing a Switch-specific handler.
 static void set_user_exception_handler(CPU& c) {
+    c.x[0] = 0;
+}
+
+// JJK's startup explicitly aborts if Horizon reports virtual-address-memory mode enabled.
+// The Android NCE runtime does not emulate VAMM's reserved address-space layout, so report it disabled
+// and let the game's legacy heap setup path run instead.
+static void is_virtual_address_memory_enabled(CPU& c) {
+    log("HLE nn::os::IsVirtualAddressMemoryEnabled -> false (Android NCE has no VAMM reservation)");
     c.x[0] = 0;
 }
 
