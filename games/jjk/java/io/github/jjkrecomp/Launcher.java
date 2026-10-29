@@ -7,7 +7,11 @@ import android.content.SharedPreferences;
 import android.database.Cursor;
 import android.provider.OpenableColumns;
 import android.os.ParcelFileDescriptor;
+import android.system.Os;
 import java.io.FileInputStream;
+import java.io.File;
+import java.io.FileOutputStream;
+import java.io.OutputStream;
 import java.io.InputStream;
 import java.io.BufferedReader;
 import java.io.InputStreamReader;
@@ -135,17 +139,26 @@ public final class Launcher extends Activity {
         TextView shaderNote = text("Shader preparation: JJK-specific shader extraction is not implemented yet. First launch may compile graphics pipelines and stutter; cached pipelines depend on the driver.", 13, Color.LTGRAY, false);
         root.addView(shaderNote, new LinearLayout.LayoutParams(-1, dp(70)));
 
-        Button play = button("Validate selected files");
-        LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(-1, dp(56));
-        playParams.topMargin = dp(24);
-        root.addView(play, playParams);
-        play.setOnClickListener(v -> validateSelectedFiles());
+        Button validateButton = button("Validate selected files");
+        LinearLayout.LayoutParams validateParams = new LinearLayout.LayoutParams(-1, dp(56));
+        validateParams.topMargin = dp(24);
+        root.addView(validateButton, validateParams);
+        validateButton.setOnClickListener(v -> validateSelectedFiles());
 
         Button importButton = button("Import game data");
         LinearLayout.LayoutParams importParams = new LinearLayout.LayoutParams(-1, dp(56));
         importParams.topMargin = dp(12);
         root.addView(importButton, importParams);
         importButton.setOnClickListener(v -> importSelectedFiles());
+
+        Button playButton = button("Play");
+        playButton.setTextSize(20);
+        playButton.setBackgroundColor(RED);
+        playButton.setTextColor(Color.WHITE);
+        LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(-1, dp(64));
+        playParams.topMargin = dp(12);
+        root.addView(playButton, playParams);
+        playButton.setOnClickListener(v -> playGame());
         writeRuntimeConfig();
         setContentView(scroll);
     }
@@ -299,8 +312,19 @@ public final class Launcher extends Activity {
                 .setPositiveButton("OK", null).show();
             return;
         }
-        java.io.File out = new java.io.File(getFilesDir(), "jjk-import");
-        java.io.File parent = out.getParentFile();
+        File out = new File(getFilesDir(), "private/jjk");
+        File legacyOut = new File(getFilesDir(), "jjk-import");
+        if (!new File(out, "exefs/main").isFile() && new File(legacyOut, "exefs/main").isFile()) {
+            File parentDir = out.getParentFile();
+            if (parentDir != null) parentDir.mkdirs();
+            if (!legacyOut.renameTo(out)) {
+                new AlertDialog.Builder(this).setTitle("Cannot prepare imported data")
+                    .setMessage("Could not move the existing import into the runtime data folder.")
+                    .setPositiveButton("OK", null).show();
+                return;
+            }
+        }
+        File parent = out.getParentFile();
         long usable = parent == null ? 0 : parent.getUsableSpace();
         long required = 8L * 1024L * 1024L * 1024L;
         if (usable < required) {
@@ -311,7 +335,7 @@ public final class Launcher extends Activity {
                 .setPositiveButton("OK", null).show();
             return;
         }
-        gameStatus.setText("Importing and verifying game data… Keep the app open.");
+        gameStatus.setText("Importing XCI/NSP…\nDecrypting and extracting ExeFS/RomFS. Keep the app open.");
         new Thread(() -> {
             String message;
             try {
@@ -334,6 +358,64 @@ public final class Launcher extends Activity {
                     .setPositiveButton("OK", null).show();
             });
         }).start();
+    }
+
+    private void playGame() {
+        String gameString = prefs.getString("game_uri", null);
+        String keysString = prefs.getString("keys_uri", null);
+        if (gameString == null || keysString == null) {
+            new AlertDialog.Builder(this).setTitle("Files missing")
+                .setMessage("Choose the game dump and prod.keys first.")
+                .setPositiveButton("OK", null).show();
+            return;
+        }
+        File data = new File(getFilesDir(), "private/jjk");
+        File legacy = new File(getFilesDir(), "jjk-import");
+        if (!new File(data, "exefs/main").isFile() && new File(legacy, "exefs/main").isFile()) {
+            File parent = data.getParentFile();
+            if (parent != null) parent.mkdirs();
+            if (!legacy.renameTo(data)) {
+                new AlertDialog.Builder(this).setTitle("Imported data not ready")
+                    .setMessage("Could not move the existing import into the runtime data folder.")
+                    .setPositiveButton("OK", null).show();
+                return;
+            }
+        }
+        if (!new File(data, "exefs/main").isFile()) {
+            new AlertDialog.Builder(this).setTitle("Import required")
+                .setMessage("The imported ExeFS main file was not found. Tap Import game data first.")
+                .setPositiveButton("OK", null).show();
+            return;
+        }
+        if (!inspectorLoaded) {
+            new AlertDialog.Builder(this).setTitle("Runtime unavailable")
+                .setMessage("The native JJK library did not load: " + inspectorLoadError)
+                .setPositiveButton("OK", null).show();
+            return;
+        }
+        try {
+            File keys = new File(getFilesDir(), "prod.keys");
+            try (InputStream in = getContentResolver().openInputStream(Uri.parse(keysString));
+                 OutputStream out = new FileOutputStream(keys, false)) {
+                if (in == null) throw new Exception("Cannot open prod.keys.");
+                byte[] buffer = new byte[8192];
+                int n;
+                while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
+            }
+            ParcelFileDescriptor gamePfd = getContentResolver().openFileDescriptor(Uri.parse(gameString), "r");
+            if (gamePfd == null) throw new Exception("Cannot open the selected game dump.");
+            Os.setenv("NX_GAME_FD", Integer.toString(gamePfd.detachFd()), true);
+            Os.setenv("NX_GAME_NAME", name(gameString), true);
+            Os.setenv("NX_KEYS", keys.getAbsolutePath(), true);
+            writeRuntimeConfig();
+            gameStatus.setText("Starting experimental JJK runtime…");
+            startActivity(new Intent(this, android.app.NativeActivity.class));
+        } catch (Exception e) {
+            new AlertDialog.Builder(this).setTitle("Could not start runtime")
+                .setMessage(e.getClass().getSimpleName() + ": " +
+                    (e.getMessage() == null ? "unknown error" : e.getMessage()))
+                .setPositiveButton("OK", null).show();
+        }
     }
 
     private void validateSelectedFiles() {
