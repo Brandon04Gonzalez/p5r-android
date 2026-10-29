@@ -143,7 +143,8 @@ public final class Launcher extends Activity {
             .setTitle("Experimental runtime")
             .setMessage("The launcher UI is ready, but JJK dump validation/import and game startup are not implemented yet. This build will not launch the game.")
             .setPositiveButton("OK", null).show());
-        writeRuntimeConfig();\n        setContentView(scroll);
+        writeRuntimeConfig();
+        setContentView(scroll);
     }
 
     private void addSetting(LinearLayout root, String label, String key, String[] labels, String[] values, int defaultIndex) {
