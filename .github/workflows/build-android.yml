@@ -198,7 +198,8 @@ jobs:
             -o libjjkinspector.so \
             games/jjk/inspector/jni_inspector.cpp \
             android/wonder/importer/nximport.cpp \
-            android/wonder/importer/nxcrypto.cpp
+            android/wonder/importer/nxcrypto.cpp \
+            -llog
           file libjjkinspector.so
           readelf -h libjjkinspector.so | grep -E 'Class:|Machine:'
           readelf -d libjjkinspector.so | grep -E "SONAME|NEEDED" || true
