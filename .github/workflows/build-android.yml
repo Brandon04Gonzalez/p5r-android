@@ -147,10 +147,14 @@ jobs:
       - name: Install Android SDK and NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: |
-            ndk;28.2.13676358
-            platforms;android-35
-            build-tools;35.0.0
+          packages: "ndk;28.2.13676358"
+
+      - name: Install APK packaging tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -path "*/bin/sdkmanager" -type f | sort -V | tail -n 1)"
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
 
       - name: Install CMake and Ninja
         run: |
