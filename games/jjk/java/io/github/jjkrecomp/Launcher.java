@@ -53,10 +53,10 @@ public final class Launcher extends Activity {
                     try { done = Long.parseLong(fields[1]); total = Long.parseLong(fields[2]); } catch (NumberFormatException ignored) {}
                     String percent = total > 0 ? String.format(java.util.Locale.ROOT, " (%.1f%%)", Math.min(100.0, 100.0 * done / total)) : "";
                     gameStatus.setText("Import phase: " + fields[0] + percent
-                        + "\\nProgress: " + android.text.format.Formatter.formatFileSize(Launcher.this, done)
+                        + "\nProgress: " + android.text.format.Formatter.formatFileSize(Launcher.this, done)
                         + (total > 0 ? " / " + android.text.format.Formatter.formatFileSize(Launcher.this, total) : "")
-                        + "\\nCurrent item: " + (fields[3].isEmpty() ? "(preparing)" : fields[3])
-                        + "\\nKeep this screen open until the import finishes.");
+                        + "\nCurrent item: " + (fields[3].isEmpty() ? "(preparing)" : fields[3])
+                        + "\nKeep this screen open until the import finishes.");
                 }
             } catch (Throwable e) {
                 android.util.Log.w("JJKLauncher", "Could not read import progress", e);
