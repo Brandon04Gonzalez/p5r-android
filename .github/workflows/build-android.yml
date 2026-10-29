@@ -50,8 +50,8 @@ jobs:
         uses: android-actions/setup-android@v3
         with:
           packages: |
-          ndk;28.2.13676358
-          platforms;android-35
+            ndk;28.2.13676358
+            platforms;android-35
 
       - name: Compile importer for Android ARM64
         shell: bash
