@@ -30,7 +30,7 @@ Java_io_github_jjkrecomp_Launcher_inspectNative(JNIEnv* env, jobject,
         std::memcmp(it->second.data(), "NSO0", 4) == 0) {
         static const char* hex = "0123456789ABCDEF";
         build.clear();
-        for (size_t i = 0x40; i < 0x60; ++i) {
+        for (size_t i = 0x40; i < 0x48; ++i) {
             unsigned char b = it->second[i];
             build += hex[b >> 4];
             build += hex[b & 15];
