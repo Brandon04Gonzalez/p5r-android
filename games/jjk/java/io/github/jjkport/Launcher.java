@@ -45,7 +45,7 @@ import java.util.Locale;
 import java.util.Map;
 
 /**
- * The home screen in front of the game (a NativeActivity, libp5r.so): checks for the player's data in Internal
+ * The home screen in front of the game (a NativeActivity, libjjk.so): checks for the player's data in Internal
  * storage/Jujutsu Kaisen Cursed Clash (asking for all-files access), shows the options and writes them to that folder's
  * config.txt, whose NX_* lines the runtime turns into its switches:
  *   game text   the language of the game's texts and subtitles (language=auto, default: the device's, English when
@@ -54,14 +54,14 @@ import java.util.Map;
  *   resolution  720p (NX_HANDHELD=1, default) or 1080p (NX_HANDHELD=0)
  *   interface   at 720p (NX_HUD_1080=0, default: faster) or, in 720p, drawn at 1080p (NX_HUD_1080=1: sharper text)
  *   graphics    low (default), medium or high: textures one mip smaller (NX_LOD_BIAS=1), half a mip, or the game's
- *               own. (A lower render resolution needs the engine's target sizes: games/p5r/PROGRESO.md.)
- *   frame rate  30 (NX_FPS_CAP=30, default) or 60 (NX_FPS_CAP=60: games/p5r/game.cpp patches the engine's interval)
+ *               own. (A lower render resolution needs the engine's target sizes: games/jjk/README.md.)
+ *   frame rate  30 (NX_FPS_CAP=30, default) or 60 (NX_FPS_CAP=60: games/jjk/game.cpp patches the engine's interval)
  *   FPS counter off (default) or on (NX_SHOW_FPS)
  *   shadows     off (NX_SHADOWS=0, default: the shadow maps are not drawn, ~9% of the GPU on the 3D title) or on
  *   on-screen controls on (default) or off (NX_TOUCH_SHOW), their size (NX_TOUCH_SIZE) and opacity (NX_TOUCH_OPACITY),
  *               and where they are (NX_TOUCH_LAYOUT, written by ControlsEditor)
  * and imports or exports the saves (user/save, SaveFiles.java): a ZIP or a folder in, a ZIP in Download out.
- * The game: the player picks their own NSP or XCI (Jujutsu Kaisen Cursed Clash 1.0.0) and prod.keys here; ImportActivity checks
+ * The game: the player picks their own NSP or XCI (Jujutsu Kaisen Cursed Clash 1.0.0) and prod.keys here; the JJK importer is not implemented yet
  * them and translates the game's shaders once, and every start reads the game from that file as it is (the runtime's
  * game_image.cpp, through NX_GAME_FD / NX_GAME_NAME / NX_KEYS). Nothing of the game is copied but its shaders. A data
  * folder made on a PC (exefs/ or analysis/, extract/romfs, spirv/) still works when no file was picked.
@@ -123,7 +123,7 @@ public class Launcher extends Activity {
         }
     }
 
-    // The shaders were translated from this game file (ImportActivity writes spirv/import.txt last).
+    // The game is launched through NCE; JJK-specific shader preparation is not implemented yet.
     // JJK has no game-specific shader importer yet. Permit direct NCE launch from the selected dump;
     // the first runtime log will establish whether shader translation is the next blocker.
     boolean prepared() { return true;
@@ -326,7 +326,7 @@ public class Launcher extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("PERSONA 5 ROYAL");
+        title.setText("JUJUTSU KAISEN: CURSED CLASH");
         title.setTextColor(Color.rgb(230, 0, 18));
         title.setTextSize(30);
         title.setTypeface(Typeface.DEFAULT_BOLD);
