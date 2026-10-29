@@ -362,6 +362,11 @@ void load_modules(const ModuleInfo* const* mods, size_t count, const std::string
             }
             if (!target && !s.imported) target = lm.base + s.value;
             if (!target) {
+                // Log each unresolved relocation with enough context to distinguish a missing
+                // runtime API from an unexported symbol/data reference during startup.
+                log("unresolved relocation: module=%s symbol=%s type=%u reloc=%llx imported=%u",
+                    mi->name, s.name[0] ? s.name : "<anonymous>", unsigned(s.type),
+                    (unsigned long long)r.offset, unsigned(s.imported));
                 // Unresolved: functions get a logging stub; data stays null.
                 if (s.type == 2 || s.type == 0) target = hle_address(s.name);
                 missing++;
