@@ -742,6 +742,13 @@ extern "C" void android_main(android_app* app) {
         else
             setenv("NX_HANDHELD", "1", 0);
     }
+    // JJK has no verified pretranslated shader set yet. Capture the exact NVN Maxwell code/control
+    // blocks encountered at runtime so they can be fed through the same Ryujinx translator used by P5R.
+    // Respect an explicit config override; default capture on only for JJK to avoid changing other ports.
+    if (std::strcmp(nx::game::kInfo.id, "jjk") == 0 && !std::getenv("NX_DUMP_SHADER_MISSES")) {
+        setenv("NX_DUMP_SHADER_MISSES", "1", 0);
+        early_startup_log("[native] JJK shader-miss capture enabled; missing NVN shaders will be saved for translation");
+    }
     // The heap (scudo) zero-fills every allocation and gives freed pages back at once by default: in the replay, a
     // memset under each allocation and madvise churn (docs/nvn/android-perf/PLAN.md, phase 2). NX_MALLOC_TUNE=0: as
     // the system set it.
