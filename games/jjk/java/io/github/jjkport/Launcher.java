@@ -71,7 +71,7 @@ import java.util.Map;
  * Spanish, English, French, German, Italian, Portuguese, Japanese, Korean, Chinese; English otherwise).
  */
 public class Launcher extends Activity {
-    static final String DATA = "Jujutsu Kaisen: Cursed Clash";
+    static final String DATA = "Jujutsu Kaisen Cursed Clash";
 
     static final class Option {
         final String key, es, en;
