@@ -288,7 +288,7 @@ public final class Launcher extends Activity {
             try {
                 String gameResult = validateGameFile(Uri.parse(gameString));
                 String keyResult = validateKeys(Uri.parse(keysString));
-                result = "Game: " + gameResult + "\\n\\nKeys: " + keyResult;
+                result = "Game: " + gameResult + "\n\nKeys: " + keyResult;
             } catch (Exception e) {
                 result = "Validation failed: " + e.getClass().getSimpleName() + ": " + (e.getMessage() == null ? "cannot read selected file" : e.getMessage());
             }
