@@ -68,7 +68,7 @@ void early_startup_log(const char* message) {
     const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (fd < 0) return;
     (void)::write(fd, message, std::strlen(message));
-    (void)::write(fd, "\\n", 1);
+    (void)::write(fd, "\n", 1);
     (void)::fsync(fd);
     ::close(fd);
 }
