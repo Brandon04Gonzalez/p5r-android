@@ -888,6 +888,10 @@ struct Writer {
     uint32_t crc = 0;
     uint64_t written = 0;
     explicit Writer(const std::string& path) : final_path(path), part(path + ".part") {
+        // Recreate the destination parent immediately before opening a staged file.
+        // Android document providers and low-storage recovery can leave partial output trees behind.
+        const size_t slash = final_path.find_last_of('/');
+        if (slash != std::string::npos) mkdirs(final_path.substr(0, slash));
         fd = ::open(part.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0664);
         if (fd < 0) fail("cannot write %s (%s)", part.c_str(), strerror(errno));
     }
@@ -905,7 +909,14 @@ struct Writer {
         if (fdatasync(fd) != 0 && errno != EINVAL && errno != EROFS) fail("sync of %s failed (%s)", final_path.c_str(), strerror(errno));
         ::close(fd);
         fd = -1;
-        if (rename(part.c_str(), final_path.c_str()) != 0) fail("cannot rename %s (%s)", part.c_str(), strerror(errno));
+        if (rename(part.c_str(), final_path.c_str()) != 0) {
+            const int first_error = errno;
+            const size_t slash = final_path.find_last_of('/');
+            if (slash != std::string::npos) mkdirs(final_path.substr(0, slash));
+            if (rename(part.c_str(), final_path.c_str()) != 0)
+                fail("cannot commit output %s -> %s (first: %s; retry: %s)",
+                     part.c_str(), final_path.c_str(), strerror(first_error), strerror(errno));
+        }
     }
     ~Writer() {
         if (fd >= 0) {
