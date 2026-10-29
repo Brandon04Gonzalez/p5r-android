@@ -96,8 +96,13 @@ HleFn hle_lookup(const char* name) {
 }
 
 static void missing_stub(CPU& c) {
-    // Name comes from the thunk that dispatched here.
-    log("missing import called: %s (lr %s) -> 0", t_missing_name, describe(c.x[30]).c_str());
+    // Preserve the incoming ABI context in the log before applying the generic zero-return fallback.
+    // This is especially useful for SDK bootstrap imports whose signatures are not present in stripped NSOs.
+    log("missing import called: %s (lr %s) x0=%llx x1=%llx x2=%llx x3=%llx x4=%llx x5=%llx x6=%llx x7=%llx sp=%llx -> 0",
+        t_missing_name, describe(c.x[30]).c_str(),
+        (unsigned long long)c.x[0], (unsigned long long)c.x[1], (unsigned long long)c.x[2],
+        (unsigned long long)c.x[3], (unsigned long long)c.x[4], (unsigned long long)c.x[5],
+        (unsigned long long)c.x[6], (unsigned long long)c.x[7], (unsigned long long)c.x[31]);
     c.x[0] = 0;
 }
 
