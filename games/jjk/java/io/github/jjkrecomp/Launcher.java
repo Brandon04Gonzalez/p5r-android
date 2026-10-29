@@ -107,17 +107,33 @@ public final class Launcher extends Activity {
             }).show());
         root.addView(row("Text and subtitle language", language));
 
-        resolutionValue = text("480p", 14, Color.WHITE, false);
-        Button resolution = button("480p");
-        resolution.setOnClickListener(v -> new AlertDialog.Builder(this)
-            .setTitle("Resolution")
-            .setItems(new String[]{"480p", "720p", "1080p"}, (d, which) -> {
-                String[] values = {"480p", "720p", "1080p"};
-                prefs.edit().putString("resolution", values[which]).apply();
-                resolutionValue.setText(values[which]);
-                resolution.setText(values[which]);
-            }).show());
-        root.addView(row("Resolution", resolution));
+        addSetting(root, "Text and subtitle language", "language",
+            new String[]{"Automatic (device language)", "English", "Japanese"},
+            new String[]{"auto", "en-US", "ja"}, 0);
+        addSetting(root, "Resolution", "resolution",
+            new String[]{"360p", "480p", "540p", "720p", "1080p"},
+            new String[]{"640x360", "854x480", "960x540", "1280x720", "1920x1080"}, 3);
+        addSetting(root, "Fullscreen (stretch)", "NX_STRETCH",
+            new String[]{"Off", "On"}, new String[]{"0", "1"}, 0);
+        addSetting(root, "Interface", "NX_HUD_1080",
+            new String[]{"720p (faster)", "1080p (sharper text)"}, new String[]{"0", "1"}, 0);
+        addSetting(root, "Graphics", "graphics",
+            new String[]{"Low", "Medium", "High"}, new String[]{"low", "medium", "high"}, 0);
+        addSetting(root, "Frame rate", "NX_FPS_CAP",
+            new String[]{"30 fps", "60 fps (experimental)"}, new String[]{"30", "60"}, 0);
+        addSetting(root, "Shadows", "NX_SHADOWS",
+            new String[]{"Off", "On"}, new String[]{"0", "1"}, 0);
+        addSetting(root, "FPS counter", "NX_SHOW_FPS",
+            new String[]{"Off", "On"}, new String[]{"0", "1"}, 0);
+        addSetting(root, "On-screen controls", "NX_TOUCH_SHOW",
+            new String[]{"On", "Off"}, new String[]{"1", "0"}, 0);
+        addSetting(root, "Button size", "NX_TOUCH_SIZE",
+            new String[]{"Small", "Normal", "Large"}, new String[]{"80", "100", "125"}, 1);
+        addSetting(root, "Button opacity", "NX_TOUCH_OPACITY",
+            new String[]{"Low", "Normal", "High"}, new String[]{"50", "85", "100"}, 1);
+
+        TextView shaderNote = text("Shader preparation: JJK-specific shader extraction is not implemented yet. First launch may compile graphics pipelines and stutter; cached pipelines depend on the driver.", 13, Color.LTGRAY, false);
+        root.addView(shaderNote, new LinearLayout.LayoutParams(-1, dp(70)));
 
         Button play = button("Start runtime test");
         LinearLayout.LayoutParams playParams = new LinearLayout.LayoutParams(-1, dp(56));
@@ -127,7 +143,54 @@ public final class Launcher extends Activity {
             .setTitle("Experimental runtime")
             .setMessage("The launcher UI is ready, but JJK dump validation/import and game startup are not implemented yet. This build will not launch the game.")
             .setPositiveButton("OK", null).show());
-        setContentView(scroll);
+        writeRuntimeConfig();\n        setContentView(scroll);
+    }
+
+    private void addSetting(LinearLayout root, String label, String key, String[] labels, String[] values, int defaultIndex) {
+        LinearLayout settingRow = new LinearLayout(this);
+        settingRow.setOrientation(LinearLayout.HORIZONTAL);
+        settingRow.setGravity(Gravity.CENTER_VERTICAL);
+        settingRow.setPadding(0, dp(5), 0, dp(5));
+        TextView name = text(label, 16, Color.WHITE, false);
+        settingRow.addView(name, new LinearLayout.LayoutParams(0, dp(54), 1));
+        Button value = button(labels[0]);
+        String saved = prefs.getString("setting_" + key, values[defaultIndex]);
+        int selected = defaultIndex;
+        for (int i = 0; i < values.length; i++) if (values[i].equals(saved)) selected = i;
+        final int[] index = {selected};
+        value.setText(labels[selected]);
+        settingRow.addView(value, new LinearLayout.LayoutParams(dp(210), dp(54)));
+        value.setOnClickListener(v -> {
+            index[0] = (index[0] + 1) % values.length;
+            value.setText(labels[index[0]]);
+            prefs.edit().putString("setting_" + key, values[index[0]]).apply();
+            writeRuntimeConfig();
+        });
+        root.addView(settingRow);
+        prefs.edit().putString("setting_" + key, values[selected]).apply();
+    }
+
+    private void writeRuntimeConfig() {
+        try {
+            java.io.File dir = getExternalFilesDir(null);
+            if (dir == null) dir = getFilesDir();
+            java.io.File file = new java.io.File(dir, "config.txt");
+            java.io.FileWriter writer = new java.io.FileWriter(file, false);
+            String resolution = prefs.getString("setting_resolution", "1280x720");
+            writer.write("resolution=" + resolution + "\\n");
+            writer.write("NX_STRETCH=" + prefs.getString("setting_NX_STRETCH", "0") + "\\n");
+            writer.write("NX_HUD_1080=" + prefs.getString("setting_NX_HUD_1080", "0") + "\\n");
+            writer.write("NX_FPS_CAP=" + prefs.getString("setting_NX_FPS_CAP", "30") + "\\n");
+            writer.write("NX_SHADOWS=" + prefs.getString("setting_NX_SHADOWS", "0") + "\\n");
+            writer.write("NX_SHOW_FPS=" + prefs.getString("setting_NX_SHOW_FPS", "0") + "\\n");
+            writer.write("NX_TOUCH_SHOW=" + prefs.getString("setting_NX_TOUCH_SHOW", "1") + "\\n");
+            writer.write("NX_TOUCH_SIZE=" + prefs.getString("setting_NX_TOUCH_SIZE", "100") + "\\n");
+            writer.write("NX_TOUCH_OPACITY=" + prefs.getString("setting_NX_TOUCH_OPACITY", "85") + "\\n");
+            writer.flush();
+            writer.close();
+        } catch (Exception e) {
+            android.util.Log.e("JJKLauncher", "Could not save runtime settings", e);
+        }
     }
 
     private void pick(int kind) {
