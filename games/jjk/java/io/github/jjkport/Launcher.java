@@ -140,10 +140,17 @@ public class Launcher extends Activity {
         }
     }
 
-    // The game is launched through NCE; JJK-specific shader preparation is not implemented yet.
-    // JJK has no game-specific shader importer yet. Permit direct NCE launch from the selected dump;
-    // the first runtime log will establish whether shader translation is the next blocker.
-    boolean prepared() { return new File(dataDir(), "exefs/main").canRead();
+    // Match the P5R launcher contract: prepared data must belong to the selected game file.
+    // Also require the extracted native main module before allowing NCE launch.
+    boolean prepared() {
+        File main = new File(dataDir(), "exefs/main");
+        File note = new File(dataDir(), "spirv/import.txt");
+        if (!main.canRead() || !note.canRead()) return false;
+        try (BufferedReader r = new BufferedReader(new FileReader(note))) {
+            return gameName().equals(r.readLine());
+        } catch (Exception e) {
+            return false;
+        }
     }
 
     String displayName(Uri uri) {
