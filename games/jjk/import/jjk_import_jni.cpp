@@ -63,8 +63,15 @@ Java_io_github_jjkport_Importer_run(JNIEnv* env, jclass, jint game_fd, jstring g
     opt.keep_exefs = true;
     opt.on_progress = [](const nxi::Progress& p) {
         g_phase = phase_id(p.phase);
-        g_done = static_cast<int>(std::min<uint64_t>(p.done, 0x7fffffff));
-        g_total = static_cast<int>(std::min<uint64_t>(p.total, 0x7fffffff));
+        // Java progress fields are jint. Report MiB rather than bytes, and treat
+        // implausibly large totals (including UINT64_MAX sentinels) as unknown.
+        constexpr uint64_t kMiB = 1024ull * 1024ull;
+        constexpr uint64_t kMax = 0x7fffffff;
+        g_done = static_cast<int>(std::min<uint64_t>(p.done / kMiB, kMax));
+        if (p.total == 0 || p.total / kMiB > kMax)
+            g_total = 0;
+        else
+            g_total = static_cast<int>((p.total + kMiB - 1) / kMiB);
         __android_log_print(ANDROID_LOG_INFO, "jjkimport", "%s: %llu/%llu %s", p.phase.c_str(),
                             static_cast<unsigned long long>(p.done),
                             static_cast<unsigned long long>(p.total), p.item.c_str());
