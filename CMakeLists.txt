@@ -271,6 +271,16 @@ if(ANDROID AND NX_GAME STREQUAL "p5r")
     target_link_options(p5rimport PRIVATE -Wl,-z,max-page-size=16384)
 endif()
 
+# JJK's on-device import uses the shared NSP/XCI importer and writes raw ExeFS modules for NCE.
+if(ANDROID AND NX_GAME STREQUAL "jjk")
+    add_library(jjkimport SHARED games/jjk/import/jjk_import_jni.cpp
+        "${NX_IMPORTER_DIR}/nximport.cpp" "${NX_IMPORTER_DIR}/nxcrypto.cpp")
+    target_include_directories(jjkimport PRIVATE "${NX_IMPORTER_DIR}")
+    target_compile_options(jjkimport PRIVATE -O2 -fvisibility=hidden -march=armv8-a+crypto)
+    target_link_libraries(jjkimport PRIVATE log)
+    target_link_options(jjkimport PRIVATE -Wl,-z,max-page-size=16384)
+endif()
+
 # NX_RELEASE: the runtime and the game's glue only (the recompiled game code does not change with it).
 if(NX_RELEASE)
     target_compile_definitions(${NX_GAME} PRIVATE NX_RELEASE)
