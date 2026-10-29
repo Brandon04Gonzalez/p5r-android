@@ -175,17 +175,22 @@ public class ImportActivity extends Activity {
             public void run() {
                 if (!running) return;
                 int[] p = Importer.progress();
-                int phase = p[0], done = p[1], total = Math.max(1, p[2]);
-                // the bar: scanning, extracting ExeFS, extracting RomFS, then finishing.
-                double share = (double) Math.min(done, total) / total;
-                int value = phase <= 1 ? 20 : phase == 2 ? 50 + (int) (200 * share) : phase == 3 ? 250 + (int) (730 * share) : 990;
+                int phase = p[0], done = p[1], total = p[2];
+                // Native progress is reported in MiB. A zero total means the native
+                // importer cannot provide a trustworthy total, so never fake 100%.
+                double share = total > 0 ? (double) Math.min(done, total) / total : 0.0;
+                int value = phase <= 1 ? 20 : phase == 2 ? 50 + (int) (200 * share)
+                        : phase == 3 ? (total > 0 ? 250 + (int) (730 * share) : 650) : 990;
                 bar.setProgress(value);
-                if (phase == 2)
-                    status.setText(Lang.f("Extrayendo módulos del juego (%d de %d)…", "Extracting game modules (%d of %d)…",
-                            done, total));
-                else if (phase == 3)
-                    status.setText(Lang.f("Extrayendo RomFS (%d de %d)…", "Extracting RomFS (%d of %d)…", done,
-                            total));
+                if (phase == 2) {
+                    status.setText(total > 0
+                            ? Lang.f("Extrayendo módulos del juego (%d de %d MB)…", "Extracting game modules (%d of %d MB)…", done, total)
+                            : Lang.f("Extrayendo módulos del juego (%d MB)…", "Extracting game modules (%d MB)…", done));
+                } else if (phase == 3) {
+                    status.setText(total > 0
+                            ? Lang.f("Extrayendo RomFS (%d de %d MB)…", "Extracting RomFS (%d of %d MB)…", done, total)
+                            : Lang.f("Extrayendo RomFS (%d MB extraídos)…", "Extracting RomFS (%d MB extracted)…", done));
+                }
                 else if (phase == 4)
                     status.setText(t("Terminando…", "Finishing…"));
                 ui.postDelayed(this, 500);
