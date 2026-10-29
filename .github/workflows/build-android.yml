@@ -147,7 +147,7 @@ jobs:
       - name: Install Android SDK and NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "ndk;28.2.13676358"
+          packages: "ndk;28.2.13676358, platforms;android-35, build-tools;35.0.0"
 
       - name: Install CMake and Ninja
         run: |
@@ -175,5 +175,30 @@ jobs:
         with:
           name: jjk-android-arm64-runtime
           path: build-jjk-android/libjjk.so
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Package experimental JJK APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          PLATFORM="$ANDROID_HOME/platforms/android-35/android.jar"
+          mkdir -p apk/lib/arm64-v8a
+          cp build-jjk-android/libjjk.so apk/lib/arm64-v8a/libjjk.so
+          "$BT/aapt2" compile --dir android/res -o apk/res.zip
+          "$BT/aapt2" link -o apk/base.apk -I "$PLATFORM" --manifest games/jjk/AndroidManifest.xml --min-sdk-version 29 --target-sdk-version 35 apk/res.zip
+          (cd apk && zip -q -j base.apk lib/arm64-v8a/libjjk.so)
+          "$BT/zipalign" -f -p 4 apk/base.apk apk/aligned.apk
+          keytool -genkeypair -keystore apk/debug.keystore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          "$BT/apksigner" sign --ks apk/debug.keystore --ks-pass pass:android --key-pass pass:android --out apk/JJK-Runtime-Test.apk apk/aligned.apk
+          "$BT/apksigner" verify --verbose apk/JJK-Runtime-Test.apk
+          "$BT/aapt2" dump badging apk/JJK-Runtime-Test.apk
+          unzip -l apk/JJK-Runtime-Test.apk
+      - name: Upload experimental JJK APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jjk-experimental-apk
+          path: apk/JJK-Runtime-Test.apk
           if-no-files-found: error
           retention-days: 7
