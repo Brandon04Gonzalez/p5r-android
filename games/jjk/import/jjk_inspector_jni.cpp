@@ -45,11 +45,13 @@ std::string build_id(const std::vector<uint8_t>& main) {
 }
 
 extern "C" JNIEXPORT jstring JNICALL
-Java_io_github_jjkrecomp_Launcher_inspectNative(JNIEnv* env, jobject, jint game_fd, jstring game_name, jint keys_fd) {
+Java_io_github_jjkrecomp_Launcher_inspectNative(JNIEnv* env, jobject, jint game_fd, jstring game_name,
+                                                         jint keys_fd, jint title_keys_fd) {
     std::vector<nxi::InputFile> inputs = {
         {java_string(env, game_name), game_fd},
         {"prod.keys", keys_fd}
     };
+    if (title_keys_fd >= 0) inputs.push_back({"title.keys", title_keys_fd});
     std::string error;
     auto image = nxi::GameImage::open(inputs, 0, error);
     if (!image) return env->NewStringUTF(("INSPECT_ERROR: " + error).c_str());
@@ -66,7 +68,7 @@ Java_io_github_jjkrecomp_Launcher_inspectNative(JNIEnv* env, jobject, jint game_
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_jjkrecomp_Launcher_importNative(JNIEnv* env, jobject, jint game_fd, jstring game_name,
-                                                jint keys_fd, jstring out_dir) {
+                                                jint keys_fd, jint title_keys_fd, jstring out_dir) {
     if (g_importing.exchange(true))
         return env->NewStringUTF("IMPORT_ERROR: An import is already running.");
 
@@ -92,6 +94,7 @@ Java_io_github_jjkrecomp_Launcher_importNative(JNIEnv* env, jobject, jint game_f
         {java_string(env, game_name), game_fd},
         {"prod.keys", keys_fd}
     };
+    if (title_keys_fd >= 0) inputs.push_back({"title.keys", title_keys_fd});
     std::string error;
     const int rc = nxi::run_import(inputs, options, error);
     g_importing = false;
