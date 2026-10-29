@@ -20,6 +20,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -37,6 +39,31 @@ public final class Launcher extends Activity {
     static { try { System.loadLibrary("jjkinspector"); inspectorLoaded = true; inspectorLoadError = ""; } catch (UnsatisfiedLinkError e) { inspectorLoaded = false; inspectorLoadError = e.getMessage() == null ? e.toString() : e.getMessage(); android.util.Log.e("JJKLauncher", "Native inspector load failed", e); } }
     private native String inspectNative(int gameFd, String gameName, int keysFd);
     private native String importNative(int gameFd, String gameName, int keysFd, String outDir);
+    private native String importProgress();
+    private final Handler importHandler = new Handler(Looper.getMainLooper());
+    private volatile boolean importRunning;
+    private final Runnable importProgressTicker = new Runnable() {
+        @Override public void run() {
+            if (!importRunning) return;
+            try {
+                String raw = importProgress();
+                String[] fields = raw == null ? new String[0] : raw.split("\\|", 4);
+                if (fields.length == 4) {
+                    long done = 0, total = 0;
+                    try { done = Long.parseLong(fields[1]); total = Long.parseLong(fields[2]); } catch (NumberFormatException ignored) {}
+                    String percent = total > 0 ? String.format(java.util.Locale.ROOT, " (%.1f%%)", Math.min(100.0, 100.0 * done / total)) : "";
+                    gameStatus.setText("Import phase: " + fields[0] + percent
+                        + "\\nProgress: " + android.text.format.Formatter.formatFileSize(Launcher.this, done)
+                        + (total > 0 ? " / " + android.text.format.Formatter.formatFileSize(Launcher.this, total) : "")
+                        + "\\nCurrent item: " + (fields[3].isEmpty() ? "(preparing)" : fields[3])
+                        + "\\nKeep this screen open until the import finishes.");
+                }
+            } catch (Throwable e) {
+                android.util.Log.w("JJKLauncher", "Could not read import progress", e);
+            }
+            importHandler.postDelayed(this, 500);
+        }
+    };
     private TextView gameStatus, gameValue, keysValue, iconValue;
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
@@ -351,6 +378,8 @@ public final class Launcher extends Activity {
                     (e.getMessage() == null ? "import failed" : e.getMessage());
             }
             final String result = message;
+            importRunning = false;
+            importHandler.removeCallbacks(importProgressTicker);
             runOnUiThread(() -> {
                 gameStatus.setText(result.startsWith("IMPORT_OK:") ?
                     "Import completed. Game startup is still experimental." : "Import did not complete.");
