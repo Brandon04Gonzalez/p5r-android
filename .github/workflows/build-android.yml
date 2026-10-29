@@ -186,22 +186,22 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Compile native JJK metadata inspector
+      - name: Build JJK JNI importer with the same CMake target as local APK builds
         shell: bash
         run: |
           set -euxo pipefail
-          NDK="$ANDROID_NDK_HOME"
-          CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
-          "$CXX" --target=aarch64-linux-android29 -std=c++17 -O2 -fPIC -shared -static-libstdc++ \
-            -I"$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
-            -Iandroid/wonder/importer \
-            -o libjjkinspector.so \
-            games/jjk/import/jjk_inspector_jni.cpp \
-            android/wonder/importer/nximport.cpp \
-            android/wonder/importer/nxcrypto.cpp \
-            -llog
+          cmake -S games/jjk/import -B build-jjk-inspector -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_STL=c++_static
+          cmake --build build-jjk-inspector --target jjkinspector --parallel 2
+          cp build-jjk-inspector/libjjkinspector.so libjjkinspector.so
           file libjjkinspector.so
           readelf -h libjjkinspector.so | grep -E 'Class:|Machine:'
+          nm -D --defined-only libjjkinspector.so | grep -F 'Java_io_github_jjkrecomp_Launcher_inspectNative'
+          nm -D --defined-only libjjkinspector.so | grep -F 'Java_io_github_jjkrecomp_Launcher_importNative'
+          nm -D --defined-only libjjkinspector.so | grep -F 'Java_io_github_jjkrecomp_Launcher_importProgress'
           readelf -d libjjkinspector.so | grep -E "SONAME|NEEDED" || true
 
       - name: Package experimental JJK APK
