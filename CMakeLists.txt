@@ -273,11 +273,11 @@ endif()
 
 # JJK's on-device import uses the shared NSP/XCI importer and writes raw ExeFS modules for NCE.
 if(ANDROID AND NX_GAME STREQUAL "jjk")
-    add_library(jjkimport SHARED games/jjk/import/jjk_import_jni.cpp
+    add_library(jjkimport SHARED games/jjk/import/jjk_import_jni.cpp games/p5r/import/p5r_shaders.cpp
         "${NX_IMPORTER_DIR}/nximport.cpp" "${NX_IMPORTER_DIR}/nxcrypto.cpp")
-    target_include_directories(jjkimport PRIVATE "${NX_IMPORTER_DIR}")
+    target_include_directories(jjkimport PRIVATE "${NX_IMPORTER_DIR}" games/p5r/import)
     target_compile_options(jjkimport PRIVATE -O2 -fvisibility=hidden -march=armv8-a+crypto)
-    target_link_libraries(jjkimport PRIVATE log)
+    target_link_libraries(jjkimport PRIVATE log dl)
     target_link_options(jjkimport PRIVATE -Wl,-z,max-page-size=16384)
 endif()
 
