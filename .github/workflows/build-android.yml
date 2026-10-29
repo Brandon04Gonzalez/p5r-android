@@ -168,3 +168,12 @@ jobs:
 
       - name: Compile JJK native library
         run: cmake --build build-jjk-android --target jjk --parallel 2
+
+
+      - name: Upload JJK native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: jjk-android-arm64-runtime
+          path: build-jjk-android/libjjk.so
+          if-no-files-found: error
+          retention-days: 7
