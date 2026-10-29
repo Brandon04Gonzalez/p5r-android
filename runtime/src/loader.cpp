@@ -350,7 +350,17 @@ void load_modules(const ModuleInfo* const* mods, size_t count, const std::string
             }
             const Symbol& s = mi->symbols[r.sym];
             uint64_t target = 0;
-            if (s.type == 2 || s.imported) {
+            // Relocation boundary symbols are module-local, not global exports.
+            if (s.imported && s.name) {
+                const char* n = s.name;
+                if (!std::strcmp(n, "__rel_dyn_start") || !std::strcmp(n, "__rel_dyn_end") ||
+                    !std::strcmp(n, "__rel_plt_start") || !std::strcmp(n, "__rel_plt_end")) {
+                    target = lm.base + s.value;
+                    log("%s: resolved %s to module-local address %llx", mi->name, n,
+                        (unsigned long long)target);
+                }
+            }
+            if (!target && (s.type == 2 || s.imported)) {
                 if (hle_lookup(s.name) && !recompiled_only(s.name)) {
                     target = hle_address(s.name);
                     hle++;
