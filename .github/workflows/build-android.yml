@@ -196,7 +196,7 @@ jobs:
             -I"$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
             -Iandroid/wonder/importer \
             -o libjjkinspector.so \
-            games/jjk/inspector/jni_inspector.cpp \
+            games/jjk/import/jjk_inspector_jni.cpp \
             android/wonder/importer/nximport.cpp \
             android/wonder/importer/nxcrypto.cpp \
             -llog
