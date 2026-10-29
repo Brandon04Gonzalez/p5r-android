@@ -2,7 +2,7 @@
 rem Build the JJK Android NCE APK using the same native build, launcher, and signing pipeline as P5R.
 rem Run from a Windows developer shell with Android SDK/NDK, JDK, CMake, Ninja, Vulkan headers, and Docker available.
 rem Build the shared Android SPIR-V harness once first if it is missing:
-rem   docker run --rm -v "%CD%:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh games/p5r/tools/build_harness_android.sh
+rem   docker run --rm -v "%CD%:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh games/jjk/tools/build_harness_android.sh
 setlocal
 cd /d "%~dp0..\..\.."
 set "PATH=%CD%\private\venv\Scripts;%PATH%"
