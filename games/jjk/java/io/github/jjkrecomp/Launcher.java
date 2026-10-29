@@ -180,6 +180,8 @@ public final class Launcher extends Activity {
             writer.write("resolution=" + resolution + "\\n");
             writer.write("NX_STRETCH=" + prefs.getString("setting_NX_STRETCH", "0") + "\\n");
             writer.write("NX_HUD_1080=" + prefs.getString("setting_NX_HUD_1080", "0") + "\\n");
+            writer.write("NX_LOD_BIAS=" + ("low".equals(prefs.getString("setting_graphics", "low")) ? "1" : "medium".equals(prefs.getString("setting_graphics", "low")) ? "0.5" : "0") + "\\n");
+            writer.write("language=" + prefs.getString("setting_language", "auto") + "\\n");
             writer.write("NX_FPS_CAP=" + prefs.getString("setting_NX_FPS_CAP", "30") + "\\n");
             writer.write("NX_SHADOWS=" + prefs.getString("setting_NX_SHADOWS", "0") + "\\n");
             writer.write("NX_SHOW_FPS=" + prefs.getString("setting_NX_SHOW_FPS", "0") + "\\n");
