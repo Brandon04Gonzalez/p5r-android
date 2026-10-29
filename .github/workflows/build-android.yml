@@ -49,9 +49,7 @@ jobs:
       - name: Install Android SDK and NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: |
-            ndk;28.2.13676358
-            platforms;android-35
+          packages: "ndk;28.2.13676358"
 
       - name: Compile importer for Android ARM64
         shell: bash
@@ -90,6 +88,9 @@ jobs:
           packages: |
             ndk;28.2.13676358
             platforms;android-35
+
+      - name: Install Android platform APIs for launcher compilation
+        run: yes | sdkmanager "platforms;android-35"
 
       - name: Install CMake and Ninja
         run: |
