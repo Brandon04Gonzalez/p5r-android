@@ -230,12 +230,24 @@ jobs:
           (cd apk/stage && zip -q -j ../base.apk classes.dex)
           (cd apk && zip -q base.apk lib/arm64-v8a/libjjk.so lib/arm64-v8a/libjjkinspector.so)
           "$BT/zipalign" -f -p 4 apk/base.apk apk/aligned.apk
-          if [[ -z "${JJK_KEYSTORE_BASE64:-}" || -z "${JJK_KEYSTORE_PASSWORD:-}" || -z "${JJK_KEY_ALIAS:-}" ]]; then
-            echo "::error::Persistent signing secrets are missing. Configure JJK_KEYSTORE_BASE64, JJK_KEYSTORE_PASSWORD, and JJK_KEY_ALIAS in repository Actions secrets so future APKs can update-install."
-            exit 1
+          if [[ -n "${JJK_KEYSTORE_BASE64:-}" && -n "${JJK_KEYSTORE_PASSWORD:-}" && -n "${JJK_KEY_ALIAS:-}" ]]; then
+            printf '%s' "$JJK_KEYSTORE_BASE64" | base64 --decode > apk/release.keystore
+            KS="apk/release.keystore"
+            KS_PASS="$JJK_KEYSTORE_PASSWORD"
+            KEY_ALIAS="$JJK_KEY_ALIAS"
+            echo "Using repository signing key; APK can update-install over builds signed with the same key."
+          else
+            # Still produce an installable test artifact when release signing secrets are not configured.
+            # This ephemeral key changes every run, so a later build cannot update-install over this APK.
+            keytool -genkeypair -noprompt -keystore apk/ci-test.keystore -storepass android -keypass android \
+              -alias jjk-ci-test -keyalg RSA -keysize 2048 -validity 7 \
+              -dname "CN=JJK Runtime CI Test, OU=Experimental, O=Local Test, C=ID"
+            KS="apk/ci-test.keystore"
+            KS_PASS="android"
+            KEY_ALIAS="jjk-ci-test"
+            echo "::warning::Persistent signing secrets are absent. This APK uses a temporary CI key; uninstall it before installing a later build."
           fi
-          printf '%s' "$JJK_KEYSTORE_BASE64" | base64 --decode > apk/release.keystore
-          "$BT/apksigner" sign --ks apk/release.keystore --ks-pass "pass:$JJK_KEYSTORE_PASSWORD" --ks-key-alias "$JJK_KEY_ALIAS" --key-pass "pass:$JJK_KEYSTORE_PASSWORD" --out apk/JJK-Runtime-Test.apk apk/aligned.apk
+          "$BT/apksigner" sign --ks "$KS" --ks-pass "pass:$KS_PASS" --ks-key-alias "$KEY_ALIAS" --key-pass "pass:$KS_PASS" --out apk/JJK-Runtime-Test.apk apk/aligned.apk
           "$BT/apksigner" verify --verbose apk/JJK-Runtime-Test.apk
           "$BT/aapt2" dump badging apk/JJK-Runtime-Test.apk
           "$BT/aapt2" dump permissions apk/JJK-Runtime-Test.apk | tee apk/permissions.txt
