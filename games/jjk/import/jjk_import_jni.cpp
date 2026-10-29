@@ -6,6 +6,7 @@
 #include <jni.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <mutex>
 #include <string>
