@@ -475,9 +475,24 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
             c.x[1] = 0;
             break;
         }
-        case 0x07:
-            log("svcExitProcess: pc=%llx lr=%llx x0=%llx x1=%llx x2=%llx x3=%llx", (unsigned long long)pc, (unsigned long long)c.x[30], (unsigned long long)c.x[0], (unsigned long long)c.x[1], (unsigned long long)c.x[2], (unsigned long long)c.x[3]);
+        case 0x07: {
+            // Keep the final guest context: startup exits can be an intentional game decision or an SDK
+            // failure path. The symbolic PCs and nearby instructions let us distinguish them from one log.
+            const uint32_t insn_m8 = ld<uint32_t>(pc - 8);
+            const uint32_t insn_m4 = ld<uint32_t>(pc - 4);
+            const uint32_t insn_0 = ld<uint32_t>(pc);
+            const uint32_t insn_p4 = ld<uint32_t>(pc + 4);
+            log("svcExitProcess: pc=%s lr=%s sp=%llx x0=%llx x1=%llx x2=%llx x3=%llx x4=%llx x5=%llx x6=%llx x7=%llx",
+                describe(pc).c_str(), describe(c.x[30]).c_str(), (unsigned long long)c.x[31],
+                (unsigned long long)c.x[0], (unsigned long long)c.x[1], (unsigned long long)c.x[2],
+                (unsigned long long)c.x[3], (unsigned long long)c.x[4], (unsigned long long)c.x[5],
+                (unsigned long long)c.x[6], (unsigned long long)c.x[7]);
+            log("svcExitProcess: x19=%llx x20=%llx x21=%llx x22=%llx x23=%llx x29=%llx insn[-8,-4,0,+4]=%08x,%08x,%08x,%08x",
+                (unsigned long long)c.x[19], (unsigned long long)c.x[20], (unsigned long long)c.x[21],
+                (unsigned long long)c.x[22], (unsigned long long)c.x[23], (unsigned long long)c.x[29],
+                insn_m8, insn_m4, insn_0, insn_p4);
             plat::exit_process(0);
+        }
         case 0x08: {  // CreateThread(entry x1, arg x2, stack_top x3, prio w4, core w5) -> handle
             auto t = new_thread(c.x[1], c.x[2], c.x[3], int(c.x[4]), int32_t(c.x[5]));
             c.x[1] = t->handle;
