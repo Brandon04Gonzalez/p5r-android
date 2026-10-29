@@ -177,17 +177,17 @@ public final class Launcher extends Activity {
             java.io.File file = new java.io.File(dir, "config.txt");
             java.io.FileWriter writer = new java.io.FileWriter(file, false);
             String resolution = prefs.getString("setting_resolution", "1280x720");
-            writer.write("resolution=" + resolution + "\\n");
-            writer.write("NX_STRETCH=" + prefs.getString("setting_NX_STRETCH", "0") + "\\n");
-            writer.write("NX_HUD_1080=" + prefs.getString("setting_NX_HUD_1080", "0") + "\\n");
-            writer.write("NX_LOD_BIAS=" + ("low".equals(prefs.getString("setting_graphics", "low")) ? "1" : "medium".equals(prefs.getString("setting_graphics", "low")) ? "0.5" : "0") + "\\n");
-            writer.write("language=" + prefs.getString("setting_language", "auto") + "\\n");
-            writer.write("NX_FPS_CAP=" + prefs.getString("setting_NX_FPS_CAP", "30") + "\\n");
-            writer.write("NX_SHADOWS=" + prefs.getString("setting_NX_SHADOWS", "0") + "\\n");
-            writer.write("NX_SHOW_FPS=" + prefs.getString("setting_NX_SHOW_FPS", "0") + "\\n");
-            writer.write("NX_TOUCH_SHOW=" + prefs.getString("setting_NX_TOUCH_SHOW", "1") + "\\n");
-            writer.write("NX_TOUCH_SIZE=" + prefs.getString("setting_NX_TOUCH_SIZE", "100") + "\\n");
-            writer.write("NX_TOUCH_OPACITY=" + prefs.getString("setting_NX_TOUCH_OPACITY", "85") + "\\n");
+            writer.write("resolution=" + resolution + "\n");
+            writer.write("NX_STRETCH=" + prefs.getString("setting_NX_STRETCH", "0") + "\n");
+            writer.write("NX_HUD_1080=" + prefs.getString("setting_NX_HUD_1080", "0") + "\n");
+            writer.write("NX_LOD_BIAS=" + ("low".equals(prefs.getString("setting_graphics", "low")) ? "1" : "medium".equals(prefs.getString("setting_graphics", "low")) ? "0.5" : "0") + "\n");
+            writer.write("language=" + prefs.getString("setting_language", "auto") + "\n");
+            writer.write("NX_FPS_CAP=" + prefs.getString("setting_NX_FPS_CAP", "30") + "\n");
+            writer.write("NX_SHADOWS=" + prefs.getString("setting_NX_SHADOWS", "0") + "\n");
+            writer.write("NX_SHOW_FPS=" + prefs.getString("setting_NX_SHOW_FPS", "0") + "\n");
+            writer.write("NX_TOUCH_SHOW=" + prefs.getString("setting_NX_TOUCH_SHOW", "1") + "\n");
+            writer.write("NX_TOUCH_SIZE=" + prefs.getString("setting_NX_TOUCH_SIZE", "100") + "\n");
+            writer.write("NX_TOUCH_OPACITY=" + prefs.getString("setting_NX_TOUCH_OPACITY", "85") + "\n");
             writer.flush();
             writer.close();
         } catch (Exception e) {
