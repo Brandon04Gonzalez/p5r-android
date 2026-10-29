@@ -14,23 +14,29 @@
 
     <application
         android:label="JJK Runtime Test"
-        android:hasCode="false"
+        android:hasCode="true"
         android:extractNativeLibs="true"
         android:debuggable="true"
         android:isGame="true"
         android:appCategory="game"
-        android:largeHeap="true">
+        android:largeHeap="true"
+        android:theme="@android:style/Theme.Material.NoActionBar">
         <activity
-            android:name="android.app.NativeActivity"
+            android:name=".Launcher"
             android:exported="true"
-            android:screenOrientation="sensorLandscape"
-            android:resizeableActivity="false"
-            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">
-            <meta-data android:name="android.app.lib_name" android:value="jjk" />
+            android:screenOrientation="sensorLandscape">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+        </activity>
+        <activity
+            android:name="android.app.NativeActivity"
+            android:exported="false"
+            android:screenOrientation="sensorLandscape"
+            android:resizeableActivity="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden|keyboard|navigation|uiMode|density">
+            <meta-data android:name="android.app.lib_name" android:value="jjk" />
         </activity>
     </application>
 </manifest>
