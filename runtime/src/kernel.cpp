@@ -491,6 +491,23 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
                 (unsigned long long)c.x[19], (unsigned long long)c.x[20], (unsigned long long)c.x[21],
                 (unsigned long long)c.x[22], (unsigned long long)c.x[23], (unsigned long long)c.x[29],
                 insn_m8, insn_m4, insn_0, insn_p4);
+            // The LR only identifies ExitProcessImpl's return site, not who triggered shutdown.
+            // Dump a small stack window and symbol-like candidates to identify the preceding caller.
+            for (int i = 0; i < 12; ++i) {
+                const uint64_t a = c.x[31] + uint64_t(i) * 8;
+                const uint64_t v = ld<uint64_t>(a);
+                log("svcExitProcess: stack[%02d] @%llx = %llx (%s)", i,
+                    (unsigned long long)a, (unsigned long long)v, describe(v).c_str());
+            }
+            uint64_t fp = c.x[29];
+            for (int i = 0; i < 8 && fp >= c.x[31] && fp < c.x[31] + 0x100000; ++i) {
+                const uint64_t prev = ld<uint64_t>(fp);
+                const uint64_t ret = ld<uint64_t>(fp + 8);
+                log("svcExitProcess: frame[%02d] fp=%llx prev=%llx ret=%llx (%s)", i,
+                    (unsigned long long)fp, (unsigned long long)prev, (unsigned long long)ret, describe(ret).c_str());
+                if (prev <= fp || prev - fp > 0x100000) break;
+                fp = prev;
+            }
             plat::exit_process(0);
         }
         case 0x08: {  // CreateThread(entry x1, arg x2, stack_top x3, prio w4, core w5) -> handle
