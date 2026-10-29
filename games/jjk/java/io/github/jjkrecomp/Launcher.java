@@ -381,9 +381,9 @@ public final class Launcher extends Activity {
                 return;
             }
         }
-        if (!new File(data, "exefs/main").isFile()) {
+        if (!new File(data, "exefs/main").isFile() || !new File(data, "exefs/sdk").isFile()) {
             new AlertDialog.Builder(this).setTitle("Import required")
-                .setMessage("The imported ExeFS main file was not found. Tap Import game data first.")
+                .setMessage("The imported ExeFS main/sdk files were not found. Tap Import game data first.")
                 .setPositiveButton("OK", null).show();
             return;
         }
@@ -407,6 +407,13 @@ public final class Launcher extends Activity {
             Os.setenv("NX_GAME_FD", Integer.toString(gamePfd.detachFd()), true);
             Os.setenv("NX_GAME_NAME", name(gameString), true);
             Os.setenv("NX_KEYS", keys.getAbsolutePath(), true);
+            // NativeActivity's runtime reads data_root.txt from internalDataPath, then probes
+            // <root>/exefs/main. Point it at the import directory instead of an empty shared folder.
+            File rootConfig = new File(getFilesDir(), "data_root.txt");
+            try (FileOutputStream rootOut = new FileOutputStream(rootConfig, false)) {
+                rootOut.write(data.getAbsolutePath().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                rootOut.write('\n');
+            }
             writeRuntimeConfig();
             gameStatus.setText("Starting experimental JJK runtime…");
             startActivity(new Intent(this, android.app.NativeActivity.class));
