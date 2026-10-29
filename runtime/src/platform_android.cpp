@@ -658,6 +658,34 @@ extern "C" void android_main(android_app* app) {
     }
     // The picked folder wins over the app's own one; else the own one (adb push), else Internal storage/<title>.
     g_root = !chosen.empty() && has_data(chosen) ? chosen : has_data(own) ? own : shared;
+#if NX_NCE
+    // Never enter the guest runtime without the user's extracted executable. Previously this
+    // reached nx::boot(), which aborted and made the app appear to crash immediately.
+    if (!has_data(g_root)) {
+        const std::string message = std::string("JJK dump missing: copy ExeFS main to ") + g_root + kDataProbe;
+        __android_log_print(ANDROID_LOG_ERROR, nx::game::kInfo.id, "%s", message.c_str());
+        JNIEnv* env = nullptr;
+        if (app->activity->vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) {
+            jclass toast = env->FindClass("android/widget/Toast");
+            jclass text = env->FindClass("java/lang/String");
+            (void)text;
+            jmethodID make = toast ? env->GetStaticMethodID(toast, "makeText",
+                "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;") : nullptr;
+            jmethodID show = toast ? env->GetMethodID(toast, "show", "()V") : nullptr;
+            if (make && show) {
+                jstring msg = env->NewStringUTF(message.c_str());
+                jobject t = env->CallStaticObjectMethod(toast, make, app->activity->clazz, msg, 1);
+                if (t) env->CallVoidMethod(t, show);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                if (t) env->DeleteLocalRef(t);
+                env->DeleteLocalRef(msg);
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        ANativeActivity_finish(app->activity);
+        return;
+    }
+#endif
     // config.txt's NX_* lines become environment variables (the NVN layer reads its switches with getenv), without
     // overriding a variable already set. Android defaults: handheld (720p, the lighter GPU load).
     {
