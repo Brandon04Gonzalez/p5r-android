@@ -704,23 +704,38 @@ extern "C" void android_main(android_app* app) {
         std::getline(f, chosen);
         while (!chosen.empty() && (chosen.back() == '\r' || chosen.back() == '\n' || chosen.back() == ' ')) chosen.pop_back();
     }
-    const std::string shared = !chosen.empty() ? chosen : std::string("/storage/emulated/0/") + nx::game::kInfo.title;
-    const std::string own = app->activity->externalDataPath ? app->activity->externalDataPath : shared;
-    // Launcher owns the Android all-files permission flow before Play is enabled. Do not open
-    // Settings or block the NativeActivity thread here: doing so leaves the game on a black
-    // screen and can prevent startup from progressing. Select the best readable data root directly.
-    early_startup_log("[native] selecting game data directory (permission flow handled by launcher)");
+    // Keep the Java launcher's canonical folder name (without the title's colon) as an
+    // explicit candidate even if an old/invalid data_root.txt value exists.
+    const std::string shared = "/storage/emulated/0/Jujutsu Kaisen Cursed Clash";
+    const std::string legacy_shared = std::string("/storage/emulated/0/") + nx::game::kInfo.title;
+    const std::string own = app->activity->externalDataPath ? app->activity->externalDataPath : "";
+    // Never let a stale configured path hide the actual prepared folder. Test every known root
+    // and choose the first one containing exefs/main; keep a deterministic fallback for diagnostics.
+    early_startup_log("[native] selecting game data directory");
     const bool chosen_has_data = !chosen.empty() && has_data(chosen);
-    const bool own_has_data = has_data(own);
     const bool shared_has_data = has_data(shared);
-    early_startup_log(chosen_has_data
-        ? "[native] selected launcher-configured data root"
-        : own_has_data
-            ? "[native] selected app-private data root"
-            : shared_has_data
-                ? "[native] selected shared JJK data root"
-                : "[native] WARNING: exefs/main not readable in configured, app-private, or shared data roots");
-    g_root = chosen_has_data ? chosen : own_has_data ? own : shared;
+    const bool own_has_data = !own.empty() && has_data(own);
+    const bool legacy_has_data = has_data(legacy_shared);
+    if (chosen_has_data) {
+        g_root = chosen;
+        early_startup_log("[native] selected configured data root");
+    } else if (shared_has_data) {
+        g_root = shared;
+        early_startup_log("[native] selected canonical shared JJK folder");
+    } else if (own_has_data) {
+        g_root = own;
+        early_startup_log("[native] selected app external-data folder");
+    } else if (legacy_has_data) {
+        g_root = legacy_shared;
+        early_startup_log("[native] selected legacy title-named folder");
+    } else {
+        g_root = !chosen.empty() ? chosen : !own.empty() ? own : shared;
+        early_startup_log("[native] ERROR: no candidate data root contains readable exefs/main");
+        early_startup_log(chosen.empty() ? "[native] configured root is empty" : chosen.c_str());
+        early_startup_log(shared_has_data ? "[native] canonical folder readable" : "[native] canonical folder missing exefs/main or unreadable");
+        early_startup_log(own.empty() ? "[native] app external-data path unavailable" : own.c_str());
+        early_startup_log(legacy_has_data ? "[native] legacy folder readable" : "[native] legacy folder missing exefs/main or unreadable");
+    }
     early_startup_log("[native] data-root selected; normal runtime logging will begin");
     // Create a visible log immediately, before the guest thread or renderer starts.
     nx::plat::log_line("JJK runtime logger initialized; startup reached data-root selection");
