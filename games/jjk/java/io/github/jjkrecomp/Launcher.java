@@ -192,6 +192,13 @@ public final class Launcher extends Activity {
         playParams.topMargin = dp(12);
         root.addView(playButton, playParams);
         playButton.setOnClickListener(v -> playGame());
+
+        Button logButton = button("Collect / share crash log");
+        LinearLayout.LayoutParams logParams = new LinearLayout.LayoutParams(-1, dp(52));
+        logParams.topMargin = dp(10);
+        root.addView(logButton, logParams);
+        logButton.setOnClickListener(v -> collectAndShareDiagnostics());
+
         writeRuntimeConfig();
         setContentView(scroll);
     }
@@ -401,7 +408,104 @@ public final class Launcher extends Activity {
         }).start();
     }
 
+    private File appLogFile() {
+        return new File(getFilesDir(), "jjk-launcher.log");
+    }
+
+    private synchronized void appLog(String message) {
+        String line = new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss.SSS", java.util.Locale.US)
+            .format(new java.util.Date()) + " " + message + "\n";
+        try (FileOutputStream out = new FileOutputStream(appLogFile(), true)) {
+            out.write(line.getBytes(StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            android.util.Log.e("JJKLauncher", "Could not persist launcher log", e);
+        }
+        android.util.Log.i("JJKLauncher", message);
+    }
+
+    private void collectAndShareDiagnostics() {
+        gameStatus.setText("Collecting runtime logs…");
+        new Thread(() -> {
+            StringBuilder out = new StringBuilder();
+            out.append("JJK Runtime diagnostics\nPackage: ").append(getPackageName())
+                .append("\nAndroid: ").append(android.os.Build.VERSION.RELEASE)
+                .append(" (SDK ").append(android.os.Build.VERSION.SDK_INT).append(")")
+                .append("\nDevice: ").append(android.os.Build.MANUFACTURER).append(" ")
+                .append(android.os.Build.MODEL).append("\n\n");
+
+            File nativeLog = new File(getExternalFilesDir(null), "jjk-runtime.log");
+            if (nativeLog.isFile()) {
+                out.append("===== Native runtime file: ").append(nativeLog.getAbsolutePath()).append(" =====\n");
+                appendTail(out, nativeLog, 160 * 1024);
+                out.append("\n");
+            } else {
+                out.append("Native runtime file not found at ").append(nativeLog.getAbsolutePath()).append("\n\n");
+            }
+
+            File launcherLog = appLogFile();
+            if (launcherLog.isFile()) {
+                out.append("===== Launcher log =====\n");
+                appendTail(out, launcherLog, 48 * 1024);
+                out.append("\n");
+            }
+
+            out.append("===== Android logcat (last 3000 lines available to this app) =====\n");
+            try {
+                Process p = new ProcessBuilder("logcat", "-d", "-v", "threadtime", "-t", "3000").redirectErrorStream(true).start();
+                try (BufferedReader reader = new BufferedReader(new InputStreamReader(p.getInputStream(), StandardCharsets.UTF_8))) {
+                    String line;
+                    int count = 0;
+                    while ((line = reader.readLine()) != null) {
+                        if (out.length() > 700 * 1024) {
+                            out.append("\n[log truncated at 700 KiB]\n");
+                            break;
+                        }
+                        out.append(line).append('\n');
+                        count++;
+                    }
+                    appLog("Diagnostics collected; logcat lines read=" + count);
+                }
+                p.waitFor();
+            } catch (Exception e) {
+                out.append("Could not read logcat: ").append(e.getClass().getSimpleName()).append(": ")
+                    .append(e.getMessage()).append("\n");
+            }
+
+            final String diagnostics = out.toString();
+            runOnUiThread(() -> {
+                gameStatus.setText("Diagnostics ready. Share the report after reproducing the Play crash.");
+                new AlertDialog.Builder(this)
+                    .setTitle("JJK crash diagnostics")
+                    .setMessage("Report collected (" + diagnostics.length() + " characters). Share it and send the resulting text/file back here.")
+                    .setNegativeButton("Close", null)
+                    .setPositiveButton("Share", (dialog, which) -> {
+                        Intent share = new Intent(Intent.ACTION_SEND);
+                        share.setType("text/plain");
+                        share.putExtra(Intent.EXTRA_SUBJECT, "JJK Runtime crash diagnostics");
+                        share.putExtra(Intent.EXTRA_TEXT, diagnostics);
+                        startActivity(Intent.createChooser(share, "Share crash log"));
+                    }).show();
+            });
+        }, "jjk-diagnostics").start();
+    }
+
+    private void appendTail(StringBuilder out, File file, int maxBytes) {
+        try (java.io.RandomAccessFile raf = new java.io.RandomAccessFile(file, "r")) {
+            long length = raf.length();
+            long start = Math.max(0, length - maxBytes);
+            raf.seek(start);
+            if (start > 0) out.append("[earlier content omitted]\n");
+            byte[] buffer = new byte[8192];
+            int n;
+            while ((n = raf.read(buffer)) != -1) out.append(new String(buffer, 0, n, StandardCharsets.UTF_8));
+        } catch (Exception e) {
+            out.append("[Could not read file: ").append(e.getMessage()).append("]\n");
+        }
+    }
+
     private void playGame() {
+        appLog("Play pressed");
+
         String gameString = prefs.getString("game_uri", null);
         String keysString = prefs.getString("keys_uri", null);
         if (gameString == null || keysString == null) {
@@ -410,21 +514,12 @@ public final class Launcher extends Activity {
                 .setPositiveButton("OK", null).show();
             return;
         }
+        // The shared runtime reads the selected NSP/XCI in place via NX_GAME_FD.
+        // Importing/extracting ExeFS first is not required for native execution.
         File data = new File(getFilesDir(), "private/jjk");
-        File legacy = new File(getFilesDir(), "jjk-import");
-        if (!new File(data, "exefs/main").isFile() && new File(legacy, "exefs/main").isFile()) {
-            File parent = data.getParentFile();
-            if (parent != null) parent.mkdirs();
-            if (!legacy.renameTo(data)) {
-                new AlertDialog.Builder(this).setTitle("Imported data not ready")
-                    .setMessage("Could not move the existing import into the runtime data folder.")
-                    .setPositiveButton("OK", null).show();
-                return;
-            }
-        }
-        if (!new File(data, "exefs/main").isFile() || !new File(data, "exefs/sdk").isFile()) {
-            new AlertDialog.Builder(this).setTitle("Import required")
-                .setMessage("The imported ExeFS main/sdk files were not found. Tap Import game data first.")
+        if (!data.isDirectory() && !data.mkdirs()) {
+            new AlertDialog.Builder(this).setTitle("Runtime data unavailable")
+                .setMessage("Could not create the private JJK runtime data directory.")
                 .setPositiveButton("OK", null).show();
             return;
         }
@@ -458,13 +553,14 @@ public final class Launcher extends Activity {
             }
             ParcelFileDescriptor gamePfd = getContentResolver().openFileDescriptor(Uri.parse(gameString), "r");
             if (gamePfd == null) throw new Exception("Cannot open the selected game dump.");
+            appLog("Starting NativeActivity; imported data=" + data.getAbsolutePath());
             Os.setenv("NX_GAME_FD", Integer.toString(gamePfd.detachFd()), true);
             Os.setenv("NX_GAME_NAME", name(gameString), true);
             Os.setenv("NX_KEYS", keys.getAbsolutePath(), true);
             if (titleKeys.isFile()) Os.setenv("NX_TITLE_KEYS", titleKeys.getAbsolutePath(), true);
             else Os.unsetenv("NX_TITLE_KEYS");
-            // NativeActivity's runtime reads data_root.txt from internalDataPath, then probes
-            // <root>/exefs/main. Point it at the import directory instead of an empty shared folder.
+            // Runtime reads the selected NSP/XCI directly through NX_GAME_FD. This folder is only
+            // the runtime's writable data root (config, saves, and optional caches); no extracted ExeFS is required.
             File rootConfig = new File(getFilesDir(), "data_root.txt");
             try (FileOutputStream rootOut = new FileOutputStream(rootConfig, false)) {
                 rootOut.write(data.getAbsolutePath().getBytes(java.nio.charset.StandardCharsets.UTF_8));

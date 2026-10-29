@@ -1,4 +1,4 @@
-# Rebuild after repository signing secrets are configured.
+# Build and package an experimental Android APK without repository signing secrets.
 name: Android Runtime Build Check
 
 on:
@@ -37,7 +37,6 @@ jobs:
 
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
-
 
   android-importer-cli:
     name: Android ARM64 game-inspection CLI
@@ -123,7 +122,6 @@ jobs:
           if-no-files-found: error
           retention-days: 3
 
-
   jjk-metadata-check:
     name: JJK target metadata compile check
     runs-on: ubuntu-24.04
@@ -133,9 +131,7 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Compile JJK game metadata
-        run: |
-          g++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only -Iruntime/include games/jjk/game.cpp
-
+        run: g++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only -Iruntime/include games/jjk/game.cpp
 
   android-jjk-nce:
     name: Android ARM64 JJK runtime compile
@@ -177,7 +173,6 @@ jobs:
       - name: Compile JJK native library
         run: cmake --build build-jjk-android --target jjk --parallel 2
 
-
       - name: Upload JJK native library
         uses: actions/upload-artifact@v4
         with:
@@ -186,30 +181,26 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-      - name: Compile native JJK metadata inspector
+      - name: Build JJK JNI importer with the same CMake target as local APK builds
         shell: bash
         run: |
           set -euxo pipefail
-          NDK="$ANDROID_NDK_HOME"
-          CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
-          "$CXX" --target=aarch64-linux-android29 -std=c++17 -O2 -fPIC -shared -static-libstdc++ \
-            -I"$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
-            -Iandroid/wonder/importer \
-            -o libjjkinspector.so \
-            games/jjk/inspector/jni_inspector.cpp \
-            android/wonder/importer/nximport.cpp \
-            android/wonder/importer/nxcrypto.cpp \
-            -llog
+          cmake -S games/jjk/import -B build-jjk-inspector -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_STL=c++_static
+          cmake --build build-jjk-inspector --target jjkinspector --parallel 2
+          cp build-jjk-inspector/libjjkinspector.so libjjkinspector.so
           file libjjkinspector.so
           readelf -h libjjkinspector.so | grep -E 'Class:|Machine:'
+          nm -D --defined-only libjjkinspector.so | grep -F 'Java_io_github_jjkrecomp_Launcher_inspectNative'
+          nm -D --defined-only libjjkinspector.so | grep -F 'Java_io_github_jjkrecomp_Launcher_importNative'
+          nm -D --defined-only libjjkinspector.so | grep -F 'Java_io_github_jjkrecomp_Launcher_importProgress'
           readelf -d libjjkinspector.so | grep -E "SONAME|NEEDED" || true
 
       - name: Package experimental JJK APK
         shell: bash
-        env:
-          JJK_KEYSTORE_BASE64: ${{ secrets.JJK_KEYSTORE_BASE64 }}
-          JJK_KEYSTORE_PASSWORD: ${{ secrets.JJK_KEYSTORE_PASSWORD }}
-          JJK_KEY_ALIAS: ${{ secrets.JJK_KEY_ALIAS }}
         run: |
           set -euxo pipefail
           BT="$ANDROID_HOME/build-tools/35.0.0"
@@ -217,7 +208,6 @@ jobs:
           mkdir -p apk/lib/arm64-v8a apk/stage/gen apk/stage/classes
           cp build-jjk-android/libjjk.so apk/lib/arm64-v8a/libjjk.so
           cp libjjkinspector.so apk/lib/arm64-v8a/libjjkinspector.so
-          # The inspector must be self-contained apart from Android system libraries.
           if readelf -d apk/lib/arm64-v8a/libjjkinspector.so | grep -F 'libc++_shared.so'; then
             echo "::error::JJK inspector unexpectedly depends on libc++_shared.so; check static C++ runtime linking."
             exit 1
@@ -230,17 +220,18 @@ jobs:
           (cd apk/stage && zip -q -j ../base.apk classes.dex)
           (cd apk && zip -q base.apk lib/arm64-v8a/libjjk.so lib/arm64-v8a/libjjkinspector.so)
           "$BT/zipalign" -f -p 4 apk/base.apk apk/aligned.apk
-          if [[ -z "${JJK_KEYSTORE_BASE64:-}" || -z "${JJK_KEYSTORE_PASSWORD:-}" || -z "${JJK_KEY_ALIAS:-}" ]]; then
-            echo "::error::Persistent signing secrets are missing. Configure JJK_KEYSTORE_BASE64, JJK_KEYSTORE_PASSWORD, and JJK_KEY_ALIAS in repository Actions secrets so future APKs can update-install."
-            exit 1
-          fi
-          printf '%s' "$JJK_KEYSTORE_BASE64" | base64 --decode > apk/release.keystore
-          "$BT/apksigner" sign --ks apk/release.keystore --ks-pass "pass:$JJK_KEYSTORE_PASSWORD" --ks-key-alias "$JJK_KEY_ALIAS" --key-pass "pass:$JJK_KEYSTORE_PASSWORD" --out apk/JJK-Runtime-Test.apk apk/aligned.apk
+          # Android requires APKs to be signed for installation. Generate a disposable CI key automatically;
+          # no repository secrets or user setup are needed. Each run gets a different signing identity.
+          keytool -genkeypair -noprompt -keystore apk/ci-test.keystore -storepass android -keypass android \
+            -alias jjk-ci-test -keyalg RSA -keysize 2048 -validity 7 \
+            -dname "CN=JJK Runtime CI Test, OU=Experimental, O=Local Test, C=ID"
+          "$BT/apksigner" sign --ks apk/ci-test.keystore --ks-pass pass:android --ks-key-alias jjk-ci-test --key-pass pass:android --out apk/JJK-Runtime-Test.apk apk/aligned.apk
           "$BT/apksigner" verify --verbose apk/JJK-Runtime-Test.apk
           "$BT/aapt2" dump badging apk/JJK-Runtime-Test.apk
           "$BT/aapt2" dump permissions apk/JJK-Runtime-Test.apk | tee apk/permissions.txt
           grep -F "android.permission.MANAGE_EXTERNAL_STORAGE" apk/permissions.txt
           unzip -l apk/JJK-Runtime-Test.apk
+
       - name: Upload experimental JJK APK
         uses: actions/upload-artifact@v4
         with:
