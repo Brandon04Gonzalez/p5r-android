@@ -40,8 +40,12 @@ if ($Nce -and $Game -eq "p5r") {
     $extraLibs += @("$build\libp5rimport.so", $harness)
 }
 if ($Nce -and $Game -eq "jjk") {
+    $harness = "$root\private\build\spirv_harness_android\libspirvharness.so"
+    if (-not (Test-Path $harness)) {
+        throw "missing $harness. Build it once, with Docker Desktop running, from the repository root: docker run --rm -v ""${root}:/src"" -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh games/p5r/tools/build_harness_android.sh"
+    }
     $targets += "jjkimport"
-    $extraLibs += "$build\libjjkimport.so"
+    $extraLibs += @("$build\libjjkimport.so", $harness)
 }
 cmake --build $build --target @targets
 if ($LASTEXITCODE) { throw "native build failed" }
