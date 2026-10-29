@@ -1,4 +1,5 @@
 #include <jni.h>
+#include <android/log.h>
 #include <cstdio>
 #include <cstring>
 #include <string>
@@ -56,13 +57,37 @@ Java_io_github_jjkrecomp_Launcher_importNative(JNIEnv* env, jobject,
     if (raw_name) env->ReleaseStringUTFChars(game_name, raw_name);
     if (raw_out) env->ReleaseStringUTFChars(out_dir, raw_out);
     if (output.empty()) return env->NewStringUTF("IMPORT_ERROR: output directory is empty");
+    __android_log_print(ANDROID_LOG_INFO, "JJKImporter", "Starting import; output=%s", output.c_str());
     nxi::Options options;
     options.out_dir = output;
     options.title_id = 0x01002FC012548000ull;
     options.keep_exefs = true;
+    std::string last_phase;
+    uint64_t last_percent = 101;
+    options.on_progress = [&](const nxi::Progress& p) {
+        const uint64_t percent = p.total ? (p.done * 100 / p.total) : 0;
+        if (p.phase != last_phase || percent >= last_percent + 5 || (p.total && p.done >= p.total)) {
+            __android_log_print(ANDROID_LOG_INFO, "JJKImporter",
+                "phase=%s progress=%llu/%llu (%llu%%) item=%s",
+                p.phase.c_str(),
+                static_cast<unsigned long long>(p.done),
+                static_cast<unsigned long long>(p.total),
+                static_cast<unsigned long long>(percent),
+                p.item.c_str());
+            last_phase = p.phase;
+            last_percent = percent;
+        }
+    };
+    options.on_log = [](const std::string& line) {
+        __android_log_print(ANDROID_LOG_INFO, "JJKImporter", "%s", line.c_str());
+    };
     std::vector<nxi::InputFile> inputs = {{name, game_fd}, {"prod.keys", keys_fd}};
     std::string error;
-    int rc = nxi::run_import(inputs, options, error);
-    if (rc != 0) return env->NewStringUTF(("IMPORT_ERROR: " + error).c_str());
-    return env->NewStringUTF("IMPORT_OK: content extraction and integrity checks completed. Game startup is not yet implemented.");
+    const int rc = nxi::run_import(inputs, options, error);
+    if (rc != 0) {
+        __android_log_print(ANDROID_LOG_ERROR, "JJKImporter", "Import failed: %s", error.c_str());
+        return env->NewStringUTF(("IMPORT_ERROR: " + error + " (details: Android log tag JJKImporter)").c_str());
+    }
+    __android_log_print(ANDROID_LOG_INFO, "JJKImporter", "Import finished successfully; game startup is not implemented.");
+    return env->NewStringUTF("IMPORT_OK: content extraction and integrity checks completed. Progress log: Android log tag JJKImporter. Game startup is not yet implemented.");
 }
