@@ -192,7 +192,7 @@ jobs:
           set -euxo pipefail
           NDK="$ANDROID_NDK_HOME"
           CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
-          "$CXX" --target=aarch64-linux-android29 -std=c++17 -O2 -fPIC -shared \
+          "$CXX" --target=aarch64-linux-android29 -std=c++17 -O2 -fPIC -shared -static-libstdc++ \
             -I"$NDK/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/include" \
             -Iandroid/wonder/importer \
             -o libjjkinspector.so \
@@ -201,7 +201,7 @@ jobs:
             android/wonder/importer/nxcrypto.cpp
           file libjjkinspector.so
           readelf -h libjjkinspector.so | grep -E 'Class:|Machine:'
-          readelf -d libjjkinspector.so | grep SONAME || true
+          readelf -d libjjkinspector.so | grep -E "SONAME|NEEDED" || true
 
       - name: Package experimental JJK APK
         shell: bash
