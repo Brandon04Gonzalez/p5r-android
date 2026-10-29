@@ -508,7 +508,7 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
                 // Dump nearby guest instructions around the first return address in main. The current NCE log
                 // shows main calling exit(), but not the branch/condition that selected that path. This lets the
                 // next device log identify the actual startup failure without guessing at SDK import ABIs.
-                if (i < 4 && describe(ret).rfind("main+", 0) == 0) {
+                if (describe(ret).rfind("main+", 0) == 0) {
                     for (int j = -12; j <= 3; ++j) {
                         const uint64_t at = ret + int64_t(j) * 4;
                         log("svcExitProcess: caller_insn %s %08x", describe(at).c_str(), ld<uint32_t>(at));
