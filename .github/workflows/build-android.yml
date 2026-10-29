@@ -49,7 +49,7 @@ jobs:
       - name: Install Android SDK and NDK
         uses: android-actions/setup-android@v3
         with:
-          packages: "ndk;28.2.13676358"
+          packages: "ndk;28.2.13676358, platforms;android-35"
 
       - name: Compile importer for Android ARM64
         shell: bash
@@ -145,3 +145,11 @@ jobs:
           path: build-android-jjk/libjjk.so
           if-no-files-found: error
           retention-days: 3
+
+      - name: Compile JJK Android launcher Java
+        run: |
+          mkdir -p build-jjk-java
+          javac -encoding UTF-8 -source 8 -target 8 \
+            -bootclasspath "$ANDROID_HOME/platforms/android-35/android.jar" \
+            -d build-jjk-java \
+            $(find games/jjk/java -name '*.java' -print)
