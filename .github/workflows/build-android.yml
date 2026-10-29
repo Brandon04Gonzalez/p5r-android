@@ -155,7 +155,7 @@ jobs:
         run: |
           set -euo pipefail
           FILE=games/jjk/java/io/github/jjkport/Launcher.java
-          COUNT=$(grep -Ec '^[[:space:]]*(public|protected|private)?[[:space:]]*(static[[:space:]]+)?String[[:space:]]+wrongBuild[[:space:]]*\\(' "$FILE" || true)
+          COUNT=$(grep -Ec '^[[:space:]]*(public|protected|private)?[[:space:]]*(static[[:space:]]+)?String[[:space:]]+wrongBuild[[:space:]]*\(' "$FILE" || true)
           echo "wrongBuild declarations: $COUNT"
           test "$COUNT" -eq 1
 
