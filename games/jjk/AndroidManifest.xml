@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.jjkport"
-    android:versionCode="1"
-    android:versionName="0.1.0">
+    android:versionCode="2"
+    android:versionName="0.2.0">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -20,7 +20,8 @@
         android:debuggable="true"
         android:isGame="true"
         android:appCategory="game"
-        android:largeHeap="true">
+        android:largeHeap="true"
+        android:theme="@style/Fullscreen">
         <activity
             android:name=".Launcher"
             android:exported="true"
@@ -48,7 +49,8 @@
             android:name="android.app.NativeActivity"
             android:exported="true"
             android:screenOrientation="sensorLandscape"
-            android:configChanges="orientation|keyboardHidden|screenSize">
+            android:resizeableActivity="false"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density">
             <meta-data android:name="android.app.lib_name" android:value="jjk" />
         </activity>
     </application>
