@@ -100,6 +100,16 @@ jobs:
           git clone --depth 1 --branch v1.4.357 https://github.com/KhronosGroup/Vulkan-Headers.git private/third_party/Vulkan-Headers-1.4.357
           ln -s include private/third_party/Vulkan-Headers-1.4.357/Include
 
+      - name: Build Android ARM64 SPIR-V shader harness
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p private/third_party/ryubing
+          curl -fsSL https://codeberg.org/Software_arch/Ryubing/archive/a82350bb77.tar.gz -o /tmp/ryubing.tar.gz
+          tar -xzf /tmp/ryubing.tar.gz -C private/third_party/ryubing --strip-components=1
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh games/p5r/tools/build_harness_android.sh
+          test -s private/build/spirv_harness_android/libspirvharness.so
+
       - name: Configure Android ARM64 native execution build
         env:
           VULKAN_SDK: ${{ github.workspace }}/private/third_party/Vulkan-Headers-1.4.357
@@ -178,6 +188,7 @@ jobs:
           mkdir -p "$OUT/lib/arm64-v8a" "$OUT/gen" "$OUT/classes" "$OUT/dex" "$OUT/stage"
           cp build-android-jjk/libjjk.so "$OUT/lib/arm64-v8a/libjjk.so"
           cp build-android-jjk/libjjkimport.so "$OUT/lib/arm64-v8a/libjjkimport.so"
+          cp private/build/spirv_harness_android/libspirvharness.so "$OUT/lib/arm64-v8a/libspirvharness.so"
           "$BT/aapt2" compile --dir android/res -o "$OUT/res.zip"
           "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest games/jjk/AndroidManifest.xml --java "$OUT/gen" --min-sdk-version 29 --target-sdk-version 35 "$OUT/res.zip"
           find games/jjk/java "$OUT/gen" -name '*.java' > "$OUT/sources.txt"
