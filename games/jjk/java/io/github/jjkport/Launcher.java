@@ -126,7 +126,7 @@ public class Launcher extends Activity {
     // The game is launched through NCE; JJK-specific shader preparation is not implemented yet.
     // JJK has no game-specific shader importer yet. Permit direct NCE launch from the selected dump;
     // the first runtime log will establish whether shader translation is the next blocker.
-    boolean prepared() { return true;
+    boolean prepared() { return new File(dataDir(), "exefs/main").canRead();
     }
 
     String displayName(Uri uri) {
@@ -195,7 +195,10 @@ public class Launcher extends Activity {
     }
 
     void prepare() {
-        tell("JJK preparation unavailable", "The JJK-specific shader importer is not implemented yet. Select the base game and launch to collect a runtime log.");
+        Intent i = new Intent(this, ImportActivity.class);
+        i.putExtra(ImportActivity.EXTRA_URI, gameUri());
+        i.putExtra(ImportActivity.EXTRA_NAME, gameName());
+        startActivityForResult(i, PREPARE);
     }
 
     // The runtime reads the game from this descriptor (same process: the NativeActivity runs in the launcher's).
@@ -251,7 +254,10 @@ public class Launcher extends Activity {
         return new File(dataDir(), "exefs/main").canRead() || new File(dataDir(), "analysis/main.bin").canRead();
     }
 
-    // The build ID the port is made for (Jujutsu Kaisen Cursed Clash 1.0.0, the base game): the start of exefs/main's module ID
+    // No JJK build ID has been confirmed yet. Do not apply P5R's version check to this title.
+    String wrongBuild() { return null; }
+
+
     // (NSO header +0x40). The native build refuses another (runtime main.cpp); say so here instead of closing.
     static final String BUILD_ID = "708BCACA873EA32B";
 
