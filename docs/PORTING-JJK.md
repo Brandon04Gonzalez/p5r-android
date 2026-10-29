@@ -1,6 +1,6 @@
 # Jujutsu Kaisen: Cursed Clash Android Port Investigation
 
-Status: reconnaissance and local metadata inspection only. This branch does not claim that the game is supported or bootable.
+Status: experimental Android importer/launcher wiring plus metadata inspection. This branch does not claim that the game is supported or bootable.
 
 ## Target
 
@@ -39,6 +39,19 @@ Add `-TitleKeys "$HOME\title.keys"` only if the local dump requires a separate t
 The NSO header contains a 32-byte Build ID field. The current shared runtime's `main_build_id` check uses the first 8 bytes, represented as 16 hexadecimal characters. The full field is recorded in the report for traceability; do not copy the full 64-character field into `games/jjk/game.cpp`.
 
 A successful inspection only proves that the shared importer can open the selected title and read its executable metadata. It does **not** prove that JJK boots, that its renderer matches the shared NVN runtime, or that shader translation works.
+
+## Android test target status
+
+The JJK target now has its own Android manifest and launcher, plus a separate `libjjkinspector.so` built from the shared importer. The launcher can perform basic NSP/XCI header checks, inspect the detected title ID and NSO Build ID, and import ExeFS/RomFS into app-private storage. During import it reports the current importer phase, progress counters, and current output item. The runtime also rejects a selected game whose title ID does not match `games/jjk/game.cpp`.
+
+Build the experimental native-execution APK from a Windows developer shell:
+
+```powershell
+. .\dev.ps1
+android\build_apk.ps1 -Game jjk -Nce
+```
+
+This is deliberately the only allowed JJK build mode until generated JJK modules exist. It is **not a claim that the game boots**. The JNI importer, Android NDK build, and device startup still need validation. JJK's executable imports, NPDM/system-resource metadata, guest services, renderer, and shader compatibility remain unverified. Use a base-game dump and keys you are authorized to use. Do not commit dumps, keys, or extracted assets.
 
 ## Existing reusable pieces
 
