@@ -37,9 +37,10 @@ placed in `Internal storage/Persona 5 Royal/mods/<ModName>/romfs/...` (see [docs
 
 ### Options
 
-Text language, resolution (720p, or 1080p for stronger phones), interface resolution, graphics (texture detail),
-frame rate cap (30, or 60 experimental), shadows, FPS counter, touch controls (show, size, opacity, and moving them),
-and **Icon → Choose a picture**: a home screen shortcut with a picture of your own (Android does not let an app
+Text language, resolution (360p, 480p, 720p, or 1080p), interface resolution, graphics (texture detail), frame rate
+cap (30, or 60 experimental), shadows, FPS counter, touch controls (show, size, opacity, and moving them), and
+**Fullscreen (stretch)**: fill the display when enabled, or preserve the game's aspect ratio without cropping when
+disabled. **Icon → Choose a picture** creates a home screen shortcut with your image (Android does not let an app
 change its own icon in the app drawer, but the shortcut looks and works like one).
 
 ## Requirements
