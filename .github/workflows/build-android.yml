@@ -1,3 +1,4 @@
+# Rebuild after repository signing secrets are configured.
 name: Android Runtime Build Check
 
 on:
