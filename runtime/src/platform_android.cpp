@@ -699,6 +699,8 @@ extern "C" void android_main(android_app* app) {
     }
     // The picked folder wins over the app's own one; else the own one (adb push), else Internal storage/<title>.
     g_root = !chosen.empty() && has_data(chosen) ? chosen : has_data(own) ? own : shared;
+    // Create a visible log immediately, before the guest thread or renderer starts.
+    nx::plat::log_line("JJK runtime logger initialized; startup reached data-root selection");
     // config.txt's NX_* lines become environment variables (the NVN layer reads its switches with getenv), without
     // overriding a variable already set. Android defaults: handheld (720p, the lighter GPU load).
     {
