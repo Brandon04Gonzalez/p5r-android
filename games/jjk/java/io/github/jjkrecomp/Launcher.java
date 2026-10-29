@@ -514,21 +514,12 @@ public final class Launcher extends Activity {
                 .setPositiveButton("OK", null).show();
             return;
         }
+        // The shared runtime reads the selected NSP/XCI in place via NX_GAME_FD.
+        // Importing/extracting ExeFS first is not required for native execution.
         File data = new File(getFilesDir(), "private/jjk");
-        File legacy = new File(getFilesDir(), "jjk-import");
-        if (!new File(data, "exefs/main").isFile() && new File(legacy, "exefs/main").isFile()) {
-            File parent = data.getParentFile();
-            if (parent != null) parent.mkdirs();
-            if (!legacy.renameTo(data)) {
-                new AlertDialog.Builder(this).setTitle("Imported data not ready")
-                    .setMessage("Could not move the existing import into the runtime data folder.")
-                    .setPositiveButton("OK", null).show();
-                return;
-            }
-        }
-        if (!new File(data, "exefs/main").isFile() || !new File(data, "exefs/sdk").isFile()) {
-            new AlertDialog.Builder(this).setTitle("Import required")
-                .setMessage("The imported ExeFS main/sdk files were not found. Tap Import game data first.")
+        if (!data.isDirectory() && !data.mkdirs()) {
+            new AlertDialog.Builder(this).setTitle("Runtime data unavailable")
+                .setMessage("Could not create the private JJK runtime data directory.")
                 .setPositiveButton("OK", null).show();
             return;
         }
@@ -568,8 +559,8 @@ public final class Launcher extends Activity {
             Os.setenv("NX_KEYS", keys.getAbsolutePath(), true);
             if (titleKeys.isFile()) Os.setenv("NX_TITLE_KEYS", titleKeys.getAbsolutePath(), true);
             else Os.unsetenv("NX_TITLE_KEYS");
-            // NativeActivity's runtime reads data_root.txt from internalDataPath, then probes
-            // <root>/exefs/main. Point it at the import directory instead of an empty shared folder.
+            // Runtime reads the selected NSP/XCI directly through NX_GAME_FD. This folder is only
+            // the runtime's writable data root (config, saves, and optional caches); no extracted ExeFS is required.
             File rootConfig = new File(getFilesDir(), "data_root.txt");
             try (FileOutputStream rootOut = new FileOutputStream(rootConfig, false)) {
                 rootOut.write(data.getAbsolutePath().getBytes(java.nio.charset.StandardCharsets.UTF_8));
