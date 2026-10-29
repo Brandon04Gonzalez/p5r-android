@@ -260,7 +260,23 @@ bool make_dirs(const std::string& path) {
     return !ec;
 }
 
-void log_line(const char* line) { __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line); }
+void log_line(const char* line) {
+    __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line);
+
+    // Keep a persistent copy in the selected game data directory so startup
+    // failures can be inspected on-device even when the game renders black.
+    static std::mutex file_log_mutex;
+    std::lock_guard<std::mutex> lock(file_log_mutex);
+    const std::string root = !g_root.empty()
+        ? g_root
+        : std::string("/storage/emulated/0/") + nx::game::kInfo.title;
+    const std::string path = root + "/runtime.log";
+    std::ofstream out(path, std::ios::out | std::ios::app);
+    if (out) {
+        out << line << '\\n';
+        out.flush();
+    }
+}
 
 std::string data_root() { return g_root; }
 
