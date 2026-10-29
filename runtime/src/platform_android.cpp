@@ -469,8 +469,8 @@ void write_crash_marker(int sig) {
 }
 
 void crash(int sig, siginfo_t* info, void* uc) {
-    write_crash_marker(sig);
     if ((sig == SIGSEGV || sig == SIGBUS) && nx::plat::write_watch_fault(info->si_addr)) return;  // write_watch.cpp
+    write_crash_marker(sig);
     nx::log("CRASH: signal %d, fault address %p", sig, info->si_addr);
 #if NX_NCE
     // In the game's own code: its registers are in the signal's context, not in the thread's CPU.
