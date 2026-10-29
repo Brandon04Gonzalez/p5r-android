@@ -20,7 +20,7 @@ public final class Launcher extends Activity {
     private static final int PICK_GAME = 1, PICK_KEYS = 2, PICK_ICON = 3;
     private static final int BG = Color.rgb(20, 4, 6), RED = Color.rgb(230, 0, 18);
     private SharedPreferences prefs;
-    private TextView gameStatus, gameValue, keysValue, iconValue, resolutionValue, languageValue;
+    private TextView gameStatus, gameValue, keysValue, iconValue;
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
 
@@ -93,19 +93,6 @@ public final class Launcher extends Activity {
         chooseIcon.setOnClickListener(v -> pick(PICK_ICON));
         root.addView(row("Icon", chooseIcon));
         root.addView(iconValue, new LinearLayout.LayoutParams(-1, dp(22)));
-
-        languageValue = text("Automatic (device language)", 14, Color.WHITE, false);
-        Button language = button("Automatic (device language)");
-        language.setOnClickListener(v -> new AlertDialog.Builder(this)
-            .setTitle("Text and subtitle language")
-            .setItems(new String[]{"Automatic (device language)", "English", "Japanese"}, (d, which) -> {
-                String[] values = {"auto", "en", "ja"};
-                String[] labels = {"Automatic (device language)", "English", "Japanese"};
-                prefs.edit().putString("language", values[which]).apply();
-                languageValue.setText(labels[which]);
-                language.setText(labels[which]);
-            }).show());
-        root.addView(row("Text and subtitle language", language));
 
         addSetting(root, "Text and subtitle language", "language",
             new String[]{"Automatic (device language)", "English", "Japanese"},
