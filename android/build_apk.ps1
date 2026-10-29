@@ -22,7 +22,12 @@ $out = if ($Nce) { "$priv\apk_nce" } else { "$priv\apk" }
 $build = if ($Nce) { "$priv\ba_nce" } else { "$priv\ba" }
 $nceFlag = if ($Nce) { "ON" } else { "OFF" }
 
-if (-not (Test-Path "$build\build.ninja")) {
+# JJK currently has no recompiled main/sdk modules. Only the experimental native-execution target is buildable.
+if ($Game -eq "jjk" -and -not $Nce) {
+    throw "JJK is an experimental NX_NCE target; use android\build_apk.ps1 -Game jjk -Nce. This builds a test APK, not a confirmed playable port."
+}
+
+if ($Game -eq "jjk" -or -not (Test-Path "$build\build.ninja")) {
     cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$ndk\build\cmake\android.toolchain.cmake" `
         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static "-DNX_GAME=$Game" "-DNX_NCE=$nceFlag"
 }
@@ -41,6 +46,19 @@ if ($Nce -and $Game -eq "p5r") {
 }
 cmake --build $build --target @targets
 if ($LASTEXITCODE) { throw "native build failed" }
+
+# The JJK launcher calls a separate JNI library for safe metadata inspection and generic NSP/XCI extraction.
+# Keep it separate from the game runtime so the importer's JNI symbols cannot collide with NativeActivity.
+if ($Game -eq "jjk") {
+    $inspectorBuild = "$priv\ba_inspector"
+    if ($Game -eq "jjk" -or -not (Test-Path "$inspectorBuild\build.ninja")) {
+        cmake -S "$root\games\jjk\import" -B $inspectorBuild -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$ndk\build\cmake\android.toolchain.cmake" `
+            -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static
+    }
+    cmake --build $inspectorBuild --target jjkinspector
+    if ($LASTEXITCODE) { throw "JJK inspector/importer build failed" }
+    $extraLibs += "$inspectorBuild\libjjkinspector.so"
+}
 
 Remove-Item -Recurse -Force $out -ErrorAction SilentlyContinue
 New-Item -ItemType Directory -Force "$out\lib\arm64-v8a", "$out\res" | Out-Null

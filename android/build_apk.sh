@@ -42,7 +42,8 @@ fi
 if [ "$skip_native" = 0 ] && [ ! -f "$build/build.ninja" ]; then
     cmake -S "$root" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
-        -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static -DNX_GAME="$game"
+        -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static -DNX_GAME="$game" \
+        -DNX_NCE="${NX_NCE:-OFF}"
 fi
 if [ "$skip_native" = 0 ]; then cmake --build "$build" --target "$game"; fi
 

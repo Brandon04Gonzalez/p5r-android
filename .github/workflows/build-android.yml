@@ -1,0 +1,241 @@
+# Build and package an experimental Android APK without repository signing secrets.
+name: Android Runtime Build Check
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "CMakeLists.txt"
+      - "runtime/**"
+      - "android/wonder/importer/**"
+      - "games/p5r/**"
+      - "games/jjk/**"
+      - ".github/workflows/build-android.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-tests:
+    name: Host runtime tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++
+
+      - name: Configure tests
+        run: cmake -S . -B build -G Ninja -DNX_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build build
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+  android-importer-cli:
+    name: Android ARM64 game-inspection CLI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;28.2.13676358"
+
+      - name: Compile importer for Android ARM64
+        shell: bash
+        run: |
+          set -euxo pipefail
+          NDK="$ANDROID_NDK_HOME"
+          CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          "$CXX" --target=aarch64-linux-android29 -std=c++17 -O2 -static-libstdc++ \
+            -Wall -Wextra \
+            -o nximport-arm64 \
+            android/wonder/importer/nximport_cli.cpp \
+            android/wonder/importer/nximport.cpp \
+            android/wonder/importer/nxcrypto.cpp
+          file nximport-arm64
+          readelf -h nximport-arm64 | grep -E 'Class:|Machine:'
+
+      - name: Upload Android importer CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: jjk-inspector-android-arm64
+          path: nximport-arm64
+          if-no-files-found: error
+          retention-days: 7
+
+  android-nce:
+    name: Android ARM64 runtime compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;28.2.13676358"
+
+      - name: Install CMake and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build git
+
+      - name: Get Vulkan headers
+        run: |
+          mkdir -p private/third_party
+          git clone --depth 1 --branch v1.4.357 https://github.com/KhronosGroup/Vulkan-Headers.git private/third_party/Vulkan-Headers-1.4.357
+          ln -s include private/third_party/Vulkan-Headers-1.4.357/Include
+
+      - name: Configure Android ARM64 native execution build
+        env:
+          VULKAN_SDK: ${{ github.workspace }}/private/third_party/Vulkan-Headers-1.4.357
+        run: |
+          cmake -S . -B build-android -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_STL=c++_static \
+            -DNX_GAME=p5r \
+            -DNX_NCE=ON \
+            -DNX_RELEASE=ON
+
+      - name: Compile Android native library
+        run: cmake --build build-android --target p5r --parallel 2
+
+      - name: Upload native library for diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: p5r-android-arm64-runtime-check
+          path: build-android/libp5r.so
+          if-no-files-found: error
+          retention-days: 3
+
+  jjk-metadata-check:
+    name: JJK target metadata compile check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile JJK game metadata
+        run: g++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only -Iruntime/include games/jjk/game.cpp
+
+  android-jjk-nce:
+    name: Android ARM64 JJK runtime compile
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;28.2.13676358"
+
+      - name: Install APK packaging tools
+        shell: bash
+        run: |
+          set -euxo pipefail
+          SDKMANAGER="$(find "$ANDROID_HOME/cmdline-tools" -path "*/bin/sdkmanager" -type f | sort -V | tail -n 1)"
+          "$SDKMANAGER" "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Install CMake and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build git
+
+      - name: Get Vulkan headers
+        run: |
+          mkdir -p private/third_party
+          git clone --depth 1 --branch v1.4.357 https://github.com/KhronosGroup/Vulkan-Headers.git private/third_party/Vulkan-Headers-1.4.357
+          ln -s include private/third_party/Vulkan-Headers-1.4.357/Include
+
+      - name: Configure JJK Android ARM64 native execution build
+        env:
+          VULKAN_SDK: ${{ github.workspace }}/private/third_party/Vulkan-Headers-1.4.357
+        run: |
+          cmake -S . -B build-jjk-android -G Ninja -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static -DNX_GAME=jjk -DNX_NCE=ON -DNX_RELEASE=ON
+
+      - name: Compile JJK native library
+        run: cmake --build build-jjk-android --target jjk --parallel 2
+
+      - name: Upload JJK native library
+        uses: actions/upload-artifact@v4
+        with:
+          name: jjk-android-arm64-runtime
+          path: build-jjk-android/libjjk.so
+          if-no-files-found: error
+          retention-days: 7
+
+      - name: Build JJK JNI importer with the same CMake target as local APK builds
+        shell: bash
+        run: |
+          set -euxo pipefail
+          cmake -S games/jjk/import -B build-jjk-inspector -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_STL=c++_static
+          cmake --build build-jjk-inspector --target jjkinspector --parallel 2
+          cp build-jjk-inspector/libjjkinspector.so libjjkinspector.so
+          file libjjkinspector.so
+          readelf -h libjjkinspector.so | grep -E 'Class:|Machine:'
+          nm -D --defined-only libjjkinspector.so | grep -F 'Java_io_github_jjkrecomp_Launcher_inspectNative'
+          nm -D --defined-only libjjkinspector.so | grep -F 'Java_io_github_jjkrecomp_Launcher_importNative'
+          nm -D --defined-only libjjkinspector.so | grep -F 'Java_io_github_jjkrecomp_Launcher_importProgress'
+          readelf -d libjjkinspector.so | grep -E "SONAME|NEEDED" || true
+
+      - name: Package experimental JJK APK
+        shell: bash
+        run: |
+          set -euxo pipefail
+          BT="$ANDROID_HOME/build-tools/35.0.0"
+          PLATFORM="$ANDROID_HOME/platforms/android-35/android.jar"
+          mkdir -p apk/lib/arm64-v8a apk/stage/gen apk/stage/classes
+          cp build-jjk-android/libjjk.so apk/lib/arm64-v8a/libjjk.so
+          cp libjjkinspector.so apk/lib/arm64-v8a/libjjkinspector.so
+          if readelf -d apk/lib/arm64-v8a/libjjkinspector.so | grep -F 'libc++_shared.so'; then
+            echo "::error::JJK inspector unexpectedly depends on libc++_shared.so; check static C++ runtime linking."
+            exit 1
+          fi
+          "$BT/aapt2" compile --dir android/res -o apk/res.zip
+          "$BT/aapt2" link -o apk/base.apk -I "$PLATFORM" --manifest games/jjk/AndroidManifest.xml --java apk/stage/gen --min-sdk-version 29 --target-sdk-version 35 apk/res.zip
+          find games/jjk/java apk/stage/gen -name '*.java' > apk/stage/sources.txt
+          javac -nowarn -encoding UTF-8 --release 11 -cp "$PLATFORM" -d apk/stage/classes @apk/stage/sources.txt
+          (cd apk/stage/classes && find . -name '*.class' > ../classes.txt && "$BT/d8" --release --min-api 29 --lib "$PLATFORM" --output .. @../classes.txt)
+          (cd apk/stage && zip -q -j ../base.apk classes.dex)
+          (cd apk && zip -q base.apk lib/arm64-v8a/libjjk.so lib/arm64-v8a/libjjkinspector.so)
+          "$BT/zipalign" -f -p 4 apk/base.apk apk/aligned.apk
+          # Android requires APKs to be signed for installation. Generate a disposable CI key automatically;
+          # no repository secrets or user setup are needed. Each run gets a different signing identity.
+          keytool -genkeypair -noprompt -keystore apk/ci-test.keystore -storepass android -keypass android \
+            -alias jjk-ci-test -keyalg RSA -keysize 2048 -validity 7 \
+            -dname "CN=JJK Runtime CI Test, OU=Experimental, O=Local Test, C=ID"
+          "$BT/apksigner" sign --ks apk/ci-test.keystore --ks-pass pass:android --ks-key-alias jjk-ci-test --key-pass pass:android --out apk/JJK-Runtime-Test.apk apk/aligned.apk
+          "$BT/apksigner" verify --verbose apk/JJK-Runtime-Test.apk
+          "$BT/aapt2" dump badging apk/JJK-Runtime-Test.apk
+          "$BT/aapt2" dump permissions apk/JJK-Runtime-Test.apk | tee apk/permissions.txt
+          grep -F "android.permission.MANAGE_EXTERNAL_STORAGE" apk/permissions.txt
+          unzip -l apk/JJK-Runtime-Test.apk
+
+      - name: Upload experimental JJK APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jjk-experimental-apk
+          path: apk/JJK-Runtime-Test.apk
+          if-no-files-found: error
+          retention-days: 7

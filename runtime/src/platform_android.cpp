@@ -260,7 +260,17 @@ bool make_dirs(const std::string& path) {
     return !ec;
 }
 
-void log_line(const char* line) { __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line); }
+void log_line(const char* line) {
+    __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line);
+    // Persist native boot/crash diagnostics so a crash that closes NativeActivity is not a silent blank screen.
+    static std::mutex file_log_mutex;
+    std::lock_guard<std::mutex> lock(file_log_mutex);
+    if (g_app && g_app->activity && g_app->activity->externalDataPath) {
+        std::ofstream out(std::string(g_app->activity->externalDataPath) + "/jjk-runtime.log",
+                          std::ios::out | std::ios::app);
+        if (out) out << line << '\\n';
+    }
+}
 
 std::string data_root() { return g_root; }
 
@@ -466,6 +476,7 @@ void crash(int sig, siginfo_t* info, void* uc) {
 }
 
 void game_thread(void*) {
+    nx::log("JJK startup: entering nx::boot()");
     try {
         nx::boot();
     } catch (const nx::LongJmp& j) {
@@ -658,6 +669,34 @@ extern "C" void android_main(android_app* app) {
     }
     // The picked folder wins over the app's own one; else the own one (adb push), else Internal storage/<title>.
     g_root = !chosen.empty() && has_data(chosen) ? chosen : has_data(own) ? own : shared;
+#if NX_NCE
+    // Never enter the guest runtime without the user's extracted executable. Previously this
+    // reached nx::boot(), which aborted and made the app appear to crash immediately.
+    if (!has_data(g_root)) {
+        const std::string message = std::string("JJK dump missing: copy ExeFS main to ") + g_root + kDataProbe;
+        __android_log_print(ANDROID_LOG_ERROR, nx::game::kInfo.id, "%s", message.c_str());
+        JNIEnv* env = nullptr;
+        if (app->activity->vm->AttachCurrentThread(&env, nullptr) == JNI_OK && env) {
+            jclass toast = env->FindClass("android/widget/Toast");
+            jclass text = env->FindClass("java/lang/String");
+            (void)text;
+            jmethodID make = toast ? env->GetStaticMethodID(toast, "makeText",
+                "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;") : nullptr;
+            jmethodID show = toast ? env->GetMethodID(toast, "show", "()V") : nullptr;
+            if (make && show) {
+                jstring msg = env->NewStringUTF(message.c_str());
+                jobject t = env->CallStaticObjectMethod(toast, make, app->activity->clazz, msg, 1);
+                if (t) env->CallVoidMethod(t, show);
+                if (env->ExceptionCheck()) env->ExceptionClear();
+                if (t) env->DeleteLocalRef(t);
+                env->DeleteLocalRef(msg);
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+        ANativeActivity_finish(app->activity);
+        return;
+    }
+#endif
     // config.txt's NX_* lines become environment variables (the NVN layer reads its switches with getenv), without
     // overriding a variable already set. Android defaults: handheld (720p, the lighter GPU load).
     {
@@ -705,6 +744,10 @@ extern "C" void android_main(android_app* app) {
 
     nx::log("%s (Switch recomp) on Android, data at %s (own folder %s: %s)", nx::game::kInfo.title, g_root.c_str(),
             own.c_str(), has_data(own) ? "has the data" : kDataProbe);
+    nx::log("JJK diagnostics: main=%s sdk=%s; log file=%s/jjk-runtime.log",
+            access((g_root + "/exefs/main").c_str(), R_OK) == 0 ? "readable" : "missing",
+            access((g_root + "/exefs/sdk").c_str(), R_OK) == 0 ? "readable" : "missing",
+            own.c_str());
     static bool started = false;
     for (;;) {
         int events;

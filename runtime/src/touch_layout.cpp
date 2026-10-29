@@ -76,9 +76,29 @@ struct Layout {
     float stick_x, stick_y;  // where the stick's ring is drawn at rest (radius kStickRing)
 };
 
+// Jujutsu Kaisen: Cursed Clash, landscape. Start with the familiar Switch face-button diamond,
+// shoulder buttons and left stick. This is a provisional layout; confirm action mapping in-game.
+const Named kJJK[] = {
+    {"A", {0.940f, 0.66f, 0.068f, kA, touch_label(kGlyphA)}},
+    {"B", {0.875f, 0.80f, 0.068f, kB, touch_label(kGlyphB)}},
+    {"X", {0.875f, 0.52f, 0.068f, kX, touch_label(kGlyphX)}},
+    {"Y", {0.810f, 0.66f, 0.068f, kY, touch_label(kGlyphY)}},
+    {"R", {0.945f, 0.08f, 0.052f, kR, touch_label(kGlyphR)}},
+    {"ZR", {0.945f, 0.24f, 0.052f, kZR, touch_label(kGlyphZ, kGlyphR)}},
+    {"L", {0.055f, 0.08f, 0.052f, kL, touch_label(kGlyphL)}},
+    {"ZL", {0.055f, 0.24f, 0.052f, kZL, touch_label(kGlyphZ, kGlyphL)}},
+    {"MINUS", {0.440f, 0.07f, 0.045f, kMinus, touch_label(kGlyphMinus)}},
+    {"PLUS", {0.560f, 0.07f, 0.045f, kPlus, touch_label(kGlyphPlus)}},
+    {"UP", {0.135f, 0.31f, 0.048f, kUp, touch_label(kGlyphUp)}},
+    {"DOWN", {0.135f, 0.49f, 0.048f, kDown, touch_label(kGlyphDown)}},
+    {"LEFT", {0.085f, 0.40f, 0.048f, kLeft, touch_label(kGlyphLeft)}},
+    {"RIGHT", {0.185f, 0.40f, 0.048f, kRight, touch_label(kGlyphRight)}},
+};
+
 const Layout kLayouts[] = {
     {"wonder", kWonder, std::size(kWonder), false, kY, 0.15f, 0.72f},
     {"p5r", kP5R, std::size(kP5R), true, 0, 0.15f, 0.76f},
+    {"jjk", kJJK, std::size(kJJK), true, 0, 0.15f, 0.76f},
 };
 
 const Layout* layout() {
