@@ -37,7 +37,6 @@ jobs:
       - name: Run tests
         run: ctest --test-dir build --output-on-failure
 
-
   android-importer-cli:
     name: Android ARM64 game-inspection CLI
     runs-on: ubuntu-24.04
@@ -150,6 +149,15 @@ jobs:
             build-android-jjk/libjjkimport.so
           if-no-files-found: error
           retention-days: 3
+
+      - name: Check launcher method declarations
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE=games/jjk/java/io/github/jjkport/Launcher.java
+          COUNT=$(grep -Ec '^[[:space:]]*(public|protected|private)?[[:space:]]*(static[[:space:]]+)?String[[:space:]]+wrongBuild[[:space:]]*\\(' "$FILE" || true)
+          echo "wrongBuild declarations: $COUNT"
+          test "$COUNT" -eq 1
 
       - name: Compile JJK Android launcher Java
         run: |
