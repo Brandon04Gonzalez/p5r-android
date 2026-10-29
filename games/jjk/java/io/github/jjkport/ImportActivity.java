@@ -17,6 +17,8 @@ import android.widget.ProgressBar;
 import android.widget.TextView;
 
 import java.io.File;
+import java.io.FileOutputStream;
+import java.io.IOException;
 
 /**
  * Prepares the game once (its own process, ":import": the shader translator's runtime never shares the game's): checks
@@ -87,6 +89,44 @@ public class ImportActivity extends Activity {
         if (!running) super.onBackPressed();
     }
 
+    /**
+     * Validate the import directory before expensive extraction. A stale journal can be left
+     * unwritable on Android's shared-storage filesystem, even when its parent is accessible.
+     */
+    static void prepareImportDirectory(File data) throws IOException {
+        if (!data.isDirectory() && !data.mkdirs() && !data.isDirectory()) {
+            throw new IOException("cannot create data folder: " + data.getAbsolutePath());
+        }
+        File meta = new File(data, ".import");
+        if (!meta.isDirectory() && !meta.mkdirs() && !meta.isDirectory()) {
+            throw new IOException("cannot create import folder: " + meta.getAbsolutePath());
+        }
+
+        File journal = new File(meta, "journal.tsv");
+        if (journal.exists()) {
+            try (FileOutputStream ignored = new FileOutputStream(journal, true)) {
+                // Keep a writable journal so interrupted imports can resume.
+            } catch (IOException staleJournal) {
+                if (!journal.delete()) {
+                    throw new IOException("cannot replace stale import journal: " + journal.getAbsolutePath()
+                            + " (" + staleJournal.getMessage() + ")");
+                }
+            }
+        }
+
+        File probe = new File(meta, ".write-test-" + android.os.Process.myPid());
+        try (FileOutputStream out = new FileOutputStream(probe, false)) {
+            out.write(1);
+            out.flush();
+            out.getFD().sync();
+        } catch (IOException e) {
+            throw new IOException("Android cannot write to import folder " + meta.getAbsolutePath()
+                    + ": " + e.getMessage() + ". Grant All files access or choose a writable storage location.", e);
+        } finally {
+            probe.delete();
+        }
+    }
+
     void start() {
         final Uri uri = Uri.parse(getIntent().getStringExtra(EXTRA_URI));
         final String name = getIntent().getStringExtra(EXTRA_NAME);
@@ -99,11 +139,15 @@ public class ImportActivity extends Activity {
             public void run() {
                 int rc;
                 String error = "";
-                try (ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "r")) {
-                    int jobs = Math.max(2, Runtime.getRuntime().availableProcessors());
-                    rc = Importer.run(pfd.getFd(), name, keys.getPath(), titleKeys.exists() ? titleKeys.getPath() : "",
-                            data.getPath(), work.getPath(), jobs);
-                    if (rc != 0) error = Importer.error();
+                try {
+                    prepareImportDirectory(data);
+                    try (ParcelFileDescriptor pfd = getContentResolver().openFileDescriptor(uri, "r")) {
+                        if (pfd == null) throw new IOException("Android could not open the selected game file");
+                        int jobs = Math.max(2, Runtime.getRuntime().availableProcessors());
+                        rc = Importer.run(pfd.getFd(), name, keys.getPath(), titleKeys.exists() ? titleKeys.getPath() : "",
+                                data.getPath(), work.getPath(), jobs);
+                        if (rc != 0) error = Importer.error();
+                    }
                 } catch (Exception e) {
                     rc = 1;
                     error = String.valueOf(e.getMessage());
