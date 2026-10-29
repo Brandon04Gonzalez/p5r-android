@@ -39,6 +39,10 @@ if ($Nce -and $Game -eq "p5r") {
     $targets += "p5rimport"
     $extraLibs += @("$build\libp5rimport.so", $harness)
 }
+if ($Nce -and $Game -eq "jjk") {
+    $targets += "jjkimport"
+    $extraLibs += "$build\libjjkimport.so"
+}
 cmake --build $build --target @targets
 if ($LASTEXITCODE) { throw "native build failed" }
 
