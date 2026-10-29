@@ -20,6 +20,8 @@ import android.graphics.Color;
 import android.graphics.Typeface;
 import android.net.Uri;
 import android.os.Bundle;
+import android.os.Handler;
+import android.os.Looper;
 import android.view.Gravity;
 import android.view.View;
 import android.view.WindowManager;
@@ -29,15 +31,40 @@ import android.widget.ScrollView;
 import android.widget.TextView;
 
 public final class Launcher extends Activity {
-    private static final int PICK_GAME = 1, PICK_KEYS = 2, PICK_ICON = 3;
+    private static final int PICK_GAME = 1, PICK_KEYS = 2, PICK_ICON = 3, PICK_TITLE_KEYS = 4;
     private static final int BG = Color.rgb(20, 4, 6), RED = Color.rgb(230, 0, 18);
     private SharedPreferences prefs;
     private static boolean inspectorLoaded;
     private static String inspectorLoadError = "not attempted";
     static { try { System.loadLibrary("jjkinspector"); inspectorLoaded = true; inspectorLoadError = ""; } catch (UnsatisfiedLinkError e) { inspectorLoaded = false; inspectorLoadError = e.getMessage() == null ? e.toString() : e.getMessage(); android.util.Log.e("JJKLauncher", "Native inspector load failed", e); } }
-    private native String inspectNative(int gameFd, String gameName, int keysFd);
-    private native String importNative(int gameFd, String gameName, int keysFd, String outDir);
-    private TextView gameStatus, gameValue, keysValue, iconValue;
+    private native String inspectNative(int gameFd, String gameName, int keysFd, int titleKeysFd);
+    private native String importNative(int gameFd, String gameName, int keysFd, int titleKeysFd, String outDir);
+    private native String importProgress();
+    private final Handler importHandler = new Handler(Looper.getMainLooper());
+    private volatile boolean importRunning;
+    private final Runnable importProgressTicker = new Runnable() {
+        @Override public void run() {
+            if (!importRunning) return;
+            try {
+                String raw = importProgress();
+                String[] fields = raw == null ? new String[0] : raw.split("\\|", 4);
+                if (fields.length == 4) {
+                    long done = 0, total = 0;
+                    try { done = Long.parseLong(fields[1]); total = Long.parseLong(fields[2]); } catch (NumberFormatException ignored) {}
+                    String percent = total > 0 ? String.format(java.util.Locale.ROOT, " (%.1f%%)", Math.min(100.0, 100.0 * done / total)) : "";
+                    gameStatus.setText("Import phase: " + fields[0] + percent
+                        + "\nProgress: " + android.text.format.Formatter.formatFileSize(Launcher.this, done)
+                        + (total > 0 ? " / " + android.text.format.Formatter.formatFileSize(Launcher.this, total) : "")
+                        + "\nCurrent item: " + (fields[3].isEmpty() ? "(preparing)" : fields[3])
+                        + "\nKeep this screen open until the import finishes.");
+                }
+            } catch (Throwable e) {
+                android.util.Log.w("JJKLauncher", "Could not read import progress", e);
+            }
+            importHandler.postDelayed(this, 500);
+        }
+    };
+    private TextView gameStatus, gameValue, keysValue, titleKeysValue, iconValue;
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
 
@@ -104,6 +131,12 @@ public final class Launcher extends Activity {
         chooseKeys.setOnClickListener(v -> pick(PICK_KEYS));
         root.addView(row("Keys (prod.keys)", chooseKeys));
         root.addView(keysValue, new LinearLayout.LayoutParams(-1, dp(22)));
+
+        titleKeysValue = text("Optional / not selected", 12, Color.LTGRAY, false);
+        Button chooseTitleKeys = button("Choose");
+        chooseTitleKeys.setOnClickListener(v -> pick(PICK_TITLE_KEYS));
+        root.addView(row("Optional title.keys", chooseTitleKeys));
+        root.addView(titleKeysValue, new LinearLayout.LayoutParams(-1, dp(22)));
 
         iconValue = text("Optional", 12, Color.LTGRAY, false);
         Button chooseIcon = button("Choose a picture");
@@ -189,8 +222,8 @@ public final class Launcher extends Activity {
 
     private void writeRuntimeConfig() {
         try {
-            java.io.File dir = getExternalFilesDir(null);
-            if (dir == null) dir = getFilesDir();
+            java.io.File dir = new java.io.File(getFilesDir(), "private/jjk");
+            if (!dir.isDirectory() && !dir.mkdirs()) throw new java.io.IOException("cannot create JJK data directory");
             java.io.File file = new java.io.File(dir, "config.txt");
             java.io.FileWriter writer = new java.io.FileWriter(file, false);
             String resolution = prefs.getString("setting_resolution", "1280x720");
@@ -226,7 +259,7 @@ public final class Launcher extends Activity {
         Uri uri = data.getData();
         try { getContentResolver().takePersistableUriPermission(uri, Intent.FLAG_GRANT_READ_URI_PERMISSION); }
         catch (SecurityException ignored) {}
-        String key = request == PICK_GAME ? "game_uri" : request == PICK_KEYS ? "keys_uri" : "icon_uri";
+        String key = request == PICK_GAME ? "game_uri" : request == PICK_KEYS ? "keys_uri" : request == PICK_TITLE_KEYS ? "title_keys_uri" : "icon_uri";
         prefs.edit().putString(key, uri.toString()).apply();
         refresh();
     }
@@ -335,22 +368,30 @@ public final class Launcher extends Activity {
                 .setPositiveButton("OK", null).show();
             return;
         }
-        gameStatus.setText("Importing XCI/NSP…\nDecrypting and extracting ExeFS/RomFS. Keep the app open.");
+        gameStatus.setText("Starting import…\nPreparing the container reader. Keep the app open.");
+        importRunning = true;
+        importHandler.post(importProgressTicker);
         new Thread(() -> {
             String message;
             try {
                 Uri gameUri = Uri.parse(gameString);
                 Uri keysUri = Uri.parse(keysString);
+                String titleString = prefs.getString("title_keys_uri", null);
                 try (ParcelFileDescriptor gamePfd = getContentResolver().openFileDescriptor(gameUri, "r");
-                     ParcelFileDescriptor keysPfd = getContentResolver().openFileDescriptor(keysUri, "r")) {
+                     ParcelFileDescriptor keysPfd = getContentResolver().openFileDescriptor(keysUri, "r");
+                     ParcelFileDescriptor titlePfd = titleString == null ? null :
+                         getContentResolver().openFileDescriptor(Uri.parse(titleString), "r")) {
                     if (gamePfd == null || keysPfd == null) throw new Exception("Cannot open selected files.");
-                    message = importNative(gamePfd.getFd(), name(gameString), keysPfd.getFd(), out.getAbsolutePath());
+                    message = importNative(gamePfd.getFd(), name(gameString), keysPfd.getFd(),
+                        titlePfd == null ? -1 : titlePfd.getFd(), out.getAbsolutePath());
                 }
             } catch (Exception e) {
                 message = "IMPORT_ERROR: " + e.getClass().getSimpleName() + ": " +
                     (e.getMessage() == null ? "import failed" : e.getMessage());
             }
             final String result = message;
+            importRunning = false;
+            importHandler.removeCallbacks(importProgressTicker);
             runOnUiThread(() -> {
                 gameStatus.setText(result.startsWith("IMPORT_OK:") ?
                     "Import completed. Game startup is still experimental." : "Import did not complete.");
@@ -402,11 +443,26 @@ public final class Launcher extends Activity {
                 int n;
                 while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
             }
+            String titleString = prefs.getString("title_keys_uri", null);
+            File titleKeys = new File(getFilesDir(), "title.keys");
+            if (titleString != null) {
+                try (InputStream in = getContentResolver().openInputStream(Uri.parse(titleString));
+                     OutputStream out = new FileOutputStream(titleKeys, false)) {
+                    if (in == null) throw new Exception("Cannot open title.keys.");
+                    byte[] buffer = new byte[8192];
+                    int n;
+                    while ((n = in.read(buffer)) != -1) out.write(buffer, 0, n);
+                }
+            } else {
+                titleKeys.delete();
+            }
             ParcelFileDescriptor gamePfd = getContentResolver().openFileDescriptor(Uri.parse(gameString), "r");
             if (gamePfd == null) throw new Exception("Cannot open the selected game dump.");
             Os.setenv("NX_GAME_FD", Integer.toString(gamePfd.detachFd()), true);
             Os.setenv("NX_GAME_NAME", name(gameString), true);
             Os.setenv("NX_KEYS", keys.getAbsolutePath(), true);
+            if (titleKeys.isFile()) Os.setenv("NX_TITLE_KEYS", titleKeys.getAbsolutePath(), true);
+            else Os.unsetenv("NX_TITLE_KEYS");
             // NativeActivity's runtime reads data_root.txt from internalDataPath, then probes
             // <root>/exefs/main. Point it at the import directory instead of an empty shared folder.
             File rootConfig = new File(getFilesDir(), "data_root.txt");
@@ -444,9 +500,12 @@ public final class Launcher extends Activity {
                 String keyResult = validateKeys(keysUri);
                 if (inspectorLoaded && gameResult.startsWith("XCI/HEAD") || inspectorLoaded && gameResult.startsWith("NSP/PFS0")) {
                     try (ParcelFileDescriptor gamePfd = getContentResolver().openFileDescriptor(gameUri, "r");
-                         ParcelFileDescriptor keysPfd = getContentResolver().openFileDescriptor(keysUri, "r")) {
+                         ParcelFileDescriptor keysPfd = getContentResolver().openFileDescriptor(keysUri, "r");
+                         ParcelFileDescriptor titlePfd = prefs.getString("title_keys_uri", null) == null ? null :
+                             getContentResolver().openFileDescriptor(Uri.parse(prefs.getString("title_keys_uri", null)), "r")) {
                         if (gamePfd == null || keysPfd == null) throw new Exception("Could not open selected files for native inspection.");
-                        String nativeResult = inspectNative(gamePfd.getFd(), name(gameString), keysPfd.getFd());
+                        String nativeResult = inspectNative(gamePfd.getFd(), name(gameString), keysPfd.getFd(),
+                            titlePfd == null ? -1 : titlePfd.getFd());
                         if (nativeResult.startsWith("INSPECT_ERROR:")) {
                             gameResult += "\nNative inspection failed: " + nativeResult.substring("INSPECT_ERROR:".length()).trim();
                         } else {
@@ -464,7 +523,7 @@ public final class Launcher extends Activity {
             }
             final String message = result;
             runOnUiThread(() -> {
-                gameStatus.setText(message.startsWith("Validation failed") ? "Validation failed. See details." : "Basic file checks complete. Import and game startup are not implemented yet.");
+                gameStatus.setText(message.startsWith("Validation failed") ? "Validation failed. See details." : "Basic file checks complete. Import and runtime startup remain experimental.");
                 new AlertDialog.Builder(this).setTitle("File validation").setMessage(message)
                     .setPositiveButton("OK", null).show();
             });
@@ -474,9 +533,11 @@ public final class Launcher extends Activity {
     private void refresh() {
         String game = prefs.getString("game_uri", null);
         String keys = prefs.getString("keys_uri", null);
+        String titleKeys = prefs.getString("title_keys_uri", null);
         String icon = prefs.getString("icon_uri", null);
         gameValue.setText(name(game));
         keysValue.setText(name(keys));
+        titleKeysValue.setText(titleKeys == null ? "Optional / not selected" : name(titleKeys));
         iconValue.setText(icon == null ? "Optional" : name(icon));
         if (game != null && keys != null) {
             gameStatus.setText("Files selected. Dump validation has not run yet.");
