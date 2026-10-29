@@ -647,7 +647,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_io_github_belmantegu_wonderrecomp_GameAc
 }
 
 extern "C" JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, void* saved, size_t size) {
-    early_startup_log("[native] ANativeActivity_onCreate entered");
+    nx::plat::early_startup_log("[native] ANativeActivity_onCreate entered");
     g_activity = activity;
     if (g_ui_pipe[0] < 0 && pipe2(g_ui_pipe, O_NONBLOCK | O_CLOEXEC) == 0)
         ALooper_addFd(ALooper_forThread(), g_ui_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_ui_request, nullptr);
