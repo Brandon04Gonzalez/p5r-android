@@ -187,6 +187,11 @@ jobs:
 
       - name: Package experimental JJK APK
         shell: bash
+        env:
+          JJK_KEYSTORE_BASE64: ${{ secrets.JJK_KEYSTORE_BASE64 }}
+          JJK_KEYSTORE_PASSWORD: ${{ secrets.JJK_KEYSTORE_PASSWORD }}
+          JJK_KEY_ALIAS: ${{ secrets.JJK_KEY_ALIAS }}
+          JJK_KEY_PASSWORD: ${{ secrets.JJK_KEY_PASSWORD }}
         run: |
           set -euxo pipefail
           BT="$ANDROID_HOME/build-tools/35.0.0"
@@ -201,8 +206,12 @@ jobs:
           (cd apk/stage && zip -q -j ../base.apk classes.dex)
           (cd apk && zip -q base.apk lib/arm64-v8a/libjjk.so)
           "$BT/zipalign" -f -p 4 apk/base.apk apk/aligned.apk
-          keytool -genkeypair -keystore apk/debug.keystore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
-          "$BT/apksigner" sign --ks apk/debug.keystore --ks-pass pass:android --key-pass pass:android --out apk/JJK-Runtime-Test.apk apk/aligned.apk
+          if [[ -z "${JJK_KEYSTORE_BASE64:-}" || -z "${JJK_KEYSTORE_PASSWORD:-}" || -z "${JJK_KEY_ALIAS:-}" || -z "${JJK_KEY_PASSWORD:-}" ]]; then
+            echo "::error::Persistent signing secrets are missing. Configure JJK_KEYSTORE_BASE64, JJK_KEYSTORE_PASSWORD, JJK_KEY_ALIAS, and JJK_KEY_PASSWORD in repository Actions secrets so future APKs can update-install."
+            exit 1
+          fi
+          printf '%s' "$JJK_KEYSTORE_BASE64" | base64 --decode > apk/release.keystore
+          "$BT/apksigner" sign --ks apk/release.keystore --ks-pass "pass:$JJK_KEYSTORE_PASSWORD" --ks-key-alias "$JJK_KEY_ALIAS" --key-pass "pass:$JJK_KEY_PASSWORD" --out apk/JJK-Runtime-Test.apk apk/aligned.apk
           "$BT/apksigner" verify --verbose apk/JJK-Runtime-Test.apk
           "$BT/aapt2" dump badging apk/JJK-Runtime-Test.apk
           "$BT/aapt2" dump permissions apk/JJK-Runtime-Test.apk | tee apk/permissions.txt
