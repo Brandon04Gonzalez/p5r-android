@@ -368,7 +368,9 @@ public final class Launcher extends Activity {
                 .setPositiveButton("OK", null).show();
             return;
         }
-        gameStatus.setText("Importing XCI/NSP…\nDecrypting and extracting ExeFS/RomFS. Keep the app open.");
+        gameStatus.setText("Starting import…\\nPreparing the container reader. Keep the app open.");
+        importRunning = true;
+        importHandler.post(importProgressTicker);
         new Thread(() -> {
             String message;
             try {
@@ -521,7 +523,7 @@ public final class Launcher extends Activity {
             }
             final String message = result;
             runOnUiThread(() -> {
-                gameStatus.setText(message.startsWith("Validation failed") ? "Validation failed. See details." : "Basic file checks complete. Import and game startup are not implemented yet.");
+                gameStatus.setText(message.startsWith("Validation failed") ? "Validation failed. See details." : "Basic file checks complete. Import and runtime startup remain experimental.");
                 new AlertDialog.Builder(this).setTitle("File validation").setMessage(message)
                     .setPositiveButton("OK", null).show();
             });
