@@ -13,14 +13,30 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application
-        android:label="JJK Cursed Clash (NCE)"
+        android:label="Jujutsu Kaisen: Cursed Clash"
         android:requestLegacyExternalStorage="true"
-        android:hasCode="false"
+        android:hasCode="true"
         android:extractNativeLibs="true"
         android:debuggable="true"
         android:isGame="true"
         android:appCategory="game"
         android:largeHeap="true">
+        <activity
+            android:name=".Launcher"
+            android:exported="true"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:screenOrientation="sensorLandscape">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+        </activity>
+        <activity
+            android:name=".ControlsEditor"
+            android:exported="false"
+            android:theme="@style/Fullscreen"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
         <activity
             android:name="android.app.NativeActivity"
             android:exported="true"
