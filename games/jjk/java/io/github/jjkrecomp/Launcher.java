@@ -27,7 +27,10 @@ import android.widget.TextView;
 public final class Launcher extends Activity {
     private static final int PICK_GAME = 1, PICK_KEYS = 2, PICK_ICON = 3;
     private static final int BG = Color.rgb(20, 4, 6), RED = Color.rgb(230, 0, 18);
-    private SharedPreferences prefs;\n    private static boolean inspectorLoaded;\n    static { try { System.loadLibrary("jjkinspector"); inspectorLoaded = true; } catch (UnsatisfiedLinkError e) { inspectorLoaded = false; } }\n    private native String inspectNative(int gameFd, String gameName, int keysFd);
+    private SharedPreferences prefs;
+    private static boolean inspectorLoaded;
+    static { try { System.loadLibrary("jjkinspector"); inspectorLoaded = true; } catch (UnsatisfiedLinkError e) { inspectorLoaded = false; } }
+    private native String inspectNative(int gameFd, String gameName, int keysFd);
     private TextView gameStatus, gameValue, keysValue, iconValue;
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
