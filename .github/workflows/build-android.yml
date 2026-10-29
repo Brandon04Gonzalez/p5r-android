@@ -139,13 +139,15 @@ jobs:
             -DNX_RELEASE=ON
 
       - name: Compile JJK native library
-        run: cmake --build build-android-jjk --target jjk --parallel 2
+        run: cmake --build build-android-jjk --target jjk jjkimport --parallel 2
 
       - name: Upload JJK native library for diagnostics
         uses: actions/upload-artifact@v4
         with:
           name: jjk-android-arm64-runtime-check
-          path: build-android-jjk/libjjk.so
+          path: |
+            build-android-jjk/libjjk.so
+            build-android-jjk/libjjkimport.so
           if-no-files-found: error
           retention-days: 3
 
