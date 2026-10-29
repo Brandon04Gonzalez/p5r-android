@@ -263,18 +263,26 @@ bool make_dirs(const std::string& path) {
 void log_line(const char* line) {
     __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line);
 
-    // Keep a persistent copy in the selected game data directory so startup
-    // failures can be inspected on-device even when the game renders black.
+    // Keep a persistent copy in the user-visible game folder.
     static std::mutex file_log_mutex;
     std::lock_guard<std::mutex> lock(file_log_mutex);
     const std::string root = !g_root.empty()
         ? g_root
-        : std::string("/storage/emulated/0/") + nx::game::kInfo.title;
+        : std::string("/storage/emulated/0/Jujutsu Kaisen Cursed Clash");
     const std::string path = root + "/runtime.log";
-    std::ofstream out(path, std::ios::out | std::ios::app);
-    if (out) {
-        out << line << '\\n';
-        out.flush();
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        const size_t len = std::strlen(line);
+        size_t done = 0;
+        while (done < len) {
+            const ssize_t n = ::write(fd, line + done, len - done);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            done += size_t(n);
+        }
+        (void)::write(fd, "\\n", 1);
+        (void)::fsync(fd);
+        ::close(fd);
     }
 }
 
@@ -444,7 +452,24 @@ namespace {
 
 struct sigaction g_previous[32];  // the handlers before ours (debuggerd's)
 
+// Signal-safe fallback: do not depend on C++ streams, mutexes, or the normal logger
+// when a native fault occurs. This path is the visible top-level JJK data folder.
+void write_crash_marker(int sig) {
+    static const char path[] = "/storage/emulated/0/Jujutsu Kaisen Cursed Clash/crash.log";
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    static const char prefix[] = "\\n=== JJK native crash; signal ";
+    (void)::write(fd, prefix, sizeof(prefix) - 1);
+    char digit = char('0' + (sig >= 0 && sig <= 9 ? sig : 0));
+    (void)::write(fd, &digit, 1);
+    static const char suffix[] = " ===\\n";
+    (void)::write(fd, suffix, sizeof(suffix) - 1);
+    (void)::fsync(fd);
+    ::close(fd);
+}
+
 void crash(int sig, siginfo_t* info, void* uc) {
+    write_crash_marker(sig);
     if ((sig == SIGSEGV || sig == SIGBUS) && nx::plat::write_watch_fault(info->si_addr)) return;  // write_watch.cpp
     nx::log("CRASH: signal %d, fault address %p", sig, info->si_addr);
 #if NX_NCE
