@@ -8,6 +8,7 @@ on:
       - "runtime/**"
       - "android/wonder/importer/**"
       - "games/p5r/**"
+      - "games/jjk/**"
       - ".github/workflows/build-android.yml"
 
 permissions:
@@ -120,3 +121,16 @@ jobs:
           path: build-android/libp5r.so
           if-no-files-found: error
           retention-days: 3
+
+
+  jjk-metadata-check:
+    name: JJK target metadata compile check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Compile JJK game metadata
+        run: |
+          g++ -std=c++20 -Wall -Wextra -Werror -fsyntax-only -Iruntime/include games/jjk/game.cpp
