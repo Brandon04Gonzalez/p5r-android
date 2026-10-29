@@ -191,10 +191,14 @@ jobs:
           set -euxo pipefail
           BT="$ANDROID_HOME/build-tools/35.0.0"
           PLATFORM="$ANDROID_HOME/platforms/android-35/android.jar"
-          mkdir -p apk/lib/arm64-v8a
+          mkdir -p apk/lib/arm64-v8a apk/stage/gen apk/stage/classes
           cp build-jjk-android/libjjk.so apk/lib/arm64-v8a/libjjk.so
           "$BT/aapt2" compile --dir android/res -o apk/res.zip
-          "$BT/aapt2" link -o apk/base.apk -I "$PLATFORM" --manifest games/jjk/AndroidManifest.xml --min-sdk-version 29 --target-sdk-version 35 apk/res.zip
+          "$BT/aapt2" link -o apk/base.apk -I "$PLATFORM" --manifest games/jjk/AndroidManifest.xml --java apk/stage/gen --min-sdk-version 29 --target-sdk-version 35 apk/res.zip
+          find games/jjk/java apk/stage/gen -name '*.java' > apk/stage/sources.txt
+          javac -nowarn -encoding UTF-8 --release 11 -cp "$PLATFORM" -d apk/stage/classes @apk/stage/sources.txt
+          (cd apk/stage/classes && find . -name '*.class' > ../classes.txt && "$BT/d8" --release --min-api 29 --lib "$PLATFORM" --output .. @../classes.txt)
+          (cd apk/stage && zip -q -j ../base.apk classes.dex)
           (cd apk && zip -q base.apk lib/arm64-v8a/libjjk.so)
           "$BT/zipalign" -f -p 4 apk/base.apk apk/aligned.apk
           keytool -genkeypair -keystore apk/debug.keystore -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
