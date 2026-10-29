@@ -29,7 +29,8 @@ public final class Launcher extends Activity {
     private static final int BG = Color.rgb(20, 4, 6), RED = Color.rgb(230, 0, 18);
     private SharedPreferences prefs;
     private static boolean inspectorLoaded;
-    static { try { System.loadLibrary("jjkinspector"); inspectorLoaded = true; } catch (UnsatisfiedLinkError e) { inspectorLoaded = false; } }
+    private static String inspectorLoadError = "not attempted";
+    static { try { System.loadLibrary("jjkinspector"); inspectorLoaded = true; inspectorLoadError = ""; } catch (UnsatisfiedLinkError e) { inspectorLoaded = false; inspectorLoadError = e.getMessage() == null ? e.toString() : e.getMessage(); android.util.Log.e("JJKLauncher", "Native inspector load failed", e); } }
     private native String inspectNative(int gameFd, String gameName, int keysFd);
     private TextView gameStatus, gameValue, keysValue, iconValue;
 
@@ -307,7 +308,7 @@ public final class Launcher extends Activity {
                         }
                     }
                 } else if (!inspectorLoaded) {
-                    gameResult += "\nNative inspector library is unavailable in this APK.";
+                    gameResult += "\nNative inspector library failed to load: " + inspectorLoadError;
                 }
                 result = "Game: " + gameResult + "\n\nKeys: " + keyResult;
             } catch (Exception e) {
