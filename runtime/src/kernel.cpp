@@ -476,7 +476,7 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
             break;
         }
         case 0x07:
-            log("svcExitProcess");
+            log("svcExitProcess: pc=%llx lr=%llx x0=%llx x1=%llx x2=%llx x3=%llx", (unsigned long long)pc, (unsigned long long)c.x[30], (unsigned long long)c.x[0], (unsigned long long)c.x[1], (unsigned long long)c.x[2], (unsigned long long)c.x[3]);
             plat::exit_process(0);
         case 0x08: {  // CreateThread(entry x1, arg x2, stack_top x3, prio w4, core w5) -> handle
             auto t = new_thread(c.x[1], c.x[2], c.x[3], int(c.x[4]), int32_t(c.x[5]));
