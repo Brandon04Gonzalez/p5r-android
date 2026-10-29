@@ -32,6 +32,7 @@ public final class Launcher extends Activity {
     private static String inspectorLoadError = "not attempted";
     static { try { System.loadLibrary("jjkinspector"); inspectorLoaded = true; inspectorLoadError = ""; } catch (UnsatisfiedLinkError e) { inspectorLoaded = false; inspectorLoadError = e.getMessage() == null ? e.toString() : e.getMessage(); android.util.Log.e("JJKLauncher", "Native inspector load failed", e); } }
     private native String inspectNative(int gameFd, String gameName, int keysFd);
+    private native String importNative(int gameFd, String gameName, int keysFd, String outDir);
     private TextView gameStatus, gameValue, keysValue, iconValue;
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
@@ -139,6 +140,12 @@ public final class Launcher extends Activity {
         playParams.topMargin = dp(24);
         root.addView(play, playParams);
         play.setOnClickListener(v -> validateSelectedFiles());
+
+        Button importButton = button("Import game data");
+        LinearLayout.LayoutParams importParams = new LinearLayout.LayoutParams(-1, dp(56));
+        importParams.topMargin = dp(12);
+        root.addView(importButton, importParams);
+        importButton.setOnClickListener(v -> importSelectedFiles());
         writeRuntimeConfig();
         setContentView(scroll);
     }
@@ -275,6 +282,58 @@ public final class Launcher extends Activity {
             }
         }
         return valid > 0 ? "Keys file syntax looks valid (" + valid + " entries). Key correctness is not verified." : "No key entries found in prod.keys.";
+    }
+
+    private void importSelectedFiles() {
+        String gameString = prefs.getString("game_uri", null);
+        String keysString = prefs.getString("keys_uri", null);
+        if (gameString == null || keysString == null) {
+            new AlertDialog.Builder(this).setTitle("Files missing")
+                .setMessage("Choose your own game dump and prod.keys first.")
+                .setPositiveButton("OK", null).show();
+            return;
+        }
+        if (!inspectorLoaded) {
+            new AlertDialog.Builder(this).setTitle("Importer unavailable")
+                .setMessage("The native importer library did not load: " + inspectorLoadError)
+                .setPositiveButton("OK", null).show();
+            return;
+        }
+        java.io.File out = new java.io.File(getFilesDir(), "jjk-import");
+        java.io.File parent = out.getParentFile();
+        long usable = parent == null ? 0 : parent.getUsableSpace();
+        long required = 8L * 1024L * 1024L * 1024L;
+        if (usable < required) {
+            new AlertDialog.Builder(this).setTitle("Not enough storage")
+                .setMessage("JJK extraction needs at least 8 GB free in app storage. Available: " +
+                    android.text.format.Formatter.formatFileSize(this, usable) +
+                    ". Free space first; the importer has not started.")
+                .setPositiveButton("OK", null).show();
+            return;
+        }
+        gameStatus.setText("Importing and verifying game data… Keep the app open.");
+        new Thread(() -> {
+            String message;
+            try {
+                Uri gameUri = Uri.parse(gameString);
+                Uri keysUri = Uri.parse(keysString);
+                try (ParcelFileDescriptor gamePfd = getContentResolver().openFileDescriptor(gameUri, "r");
+                     ParcelFileDescriptor keysPfd = getContentResolver().openFileDescriptor(keysUri, "r")) {
+                    if (gamePfd == null || keysPfd == null) throw new Exception("Cannot open selected files.");
+                    message = importNative(gamePfd.getFd(), name(gameString), keysPfd.getFd(), out.getAbsolutePath());
+                }
+            } catch (Exception e) {
+                message = "IMPORT_ERROR: " + e.getClass().getSimpleName() + ": " +
+                    (e.getMessage() == null ? "import failed" : e.getMessage());
+            }
+            final String result = message;
+            runOnUiThread(() -> {
+                gameStatus.setText(result.startsWith("IMPORT_OK:") ?
+                    "Import completed. Game startup is still experimental." : "Import did not complete.");
+                new AlertDialog.Builder(this).setTitle("JJK import result").setMessage(result)
+                    .setPositiveButton("OK", null).show();
+            });
+        }).start();
     }
 
     private void validateSelectedFiles() {
