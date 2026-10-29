@@ -216,19 +216,18 @@ jobs:
           mkdir -p apk/lib/arm64-v8a apk/stage/gen apk/stage/classes
           cp build-jjk-android/libjjk.so apk/lib/arm64-v8a/libjjk.so
           cp libjjkinspector.so apk/lib/arm64-v8a/libjjkinspector.so
-          # The inspector links against the NDK shared C++ runtime. Package it
-          # in the APK or System.loadLibrary("jjkinspector") fails at runtime.
-          CXX_RUNTIME="$ANDROID_NDK_HOME/toolchains/llvm/prebuilt/linux-x86_64/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
-          test -f "$CXX_RUNTIME"
-          cp "$CXX_RUNTIME" apk/lib/arm64-v8a/libc++_shared.so
-          readelf -d apk/lib/arm64-v8a/libjjkinspector.so | grep -F 'libc++_shared.so'
+          # The inspector must be self-contained apart from Android system libraries.
+          if readelf -d apk/lib/arm64-v8a/libjjkinspector.so | grep -F 'libc++_shared.so'; then
+            echo "::error::JJK inspector unexpectedly depends on libc++_shared.so; check static C++ runtime linking."
+            exit 1
+          fi
           "$BT/aapt2" compile --dir android/res -o apk/res.zip
           "$BT/aapt2" link -o apk/base.apk -I "$PLATFORM" --manifest games/jjk/AndroidManifest.xml --java apk/stage/gen --min-sdk-version 29 --target-sdk-version 35 apk/res.zip
           find games/jjk/java apk/stage/gen -name '*.java' > apk/stage/sources.txt
           javac -nowarn -encoding UTF-8 --release 11 -cp "$PLATFORM" -d apk/stage/classes @apk/stage/sources.txt
           (cd apk/stage/classes && find . -name '*.class' > ../classes.txt && "$BT/d8" --release --min-api 29 --lib "$PLATFORM" --output .. @../classes.txt)
           (cd apk/stage && zip -q -j ../base.apk classes.dex)
-          (cd apk && zip -q base.apk lib/arm64-v8a/libjjk.so lib/arm64-v8a/libjjkinspector.so lib/arm64-v8a/libc++_shared.so)
+          (cd apk && zip -q base.apk lib/arm64-v8a/libjjk.so lib/arm64-v8a/libjjkinspector.so)
           "$BT/zipalign" -f -p 4 apk/base.apk apk/aligned.apk
           if [[ -z "${JJK_KEYSTORE_BASE64:-}" || -z "${JJK_KEYSTORE_PASSWORD:-}" || -z "${JJK_KEY_ALIAS:-}" ]]; then
             echo "::error::Persistent signing secrets are missing. Configure JJK_KEYSTORE_BASE64, JJK_KEYSTORE_PASSWORD, and JJK_KEY_ALIAS in repository Actions secrets so future APKs can update-install."
