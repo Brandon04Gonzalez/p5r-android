@@ -119,8 +119,9 @@ int run(int game_fd, const std::string& game_name, const std::string& keys,
         return fail(error.empty() ? "import failed" : error);
     }
 
-    // Re-open the parsed game image using the same fds. This uses pread, so it does not
-    // disturb the importer or the SAF descriptor's shared file position.
+    // Keep the key descriptors alive while reopening the image: GameImage::open reads prod.keys
+    // and title.keys again to decrypt the ExeFS shader source. The importer and GameImage use
+    // positioned reads, so this does not disturb the SAF descriptor's shared file position.
     auto game = nxi::GameImage::open(inputs, kTitleId, error);
     close(kfd);
     if (tfd >= 0) close(tfd);
