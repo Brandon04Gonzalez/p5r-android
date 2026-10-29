@@ -27,7 +27,7 @@ import android.widget.TextView;
 public final class Launcher extends Activity {
     private static final int PICK_GAME = 1, PICK_KEYS = 2, PICK_ICON = 3;
     private static final int BG = Color.rgb(20, 4, 6), RED = Color.rgb(230, 0, 18);
-    private SharedPreferences prefs;
+    private SharedPreferences prefs;\n    private static boolean inspectorLoaded;\n    static { try { System.loadLibrary("jjkinspector"); inspectorLoaded = true; } catch (UnsatisfiedLinkError e) { inspectorLoaded = false; } }\n    private native String inspectNative(int gameFd, String gameName, int keysFd);
     private TextView gameStatus, gameValue, keysValue, iconValue;
 
     private int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
@@ -286,8 +286,26 @@ public final class Launcher extends Activity {
         new Thread(() -> {
             String result;
             try {
-                String gameResult = validateGameFile(Uri.parse(gameString));
-                String keyResult = validateKeys(Uri.parse(keysString));
+                Uri gameUri = Uri.parse(gameString);
+                Uri keysUri = Uri.parse(keysString);
+                String gameResult = validateGameFile(gameUri);
+                String keyResult = validateKeys(keysUri);
+                if (inspectorLoaded && gameResult.startsWith("XCI/HEAD") || inspectorLoaded && gameResult.startsWith("NSP/PFS0")) {
+                    try (ParcelFileDescriptor gamePfd = getContentResolver().openFileDescriptor(gameUri, "r");
+                         ParcelFileDescriptor keysPfd = getContentResolver().openFileDescriptor(keysUri, "r")) {
+                        if (gamePfd == null || keysPfd == null) throw new Exception("Could not open selected files for native inspection.");
+                        String nativeResult = inspectNative(gamePfd.getFd(), name(gameString), keysPfd.getFd());
+                        if (nativeResult.startsWith("INSPECT_ERROR:")) {
+                            gameResult += "\nNative inspection failed: " + nativeResult.substring("INSPECT_ERROR:".length()).trim();
+                        } else {
+                            gameResult += "\nNative metadata:\n" + nativeResult;
+                            if (nativeResult.contains("TITLE_ID=01002FC012548000")) gameResult += "\nTitle ID matches JJK target.";
+                            else gameResult += "\nWARNING: Title ID does not match the configured JJK target.";
+                        }
+                    }
+                } else if (!inspectorLoaded) {
+                    gameResult += "\nNative inspector library is unavailable in this APK.";
+                }
                 result = "Game: " + gameResult + "\n\nKeys: " + keyResult;
             } catch (Exception e) {
                 result = "Validation failed: " + e.getClass().getSimpleName() + ": " + (e.getMessage() == null ? "cannot read selected file" : e.getMessage());
