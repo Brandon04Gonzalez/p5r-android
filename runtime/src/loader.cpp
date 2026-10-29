@@ -95,6 +95,10 @@ HleFn hle_lookup(const char* name) {
     return it == registry().end() ? nullptr : it->second;
 }
 
+NX_HLE("nnosGetDefaultUserExceptionStackForApplication", get_default_user_exception_stack);
+NX_HLE("_ZN2nn2os23SetUserExceptionHandlerEPFvPNS0_17UserExceptionInfoEEPvmS2_", set_user_exception_handler);
+
+
 static void missing_stub(CPU& c) {
     // Preserve the incoming ABI context in the log before applying the generic zero-return fallback.
     // This is especially useful for SDK bootstrap imports whose signatures are not present in stripped NSOs.
@@ -105,6 +109,22 @@ static void missing_stub(CPU& c) {
         (unsigned long long)c.x[6], (unsigned long long)c.x[7], (unsigned long long)c.x[31]);
     c.x[0] = 0;
 }
+
+// SDK bootstrap asks for the application's default user-exception stack before registering its handler.
+// Returning null here makes nnosInitialize continue with an invalid stack and can terminate startup.
+static void get_default_user_exception_stack(CPU& c) {
+    constexpr uint64_t kExceptionStackSize = 0x10000;
+    static const uint64_t stack = kernel_alloc(kExceptionStackSize, 0x1000);
+    if (c.x[0]) *reinterpret_cast<uint64_t*>(c.x[0]) = kExceptionStackSize;
+    c.x[0] = stack;
+}
+
+// The Android runtime does not expose Horizon's user-exception handler registration. Keep startup working;
+// exceptions remain handled by the host/runtime rather than installing a Switch-specific handler.
+static void set_user_exception_handler(CPU& c) {
+    c.x[0] = 0;
+}
+
 
 uint64_t hle_address_or(const char* name, HleFn fallback) {
     static std::mutex lock;  // NVN hands out procs by name at run time, from any thread
