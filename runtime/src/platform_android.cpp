@@ -706,19 +706,35 @@ extern "C" void android_main(android_app* app) {
     }
     const std::string shared = !chosen.empty() ? chosen : std::string("/storage/emulated/0/") + nx::game::kInfo.title;
     const std::string own = app->activity->externalDataPath ? app->activity->externalDataPath : shared;
-    if (!has_data(own) && !has_all_files_access(app)) {
+    early_startup_log("[native] android_main: checking game data and storage permission");
+    const bool own_has_data = has_data(own);
+    early_startup_log(own_has_data
+        ? "[native] app-private data root contains exefs/main"
+        : "[native] app-private data root does not contain exefs/main");
+    const bool storage_access_before = has_all_files_access(app);
+    early_startup_log(storage_access_before
+        ? "[native] all-files storage permission already granted"
+        : "[native] all-files storage permission missing");
+    if (!own_has_data && !storage_access_before) {
+        early_startup_log("[native] opening Android all-files access settings");
         request_all_files_access(app);
+        early_startup_log("[native] returned from Android all-files access settings");
         while (!has_all_files_access(app)) {  // keep the app responsive until the switch is turned on
             int events;
             android_poll_source* src;
             while (ALooper_pollOnce(100, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0) {
                 if (src) src->process(app, src);
-                if (app->destroyRequested) _exit(0);
+                if (app->destroyRequested) {
+                    early_startup_log("[native] activity destroyed while waiting for storage permission");
+                    _exit(0);
+                }
             }
         }
+        early_startup_log("[native] all-files storage permission granted");
     }
     // The picked folder wins over the app's own one; else the own one (adb push), else Internal storage/<title>.
     g_root = !chosen.empty() && has_data(chosen) ? chosen : has_data(own) ? own : shared;
+    early_startup_log("[native] data-root selected; normal runtime logging will begin");
     // Create a visible log immediately, before the guest thread or renderer starts.
     nx::plat::log_line("JJK runtime logger initialized; startup reached data-root selection");
     // config.txt's NX_* lines become environment variables (the NVN layer reads its switches with getenv), without
