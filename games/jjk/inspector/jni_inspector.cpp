@@ -4,6 +4,8 @@
 #include <string>
 #include <vector>
 #include "nxgame.h"
+#include "nximport.h"
+#include <sys/stat.h>
 
 extern "C" JNIEXPORT jstring JNICALL
 Java_io_github_jjkrecomp_Launcher_inspectNative(JNIEnv* env, jobject,
@@ -41,4 +43,26 @@ Java_io_github_jjkrecomp_Launcher_inspectNative(JNIEnv* env, jobject,
         "\nEXEFS_FILES=" + std::to_string(game->exefs().size()) +
         "\nROMFS_FILES=" + std::to_string(game->file_count());
     return env->NewStringUTF(result.c_str());
+}
+
+extern "C" JNIEXPORT jstring JNICALL
+Java_io_github_jjkrecomp_Launcher_importNative(JNIEnv* env, jobject,
+                                                jint game_fd, jstring game_name,
+                                                jint keys_fd, jstring out_dir) {
+    const char* raw_name = env->GetStringUTFChars(game_name, nullptr);
+    const char* raw_out = env->GetStringUTFChars(out_dir, nullptr);
+    std::string name = raw_name ? raw_name : "game.xci";
+    std::string output = raw_out ? raw_out : "";
+    if (raw_name) env->ReleaseStringUTFChars(game_name, raw_name);
+    if (raw_out) env->ReleaseStringUTFChars(out_dir, raw_out);
+    if (output.empty()) return env->NewStringUTF("IMPORT_ERROR: output directory is empty");
+    nxi::Options options;
+    options.out_dir = output;
+    options.title_id = 0x01002FC012548000ull;
+    options.keep_exefs = true;
+    std::vector<nxi::InputFile> inputs = {{name, game_fd}, {"prod.keys", keys_fd}};
+    std::string error;
+    int rc = nxi::run_import(inputs, options, error);
+    if (rc != 0) return env->NewStringUTF(("IMPORT_ERROR: " + error).c_str());
+    return env->NewStringUTF("IMPORT_OK: content extraction and integrity checks completed. Game startup is not yet implemented.");
 }
