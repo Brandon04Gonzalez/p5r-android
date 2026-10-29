@@ -260,7 +260,17 @@ bool make_dirs(const std::string& path) {
     return !ec;
 }
 
-void log_line(const char* line) { __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line); }
+void log_line(const char* line) {
+    __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line);
+    // Persist native boot/crash diagnostics so a crash that closes NativeActivity is not a silent blank screen.
+    static std::mutex file_log_mutex;
+    std::lock_guard<std::mutex> lock(file_log_mutex);
+    if (g_app && g_app->activity && g_app->activity->externalDataPath) {
+        std::ofstream out(std::string(g_app->activity->externalDataPath) + "/jjk-runtime.log",
+                          std::ios::out | std::ios::app);
+        if (out) out << line << '\\n';
+    }
+}
 
 std::string data_root() { return g_root; }
 
@@ -466,6 +476,7 @@ void crash(int sig, siginfo_t* info, void* uc) {
 }
 
 void game_thread(void*) {
+    nx::log("JJK startup: entering nx::boot()");
     try {
         nx::boot();
     } catch (const nx::LongJmp& j) {
@@ -729,6 +740,10 @@ extern "C" void android_main(android_app* app) {
 
     nx::log("%s (Switch recomp) on Android, data at %s (own folder %s: %s)", nx::game::kInfo.title, g_root.c_str(),
             own.c_str(), has_data(own) ? "has the data" : kDataProbe);
+    nx::log("JJK diagnostics: main=%s sdk=%s; log file=%s/jjk-runtime.log",
+            access((g_root + "/exefs/main").c_str(), R_OK) == 0 ? "readable" : "missing",
+            access((g_root + "/exefs/sdk").c_str(), R_OK) == 0 ? "readable" : "missing",
+            own.c_str());
     static bool started = false;
     for (;;) {
         int events;
