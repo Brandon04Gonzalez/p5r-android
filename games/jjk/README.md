@@ -6,7 +6,7 @@ Targeting the Japanese base title:
 - Native target/library: `jjk` / `libjjk.so`
 - Import library: `libjjkimport.so`
 - Android package: `io.github.jjkport`
-- Default data folder: `/storage/emulated/0/Jujutsu Kaisen: Cursed Clash`
+- Default data folder: `/storage/emulated/0/Jujutsu Kaisen Cursed Clash`
 
 ## Implemented
 
