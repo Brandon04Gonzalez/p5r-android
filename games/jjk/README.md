@@ -3,15 +3,19 @@
 This target is a clean starting point for the Japanese base title:
 
 - Program ID: `01002FC012548000`
-- Target: `jjk`
+- Target/library: `jjk` / `libjjk.so`
 - Android package: `io.github.jjkport`
-- Data root: `private/jjk`
+- Default data folder: `/storage/emulated/0/Jujutsu Kaisen: Cursed Clash`
 
-## Important status
+## Current status
 
-This is **not yet a playable JJK port**. It deliberately does not copy Persona 5 Royal's game hooks, timing patches, shader assumptions, build ID, or shader extraction pipeline. Those are game/version-specific and copying them would just turn one crash into several less obvious crashes.
+The Android launcher and generic NCE runtime target are wired up. The launcher can select the owner's game dump and `prod.keys`, then pass the game file descriptor to the runtime. The NCE branch-range fix is also included.
 
-The generic NCE runtime can be compiled for this target, but the exact JJK base-game `main` build ID and runtime behavior still need to be confirmed from the owner's own dump and device log. The build ID is intentionally unset until verified. This target also does not yet include an on-device importer/launcher UI.
+This is **not yet a playable JJK port**. The app currently has no JJK-specific importer or shader translator. It intentionally does not copy Persona 5 Royal's hooks, frame pacing, shader assumptions, build ID, or shader extraction pipeline.
+
+The NCE runtime still expects the game's extracted modules under the chosen data root, including `exefs/main` (and other ExeFS modules required by the title). The selected NSP/XCI supplies the game image/RomFS to the shared runtime; it does not automatically extract the NCE module files in this target yet. If those files are not present, boot will stop before the game starts.
+
+The exact JJK base-game `main` build ID and SDK/module list still need to be confirmed from the owner's dump and device log. The build ID is intentionally unset until verified.
 
 ## Build
 
@@ -21,11 +25,12 @@ From the repository's Windows developer shell:
 android\build_apk.ps1 -Game jjk -Nce
 ```
 
-The build produces `private\jjk\apk_nce\jjk.apk`. The runtime expects the game's imported data in the folder selected by its storage configuration; this minimal target does not import an NSP/XCI by itself.
+The APK output path is `private\jjk\apk_nce\jjk.apk`. The build script compiles the `jjk` native library and packages the Java launcher.
 
 ## Next validation steps
 
-1. Capture the JJK base dump's main NSO build ID and SDK/module list from the import output.
-2. Confirm the app's actual data-root lookup and adapt the importer UI to JJK's title ID.
-3. Boot the generic NCE target and collect the first full logcat/runtime log.
-4. Add only evidence-backed JJK-specific hooks and shader handling after the first boot identifies the next blocker.
+1. Confirm the extracted `exefs/main` and module set correspond to the JJK JP base title, not an update.
+2. Capture the JJK base dump's main NSO build ID and SDK/module list from the import output.
+3. Add a generic importer path for JJK that extracts the correct modules without P5R-specific shader processing.
+4. Boot the NCE target and collect the first full logcat/runtime log.
+5. Add only evidence-backed JJK-specific HLE hooks and shader handling after the first boot identifies the next blocker.
