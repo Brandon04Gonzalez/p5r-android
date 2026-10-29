@@ -6,7 +6,7 @@ final class Importer {
         System.loadLibrary("jjkimport");
     }
 
-    /** Blocking: 0 when the shaders are ready in dataDir/spirv, else see error(). */
+    /** Blocking: imports the dump and translates supported ExeFS shaders into dataDir/spirv. */
     static native int run(int nspFd, String nspName, String keysPath, String titleKeysPath, String dataDir, String workDir,
                           int jobs);
 
