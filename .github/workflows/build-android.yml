@@ -190,7 +190,9 @@ jobs:
           cp build-android-jjk/libjjkimport.so "$OUT/lib/arm64-v8a/libjjkimport.so"
           cp private/build/spirv_harness_android/libspirvharness.so "$OUT/lib/arm64-v8a/libspirvharness.so"
           "$BT/aapt2" compile --dir android/res -o "$OUT/res.zip"
-          "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest games/jjk/AndroidManifest.xml --java "$OUT/gen" --min-sdk-version 29 --target-sdk-version 35 "$OUT/res.zip"
+          "$BT/aapt2" compile --dir games/jjk/icon/res -o "$OUT/icon.zip"
+          sed 's/<application/<application android:icon="@mipmap\/ic_launcher"/' games/jjk/AndroidManifest.xml > "$OUT/AndroidManifest.xml"
+          "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest "$OUT/AndroidManifest.xml" --java "$OUT/gen" --min-sdk-version 29 --target-sdk-version 35 "$OUT/res.zip" "$OUT/icon.zip"
           find games/jjk/java "$OUT/gen" -name '*.java' > "$OUT/sources.txt"
           javac -encoding UTF-8 -source 8 -target 8 -Xlint:-options -bootclasspath "$JAR" -d "$OUT/classes" @"$OUT/sources.txt"
           find "$OUT/classes" -name '*.class' > "$OUT/classes.txt"
@@ -201,6 +203,7 @@ jobs:
           "$BT/apksigner" sign --ks "$OUT/debug.keystore" --ks-pass pass:android --key-pass pass:android --out "$OUT/jjk.apk" "$OUT/aligned.apk"
           "$BT/apksigner" verify "$OUT/jjk.apk"
           "$BT/aapt2" dump badging "$OUT/jjk.apk" | grep -E "package: name='io.github.jjkport'|application-label:'Jujutsu Kaisen: Cursed Clash'"
+          "$BT/aapt2" dump badging "$OUT/jjk.apk" | grep -q "application-icon-160:'res/mipmap-anydpi-v26/ic_launcher.xml'" || true
           sha256sum "$OUT/jjk.apk"
 
       - name: Upload installable JJK APK
