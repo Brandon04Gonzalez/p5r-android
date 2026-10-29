@@ -32,6 +32,13 @@
             </intent-filter>
         </activity>
         <activity
+            android:name=".ImportActivity"
+            android:exported="false"
+            android:process=":import"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:screenOrientation="sensorLandscape"
+            android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboardHidden" />
+        <activity
             android:name=".ControlsEditor"
             android:exported="false"
             android:theme="@style/Fullscreen"
