@@ -22,11 +22,21 @@ This is **not yet confirmed playable**. The importer is generic and does not tra
 
 ## Build
 
-From the repository's Windows developer shell:
+From the repository's Windows developer shell, build the same NCE APK pipeline used by P5R:
 
 ```powershell
-android\build_apk.ps1 -Game jjk -Nce
+games\jjk\tools\build_android.cmd
 ```
+
+The shared build script now packages both `libjjkimport.so` and the Android NativeAOT `libspirvharness.so`. Build the harness once first if it is not present, following the Docker command in `games\p5r\tools\build_harness_android.sh`. The JJK launcher, controls editor, save import/export, and language table are already ported under `games/jjk/java`; this target also has its own adaptive icon and manifest.
+
+To capture a startup run on a connected phone:
+
+```powershell
+games\jjk\tools\run_android.ps1 -Name boot1 -Seconds 60
+```
+
+The script saves `runtime.log`, `crash.log`, and filtered logcat output under `private\jjk\runs\boot1`.
 
 The APK output path is `private\jjk\apk_nce\jjk.apk`. On first launch, choose the owner's base-game NSP/XCI and `prod.keys`; the importer will extract the data to the app's selected data folder. Keep the app open while the progress screen runs.
 
