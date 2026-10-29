@@ -97,6 +97,7 @@ HleFn hle_lookup(const char* name) {
 
 static void get_default_user_exception_stack(CPU& c);
 static void set_user_exception_handler(CPU& c);
+static void is_virtual_address_memory_enabled(CPU& c);
 
 NX_HLE("nnosGetDefaultUserExceptionStackForApplication", get_default_user_exception_stack);
 NX_HLE("_ZN2nn2os23SetUserExceptionHandlerEPFvPNS0_17UserExceptionInfoEEPvmS2_", set_user_exception_handler);
