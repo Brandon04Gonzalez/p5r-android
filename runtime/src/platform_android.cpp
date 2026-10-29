@@ -59,6 +59,24 @@ void boot();
 namespace nx::plat {
 
 namespace {
+// Breadcrumbs before android_main: the normal logger starts too late to diagnose
+// failures during NativeActivity creation or native-library initialization.
+void early_startup_log(const char* message) {
+    __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, message);
+    if (std::strcmp(nx::game::kInfo.id, "jjk") != 0) return;
+    static constexpr char path[] = "/storage/emulated/0/Jujutsu Kaisen Cursed Clash/runtime.log";
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    (void)::write(fd, message, std::strlen(message));
+    (void)::write(fd, "\\n", 1);
+    (void)::fsync(fd);
+    ::close(fd);
+}
+
+__attribute__((constructor)) void jjk_native_library_loaded() {
+    early_startup_log("[native] libjjk load constructor reached");
+}
+
 android_app* g_app = nullptr;
 std::string g_root;
 std::atomic<ANativeWindow*> g_window{nullptr};
@@ -629,6 +647,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_io_github_belmantegu_wonderrecomp_GameAc
 }
 
 extern "C" JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, void* saved, size_t size) {
+    early_startup_log("[native] ANativeActivity_onCreate entered");
     g_activity = activity;
     if (g_ui_pipe[0] < 0 && pipe2(g_ui_pipe, O_NONBLOCK | O_CLOEXEC) == 0)
         ALooper_addFd(ALooper_forThread(), g_ui_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_ui_request, nullptr);
@@ -674,6 +693,7 @@ static bool has_data(const std::string& root) { return access((root + kDataProbe
 
 extern "C" void android_main(android_app* app) {
     using namespace nx::plat;
+    early_startup_log("[native] android_main entered");
     g_app = app;
     // Game data: Internal storage/<game title> (put there by the player, needs all-files access) or the app's own
     // external files folder (adb push).
