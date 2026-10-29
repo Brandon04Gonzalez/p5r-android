@@ -101,6 +101,23 @@ public class Launcher extends Activity {
 
     static File dataDir() { return new File(Environment.getExternalStorageDirectory(), DATA); }
 
+    // Visible diagnostics are written by the Java launcher before native code starts,
+    // so a missing native logger cannot leave the user with no evidence at all.
+    static synchronized void diagnostic(String message) {
+        File dir = dataDir();
+        if (!dir.isDirectory() && !dir.mkdirs() && !dir.isDirectory()) return;
+        File log = new File(dir, "runtime.log");
+        try (FileWriter out = new FileWriter(log, true)) {
+            out.write(new java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US)
+                    .format(new java.util.Date()));
+            out.write(" [launcher] ");
+            out.write(message);
+            out.write("\\n");
+            out.flush();
+        } catch (Exception ignored) {
+        }
+    }
+
     boolean hasAccess() { return Build.VERSION.SDK_INT < 30 || Environment.isExternalStorageManager(); }
 
     // ---- the game file, read in place at every start ----
@@ -260,6 +277,7 @@ public class Launcher extends Activity {
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
+        diagnostic("Launcher started; package=" + getPackageName());
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_FULLSCREEN);
         // The game's texts and subtitles (runtime language.h): its own language names, as a console lists them.
         options.add(new Option("language", "Idioma de textos y subtítulos", "Text and subtitle language",
@@ -460,6 +478,7 @@ public class Launcher extends Activity {
                     else if (!prepared()) prepare();
                     else if (openGameForRuntime()) {
                         save();
+                        diagnostic("Play requested; starting NativeActivity; game=" + gameName());
                         startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
                     } else {
                         tell(t("No se pudo abrir el juego", "The game could not be opened"), gameName());
@@ -475,6 +494,7 @@ public class Launcher extends Activity {
                     return;
                 }
                 save();
+                diagnostic("Play requested from prepared data; starting NativeActivity");
                 startActivity(new Intent(Launcher.this, android.app.NativeActivity.class));
             }
         });
