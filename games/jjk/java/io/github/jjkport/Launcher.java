@@ -254,28 +254,8 @@ public class Launcher extends Activity {
         return new File(dataDir(), "exefs/main").canRead() || new File(dataDir(), "analysis/main.bin").canRead();
     }
 
-    // No JJK build ID has been confirmed yet. Do not apply P5R's version check to this title.
+    // The JJK base build ID has not been confirmed yet; never apply P5R's build check here.
     String wrongBuild() { return null; }
-
-
-    // (NSO header +0x40). The native build refuses another (runtime main.cpp); say so here instead of closing.
-    static final String BUILD_ID = "708BCACA873EA32B";
-
-    // Null when exefs/main is missing or the right version, else its build ID.
-    String wrongBuild() {
-        File main = new File(dataDir(), "exefs/main");
-        if (!main.canRead()) return null;
-        byte[] id = new byte[8];
-        try (java.io.RandomAccessFile f = new java.io.RandomAccessFile(main, "r")) {
-            f.seek(0x40);
-            f.readFully(id);
-        } catch (java.io.IOException e) {
-            return "?";
-        }
-        StringBuilder hex = new StringBuilder();
-        for (byte b : id) hex.append(String.format("%02X", b & 0xFF));
-        return hex.toString().equals(BUILD_ID) ? null : hex.toString();
-    }
 
     @Override
     protected void onCreate(Bundle state) {
