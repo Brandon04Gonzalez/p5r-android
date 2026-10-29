@@ -280,7 +280,7 @@ void log_line(const char* line) {
             if (n <= 0) break;
             done += size_t(n);
         }
-        (void)::write(fd, "\\n", 1);
+        (void)::write(fd, "\n", 1);
         (void)::fsync(fd);
         ::close(fd);
     }
@@ -458,11 +458,11 @@ void write_crash_marker(int sig) {
     static const char path[] = "/storage/emulated/0/Jujutsu Kaisen Cursed Clash/crash.log";
     const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
     if (fd < 0) return;
-    static const char prefix[] = "\\n=== JJK native crash; signal ";
+    static const char prefix[] = "\n=== JJK native crash; signal ";
     (void)::write(fd, prefix, sizeof(prefix) - 1);
     char digit = char('0' + (sig >= 0 && sig <= 9 ? sig : 0));
     (void)::write(fd, &digit, 1);
-    static const char suffix[] = " ===\\n";
+    static const char suffix[] = " ===\n";
     (void)::write(fd, suffix, sizeof(suffix) - 1);
     (void)::fsync(fd);
     ::close(fd);
