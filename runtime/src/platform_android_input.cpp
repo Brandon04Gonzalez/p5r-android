@@ -130,6 +130,7 @@ uint64_t key_to_button(int32_t k) {
             default: break;
         }
     }
+    switch (k) {
         case AKEYCODE_BUTTON_L1: return kL;
         case AKEYCODE_BUTTON_R1: return kR;
         case AKEYCODE_BUTTON_L2: return kZL;

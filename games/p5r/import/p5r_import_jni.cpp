@@ -23,6 +23,12 @@
 
 namespace {
 
+static std::string tid_str(uint64_t t) {
+    char buf[17];
+    std::snprintf(buf, sizeof(buf), "%016llX", (unsigned long long)t);
+    return buf;
+}
+
 bool is_supported_title(uint64_t t) {
     uint64_t base = t & ~0xFFFull;
     return base == 0x01005CA01580E000ull  // US
@@ -104,7 +110,7 @@ int run(int nsp_fd, const std::string& nsp_name, const std::string& keys, const 
     if (tfd >= 0) close(tfd);
     if (!game) return fail(err);
     if (!is_supported_title(game->title_id()))
-        return fail("unsupported Title ID: " + nxi::tid_str(game->title_id()) + " (expected Persona 5 Royal US, EU, JP, or Asia)");
+        return fail("unsupported Title ID: " + tid_str(game->title_id()) + " (expected Persona 5 Royal US, EU, JP, or Asia)");
     auto main_it = game->exefs().find("main");
     if (main_it == game->exefs().end() || main_it->second.size() < 0x48) return fail("the game file has no main");
     char id[17];
