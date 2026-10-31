@@ -118,7 +118,6 @@ bool init() {
         log("nvn/vk: no Vulkan loader");
         return false;
     }
-    for (size_t k = 0; k < g_entry_count; k++) *g_entries[k].pfn = gipa(nullptr, g_entries[k].name);
     p_enum_instance_ext = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
         gipa(nullptr, "vkEnumerateInstanceExtensionProperties"));
     p_create_instance = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));

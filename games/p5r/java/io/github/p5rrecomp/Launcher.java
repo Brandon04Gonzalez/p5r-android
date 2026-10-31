@@ -878,6 +878,15 @@ public class Launcher extends Activity {
                 }
             }
 
+            File nxLogPrev = new File(dataDir(), "nx.log.prev");
+            if (nxLogPrev.exists()) {
+                sb.append("\n=== nx.log.prev ===\n");
+                try (BufferedReader br = new BufferedReader(new FileReader(nxLogPrev))) {
+                    String line;
+                    while ((line = br.readLine()) != null) sb.append(line).append("\n");
+                }
+            }
+
             try (FileWriter fw = new FileWriter(out)) {
                 fw.write(sb.toString());
             }
@@ -885,11 +894,14 @@ public class Launcher extends Activity {
             Toast.makeText(this, t("Registros exportados a Download/p5r-log.txt",
                     "Logs exported to Download/p5r-log.txt"), Toast.LENGTH_SHORT).show();
 
+            Uri logUri = Uri.parse("content://" + getPackageName() + ".logprovider" + out.getAbsolutePath());
             Intent share = new Intent(Intent.ACTION_SEND);
             share.setType("text/plain");
+            share.putExtra(Intent.EXTRA_STREAM, logUri);
             share.putExtra(Intent.EXTRA_SUBJECT, "Persona 5 Royal Debug Log");
-            share.putExtra(Intent.EXTRA_TEXT, sb.toString());
-            startActivity(Intent.createChooser(share, t("Compartir registros", "Share logs")));
+            share.setClipData(android.content.ClipData.newRawUri("Log", logUri));
+            share.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+            startActivity(Intent.createChooser(share, t("Compartir archivo de registros", "Share log file")));
         } catch (Exception e) {
             Toast.makeText(this, t("Error al exportar registros: " + e.getMessage(),
                     "Error exporting logs: " + e.getMessage()), Toast.LENGTH_LONG).show();

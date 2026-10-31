@@ -6,8 +6,8 @@
      The recompiled build (analysis/ and the game's code compiled in) is private to the owner of the game. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.p5rrecomp"
-    android:versionCode="10"
-    android:versionName="0.5.1">
+    android:versionCode="11"
+    android:versionName="0.5.2">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -65,5 +65,10 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density">
             <meta-data android:name="android.app.lib_name" android:value="p5r" />
         </activity>
+            <provider
+            android:name=".LogProvider"
+            android:authorities="io.github.p5rrecomp.logprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>
