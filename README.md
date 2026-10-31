@@ -38,18 +38,14 @@ placed in `Internal storage/Persona 5 Royal/mods/<ModName>/romfs/...` (see [docs
 ### Options
 
 Text language, resolution (360p, 480p, 720p, or 1080p), interface resolution, graphics (texture detail), frame rate
-cap (30, or 60 experimental), shadows, FPS counter, touch controls (show, size, opacity, and moving them), and
-**Fullscreen (stretch)**: fill the display when enabled, or preserve the game's aspect ratio without cropping when
-disabled. **Icon → Choose a picture** creates a home screen shortcut with your image (Android does not let an app
-change its own icon in the app drawer, but the shortcut looks and works like one).
+cap (30, or 60 experimental), shadows, FPS counter, **Fullscreen (stretch)**, **Crowd NPCs** (toggle off to boost FPS in busy areas like Shibuya), **Post-processing / Bloom** (toggle off for lighter GPU load), **Touch controls** (show, size, opacity, L3/R3 buttons, and custom layout editor), **Touch stick & camera sensitivity** (50% to 250%), **Physical gamepad layout** (Nintendo vs Xbox/Android A/B and X/Y swap), **Import CPK** (for fan translations / language packs), and **Export logs** (generate and share debug logs directly from the device).
 
 ## Requirements
 
 - An arm64 Android phone or tablet with **Android 10 or newer** and **Vulkan 1.1**, 6 GB of RAM or more (8 GB
   recommended).
 - Storage: the game file (about 15 GB) plus about 1 GB for the translated shaders and saves.
-- Your own dump of **Persona 5 Royal 1.0.0** (title ID `01005CA01580E000`, build ID `708BCACA873EA32B`) and your
-  console's `prod.keys`.
+- Your own dump of **Persona 5 Royal 1.0.0** (US `01005CA01580E000`, EU `01004B10157F2000`, JP `0100B880154FC000`, or Asia `01006BB00C6F0000`) and your console's `prod.keys`.
 
 ## Status
 

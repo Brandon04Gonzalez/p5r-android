@@ -206,7 +206,15 @@ bool bc_host_decode(uint32_t nvn_format) {
     Kind k = kind(nvn_format);
     if (k == kNone || k == kBc6) return false;
     static const bool force = std::getenv("NX_FORCE_BC_DECODE") != nullptr;
-    return force || !vk_features().textureCompressionBC;
+    if (force || is_xclipse()) return true;
+    if (!vk_features().textureCompressionBC) return true;
+    VkFormat vk = vk_format(nvn_format);
+    if (vk != VK_FORMAT_UNDEFINED && vk_physical() && vk::p_vkGetPhysicalDeviceFormatProperties) {
+        VkFormatProperties fp{};
+        vk::p_vkGetPhysicalDeviceFormatProperties(vk_physical(), vk, &fp);
+        if (!(fp.optimalTilingFeatures & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) return true;
+    }
+    return false;
 }
 
 VkFormat bc_decoded_format(uint32_t nvn_format) {

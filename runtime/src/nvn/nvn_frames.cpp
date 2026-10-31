@@ -443,7 +443,14 @@ void frame_init(VkCommandPool pool, uint32_t family, VkBuffer ring, uint8_t* rin
     }
     g_ring = ring, g_ring_ptr = ring_ptr, g_ring_size = ring_size;
 #if defined(__ANDROID__)
-    g_chunk_draws = std::getenv("NX_SUBMIT_CHUNK_DRAWS") ? uint64_t(env_int("NX_SUBMIT_CHUNK_DRAWS")) : 150;
+    if (std::getenv("NX_SUBMIT_CHUNK_DRAWS")) {
+        g_chunk_draws = uint64_t(env_int("NX_SUBMIT_CHUNK_DRAWS"));
+    } else if (is_adreno_8xx()) {
+        g_chunk_draws = 0;  // Adreno 8xx driver bug: chunked submissions hang the GPU during battle passes
+        log("nvn/vk: Adreno 8xx GPU detected: chunk submits disabled to prevent GPU hang");
+    } else {
+        g_chunk_draws = 150;
+    }
 #else
     g_chunk_draws = uint64_t(env_int("NX_SUBMIT_CHUNK_DRAWS"));
 #endif

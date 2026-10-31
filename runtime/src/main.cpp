@@ -5,7 +5,11 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <string>
+#include <vector>
+
+namespace fs = std::filesystem;
 
 #include <nx/game.h>
 #include <nx/runtime.h>
@@ -157,22 +161,58 @@ void boot() {
     // The player's own ExeFS (main and sdk as they are on the cartridge or in the eShop download): from the game file
     // read in place (game_image.h), else from the data folder's exefs/.
     nce::init();
-    static std::unique_ptr<nce::NsoModule> nso[2];
+    static std::vector<std::unique_ptr<nce::NsoModule>> nso;
     const std::string exefs = plat::data_root() + "/exefs";
-    const char* names[2] = {"main", "sdk"};
     const nxi::GameImage* image = game_image();
-    for (int i = 0; i < 2; i++) {
-        std::string error;
-        const uint64_t base = kModuleBase + uint64_t(i) * 0x10000000;
-        if (image) {
-            auto it = image->exefs().find(names[i]);
-            if (it == image->exefs().end()) fatal("the game file's ExeFS has no %s", names[i]);
-            nso[i] = nce::load_nso_bytes(it->second, std::string("ExeFS/") + names[i], names[i], base, error);
-        } else {
-            nso[i] = nce::load_nso(exefs + "/" + names[i], names[i], base, error);
+
+    auto find_mod_exefs = [](const std::string& name) -> std::string {
+        std::error_code ec;
+        fs::path root = fs::u8path(plat::data_root()) / "mods";
+        if (fs::is_regular_file(root / "exefs" / fs::u8path(name), ec))
+            return (root / "exefs" / fs::u8path(name)).string();
+        if (fs::is_directory(root, ec)) {
+            for (auto& e : fs::directory_iterator(root, ec)) {
+                if (e.is_directory(ec)) {
+                    fs::path candidate = e.path() / "exefs" / fs::u8path(name);
+                    if (fs::is_regular_file(candidate, ec)) return candidate.string();
+                }
+            }
         }
-        if (!nso[i]) fatal("%s (copy the exefs folder of your own dump of the game there)", error.c_str());
+        return {};
+    };
+
+    std::vector<std::string> mod_names = {"main", "sdk"};
+    for (int k = 0; k <= 9; k++) mod_names.push_back("subsdk" + std::to_string(k));
+
+    for (const auto& name : mod_names) {
+        std::string mod_file = find_mod_exefs(name);
+        std::string error;
+        const uint64_t base = kModuleBase + uint64_t(nso.size()) * 0x10000000;
+        if (!mod_file.empty()) {
+            log("nce: loading mod exefs override: %s", mod_file.c_str());
+            auto m = nce::load_nso(mod_file, name, base, error);
+            if (m) nso.push_back(std::move(m));
+            else log("nce: error loading mod %s: %s", mod_file.c_str(), error.c_str());
+        } else if (image) {
+            auto it = image->exefs().find(name);
+            if (it != image->exefs().end()) {
+                auto m = nce::load_nso_bytes(it->second, std::string("ExeFS/") + name, name, base, error);
+                if (m) nso.push_back(std::move(m));
+            } else if (name == "main" || name == "sdk") {
+                fatal("the game file's ExeFS has no %s", name.c_str());
+            }
+        } else {
+            std::error_code ec;
+            if (fs::is_regular_file(fs::u8path(exefs) / fs::u8path(name), ec)) {
+                auto m = nce::load_nso(exefs + "/" + name, name, base, error);
+                if (m) nso.push_back(std::move(m));
+            } else if (name == "main" || name == "sdk") {
+                fatal("exefs/%s not found (copy the exefs folder of your own dump there)", name.c_str());
+            }
+        }
     }
+    if (nso.size() < 2) fatal("failed to load base modules (main and sdk required)");
+
     if (const char* want = game::kInfo.main_build_id) {
         std::string have;
         for (uint8_t b : nso[0]->build_id) {
@@ -180,14 +220,32 @@ void boot() {
             std::snprintf(hex, sizeof hex, "%02X", b);
             have += hex;
         }
-        if (have.compare(0, std::strlen(want), want) != 0)
-            fatal("exefs/main is build %s, not %s: this port is made for one version of the game (%s)", have.c_str(), want,
-                  "copy the exefs of the base game, without the update");
+        const char* known_builds[] = {
+            "708BCACA873EA32B", "B78A03E489E5BD92", "6E1F4CAE92A28C91", "2F2253ACD6BE5D87"
+        };
+        bool known = false;
+        for (const char* k : known_builds) {
+            if (have.compare(0, std::strlen(k), k) == 0) { known = true; break; }
+        }
+        bool allow_any = std::getenv("NX_ALLOW_ANY_BUILD") || std::getenv("NX_IGNORE_VERSION");
+        if (known) {
+            log("p5r: main build %s recognized and supported", have.c_str());
+        } else if (allow_any) {
+            log("p5r: main build %s allowed by NX_ALLOW_ANY_BUILD switch", have.c_str());
+        } else {
+            fatal("exefs/main is build %s, not %s: this port is made for Persona 5 Royal 1.0.0 (US, EU, JP, or Asia). Set NX_ALLOW_ANY_BUILD=1 to override.",
+                  have.c_str(), want);
+        }
     }
+
     g_main = &nso[0]->info, g_sdk = &nso[1]->info;
-    const ModuleInfo* mods[] = {g_main, g_sdk};
-    const uint8_t* images[] = {nso[0]->image.data(), nso[1]->image.data()};
-    load_modules(mods, 2, "", images);
+    std::vector<const ModuleInfo*> mods;
+    std::vector<const uint8_t*> img_ptrs;
+    for (const auto& m : nso) {
+        mods.push_back(&m->info);
+        img_ptrs.push_back(m->image.data());
+    }
+    load_modules(mods.data(), mods.size(), "", img_ptrs.data());
 #else
     g_main = &nx_module_main, g_sdk = &nx_module_sdk;
     const ModuleInfo* mods[] = {g_main, g_sdk};

@@ -65,6 +65,8 @@ const Named kP5R[] = {
     {"DOWN", {0.135f, 0.49f, 0.048f, kDown, touch_label(kGlyphDown)}},
     {"LEFT", {0.085f, 0.40f, 0.048f, kLeft, touch_label(kGlyphLeft)}},
     {"RIGHT", {0.185f, 0.40f, 0.048f, kRight, touch_label(kGlyphRight)}},
+    {"L3", {0.055f, 0.58f, 0.046f, kStickL, touch_label(kGlyphL, kGlyph3)}},
+    {"R3", {0.740f, 0.82f, 0.046f, kStickR, touch_label(kGlyphR, kGlyph3)}},
 };
 
 struct Layout {

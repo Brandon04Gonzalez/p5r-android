@@ -208,15 +208,76 @@ void GetTouchScreenState(CPU& c) {
     st<int32_t>(c.x[0] + 8, 0);
 }
 
-// SixAxisSensorState (0x5c bytes used): deltaTime, samplingNumber, acceleration, angularVelocity, angle (Float3 each),
-// direction (3 x Float3), attributes. A controller at rest: no motion, identity orientation.
-void GetSixAxisSensorState(CPU& c) {
-    const uint64_t s = c.x[0];
+void populate_sixaxis(uint64_t s) {
     for (uint64_t k = 0; k < 0x5c; k += 4) st<uint32_t>(s + k, 0);
+    st<int64_t>(s, 16666666);           // deltaTime: ~16.6ms
     st<int64_t>(s + 8, int64_t(g_sampling));
-    st<float>(s + 0x34, 1.0f);  // direction.x = (1, 0, 0)
-    st<float>(s + 0x44, 1.0f);  // direction.y = (0, 1, 0)
-    st<float>(s + 0x54, 1.0f);  // direction.z = (0, 0, 1)
+    // Acceleration: 1G downwards on Y axis (rest state)
+    st<float>(s + 0x10, 0.0f);          // acc.x
+    st<float>(s + 0x14, -1.0f);         // acc.y (-1G)
+    st<float>(s + 0x18, 0.0f);          // acc.z
+
+    // Read current right-stick / gyro inputs to simulate motion aiming (e.g. Darts minigame)
+    PadState p{};
+    read_pad(p);
+    float rx = float(p.rx) / float(kStickMax);
+    float ry = float(p.ry) / float(kStickMax);
+
+    static float angle_x = 0.0f, angle_y = 0.0f;
+    static uint64_t last_time = 0;
+    uint64_t now = monotonic_ns();
+    float dt = (last_time && now > last_time) ? float(now - last_time) * 1e-9f : 0.016f;
+    if (dt > 0.1f) dt = 0.016f;
+    last_time = now;
+
+    float ang_vel_x = rx * 3.14159f;   // rad/s
+    float ang_vel_y = ry * 3.14159f;
+    angle_x = std::clamp(angle_x + ang_vel_x * dt, -1.57f, 1.57f);
+    angle_y = std::clamp(angle_y + ang_vel_y * dt, -1.57f, 1.57f);
+    if (std::abs(rx) < 0.05f) angle_x *= 0.95f;
+    if (std::abs(ry) < 0.05f) angle_y *= 0.95f;
+
+    st<float>(s + 0x1c, ang_vel_x);     // angularVelocity.x
+    st<float>(s + 0x20, ang_vel_y);     // angularVelocity.y
+    st<float>(s + 0x24, 0.0f);          // angularVelocity.z
+
+    st<float>(s + 0x28, angle_x);       // angle.x
+    st<float>(s + 0x2c, angle_y);       // angle.y
+    st<float>(s + 0x30, 0.0f);          // angle.z
+
+    // Rotation direction matrix (3x3 float matrix at 0x34..0x54)
+    st<float>(s + 0x34, 1.0f);          // direction.x = (1, 0, 0)
+    st<float>(s + 0x44, 1.0f);          // direction.y = (0, 1, 0)
+    st<float>(s + 0x54, 1.0f);          // direction.z = (0, 0, 1)
+
+    // Attributes at 0x58: bit 0 = IsConnected, bit 1 = IsInterpolated
+    st<uint32_t>(s + 0x58, 1);
+}
+
+void GetSixAxisSensorHandles(CPU& c) {
+    uint64_t out = c.x[0];
+    int32_t count = int32_t(c.x[1]);
+    if (out && count > 0) {
+        st<uint32_t>(out, 1);
+        c.x[0] = 1;
+    } else {
+        c.x[0] = 0;
+    }
+}
+
+void GetSixAxisSensorState(CPU& c) {
+    if (c.x[0]) populate_sixaxis(c.x[0]);
+}
+
+void GetSixAxisSensorStates(CPU& c) {
+    uint64_t out = c.x[0];
+    int32_t count = int32_t(c.x[1]);
+    if (out && count > 0) {
+        populate_sixaxis(out);
+        c.x[0] = 1;
+    } else {
+        c.x[0] = 0;
+    }
 }
 
 }  // namespace
@@ -252,9 +313,9 @@ NX_HLE("_ZN2nn3hid20StopLrAssignmentModeEv", noop);
 NX_HLE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", zero);  // dual
 NX_HLE("_ZN2nn3hid20IsVibrationPermittedEv", one);
 NX_HLE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", noop);
-NX_HLE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", noop);
+NX_HLE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", GetSixAxisSensorHandles);
 NX_HLE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", noop);
-NX_HLE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", zero);
+NX_HLE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", GetSixAxisSensorStates);
 // SDK 13 (Persona 5 Royal)
 NX_HLE("_ZN2nn3hid21InitializeTouchScreenEv", noop);
 NX_HLE("_ZN2nn3hid19GetTouchScreenStateILm16EEEvPNS0_16TouchScreenStateIXT_EEE", GetTouchScreenState);

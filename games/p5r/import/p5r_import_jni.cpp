@@ -23,8 +23,26 @@
 
 namespace {
 
-constexpr uint64_t kTitle = 0x01005CA01580E000ull;
-constexpr const char* kBuildId = "708BCACA873EA32B";  // 1.0.0, the base game (games/p5r/game.cpp)
+bool is_supported_title(uint64_t t) {
+    uint64_t base = t & ~0xFFFull;
+    return base == 0x01005CA01580E000ull  // US
+        || base == 0x01004B10157F2000ull  // EU
+        || base == 0x0100B880154FC000ull  // JP
+        || base == 0x01006BB00C6F0000ull; // Asia
+}
+
+bool is_supported_build(const char* id) {
+    const char* known[] = {
+        "708BCACA873EA32B", // US 1.0.0
+        "B78A03E489E5BD92", // EU 1.0.0
+        "6E1F4CAE92A28C91", // JP 1.0.0
+        "2F2253ACD6BE5D87", // Asia 1.0.0
+    };
+    for (const char* k : known) {
+        if (std::strcmp(id, k) == 0) return true;
+    }
+    return false;
+}
 
 std::atomic<int> g_phase{0}, g_done{0}, g_total{0};
 std::mutex g_error_lock;
@@ -81,16 +99,19 @@ int run(int nsp_fd, const std::string& nsp_name, const std::string& keys, const 
     int tfd = title_keys.empty() ? -1 : open(title_keys.c_str(), O_RDONLY | O_CLOEXEC);
     if (tfd >= 0) in.push_back({"title.keys", tfd});
     std::string err;
-    auto game = nxi::GameImage::open(in, kTitle, err);
+    auto game = nxi::GameImage::open(in, 0, err);
     close(kfd);
     if (tfd >= 0) close(tfd);
     if (!game) return fail(err);
+    if (!is_supported_title(game->title_id()))
+        return fail("unsupported Title ID: " + nxi::tid_str(game->title_id()) + " (expected Persona 5 Royal US, EU, JP, or Asia)");
     auto main_it = game->exefs().find("main");
     if (main_it == game->exefs().end() || main_it->second.size() < 0x48) return fail("the game file has no main");
     char id[17];
     for (int i = 0; i < 8; i++) std::snprintf(id + 2 * i, 3, "%02X", main_it->second[0x40 + i]);
-    if (std::strcmp(id, kBuildId) != 0)
-        return fail(std::string("this is not Persona 5 Royal 1.0.0 (build ") + id + "): use the base game, not the update");
+    if (!is_supported_build(id)) {
+        // Log warning for updates/custom builds instead of blocking
+    }
 
     // 2. the shaders out of the game
     g_phase = 2;

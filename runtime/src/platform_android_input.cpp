@@ -82,12 +82,54 @@ bool g_gamepad = false;  // the last input came from a controller: the drawn tou
 uint64_t g_last_touch_ns = 0;  // the drawn controls dim after kTouchIdleNs without a touch
 constexpr uint64_t kTouchIdleNs = 8'000'000'000;
 
+bool gamepad_swap_abxy() {
+    static const bool swap = [] {
+        const char* e = std::getenv("NX_GAMEPAD_LAYOUT");
+        return e && std::strcmp(e, "1") == 0;
+    }();
+    return swap;
+}
+
+float stick_sens() {
+    static const float s = [] {
+        const char* e = std::getenv("NX_STICK_SENSITIVITY");
+        int v = e ? std::atoi(e) : 100;
+        if (v < 25) v = 25;
+        if (v > 300) v = 300;
+        return float(v) / 100.0f;
+    }();
+    return s;
+}
+
+float camera_sens() {
+    static const float s = [] {
+        const char* e = std::getenv("NX_CAMERA_SENSITIVITY");
+        int v = e ? std::atoi(e) : 100;
+        if (v < 25) v = 25;
+        if (v > 300) v = 300;
+        return float(v) / 100.0f;
+    }();
+    return s;
+}
+
 uint64_t key_to_button(int32_t k) {
-    switch (k) {
-        case AKEYCODE_BUTTON_A: return kB;  // bottom face button = Nintendo B
-        case AKEYCODE_BUTTON_B: return kA;  // right face button = Nintendo A
-        case AKEYCODE_BUTTON_X: return kY;
-        case AKEYCODE_BUTTON_Y: return kX;
+    if (gamepad_swap_abxy()) {
+        switch (k) {
+            case AKEYCODE_BUTTON_A: return kA;
+            case AKEYCODE_BUTTON_B: return kB;
+            case AKEYCODE_BUTTON_X: return kX;
+            case AKEYCODE_BUTTON_Y: return kY;
+            default: break;
+        }
+    } else {
+        switch (k) {
+            case AKEYCODE_BUTTON_A: return kB;  // bottom face button = Nintendo B
+            case AKEYCODE_BUTTON_B: return kA;  // right face button = Nintendo A
+            case AKEYCODE_BUTTON_X: return kY;
+            case AKEYCODE_BUTTON_Y: return kX;
+            default: break;
+        }
+    }
         case AKEYCODE_BUTTON_L1: return kL;
         case AKEYCODE_BUTTON_R1: return kR;
         case AKEYCODE_BUTTON_L2: return kZL;
@@ -137,12 +179,20 @@ int32_t on_input(android_app*, AInputEvent* e) {
         g_gamepad = true;
         auto axis = [&](int32_t a) {
             float v = AMotionEvent_getAxisValue(e, a, 0);
-            return std::fabs(v) < 0.15f ? 0 : int32_t(std::clamp(v, -1.f, 1.f) * kStickMax);
+            constexpr float kDeadzone = 0.12f;
+            if (std::fabs(v) < kDeadzone) return 0;
+            float sign = v > 0 ? 1.f : -1.f;
+            float scaled = (v - sign * kDeadzone) / (1.f - kDeadzone);
+            return int32_t(std::clamp(scaled, -1.f, 1.f) * kStickMax);
         };
         g_pad_buttons.lx = axis(AMOTION_EVENT_AXIS_X);
         g_pad_buttons.ly = -axis(AMOTION_EVENT_AXIS_Y);
-        g_pad_buttons.rx = axis(AMOTION_EVENT_AXIS_Z);
-        g_pad_buttons.ry = -axis(AMOTION_EVENT_AXIS_RZ);
+        int32_t rx = axis(AMOTION_EVENT_AXIS_Z);
+        if (!rx) rx = axis(AMOTION_EVENT_AXIS_RX);
+        int32_t ry = -axis(AMOTION_EVENT_AXIS_RZ);
+        if (!ry) ry = -axis(AMOTION_EVENT_AXIS_RY);
+        g_pad_buttons.rx = rx;
+        g_pad_buttons.ry = ry;
         float hx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0);
         float hy = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_Y, 0);
         g_pad_buttons.buttons &= ~(kLeft | kRight | kUp | kDown | kZL | kZR);
@@ -232,14 +282,18 @@ void read_pad(PadState& p) {
     for (const auto& t : g_touches) {
         float dx = (t.x - t.x0) / radius, dy = (t.y - t.y0) / radius;
         if (t.stick == kLeftStick) {
-            p.lx = int32_t(std::clamp(dx, -1.f, 1.f) * kStickMax);
-            p.ly = int32_t(std::clamp(-dy, -1.f, 1.f) * kStickMax);
+            float sx = dx * stick_sens();
+            float sy = -dy * stick_sens();
+            p.lx = int32_t(std::clamp(sx, -1.f, 1.f) * kStickMax);
+            p.ly = int32_t(std::clamp(sy, -1.f, 1.f) * kStickMax);
             // A drawn layout's stick pushed nearly all the way may hold a button too (Wonder: Y, dash), so running
             // needs no second thumb on the right side.
             if (drawn && std::abs(dx) > 0.85f) p.buttons |= touch_stick_full_button();
         } else if (t.stick == kRightStick) {
-            p.rx = int32_t(std::clamp(dx, -1.f, 1.f) * kStickMax);
-            p.ry = int32_t(std::clamp(-dy, -1.f, 1.f) * kStickMax);
+            float sx = dx * camera_sens();
+            float sy = -dy * camera_sens();
+            p.rx = int32_t(std::clamp(sx, -1.f, 1.f) * kStickMax);
+            p.ry = int32_t(std::clamp(sy, -1.f, 1.f) * kStickMax);
         } else {
             p.buttons |= t.button;
         }

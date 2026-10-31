@@ -65,6 +65,7 @@ std::atomic<uint64_t> g_picture_latency{0};  // ns, smoothed
 bool g_dynamic_rendering = true;  // vkCmdBeginRendering (core 1.3); else render pass objects
 bool g_integrated = false;
 bool g_require_sg32 = false;  // compute pipelines are made with a required subgroup size of 32 (Maxwell's warp)  // the chosen GPU is an integrated one (unified memory, the GPU is the long side)
+VkPhysicalDeviceProperties g_device_props{};
 VkPhysicalDeviceFeatures g_features{};  // the core features enabled (vk_features())
 VkDescriptorPool g_descriptors = VK_NULL_HANDLE;
 
@@ -156,6 +157,10 @@ bool init() {
     }
     VkPhysicalDeviceProperties props{};
     p_vkGetPhysicalDeviceProperties(g_physical, &props);
+    g_device_props = props;
+    if (is_xclipse()) log("nvn/vk: Samsung Xclipse GPU detected (forcing CPU BC texture decode for compatibility)");
+    if (is_mali()) log("nvn/vk: ARM Mali GPU detected (emulating R11G11B10F as RGBA16F to prevent green/purple flickering)");
+    if (is_adreno_8xx()) log("nvn/vk: Qualcomm Adreno 8xx GPU detected (disabling chunked submits to avoid battle hang)");
     p_vkGetPhysicalDeviceMemoryProperties(g_physical, &g_memory);
     g_integrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
     // An integrated GPU shares the package's power budget with the CPU: ask the desktop for its performance profile
@@ -475,6 +480,21 @@ bool vk_indirect_count() { return g_indirect_count; }
 bool vk_list_restart() { return g_list_restart; }
 bool vk_dynamic_rendering() { return g_dynamic_rendering; }
 const VkPhysicalDeviceFeatures& vk_features() { return g_features; }
+bool is_xclipse() {
+    return std::strstr(g_device_props.deviceName, "Xclipse") != nullptr || g_device_props.vendorID == 0x144d;
+}
+bool is_mali() {
+    return std::strstr(g_device_props.deviceName, "Mali") != nullptr || g_device_props.vendorID == 0x13b5;
+}
+bool is_adreno() {
+    return std::strstr(g_device_props.deviceName, "Adreno") != nullptr || g_device_props.vendorID == 0x5143;
+}
+bool is_adreno_8xx() {
+    const char* p = std::strstr(g_device_props.deviceName, "Adreno");
+    if (!p) return false;
+    while (*p && !(*p >= '0' && *p <= '9')) p++;
+    return *p == '8';
+}
 bool gpu_is_integrated() { return g_integrated; }
 bool gpu_require_subgroup32() { return g_require_sg32; }
 

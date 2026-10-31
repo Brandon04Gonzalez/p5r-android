@@ -158,22 +158,100 @@ bool image_rel(const std::string& guest, std::string& rel) {
 std::vector<fs::path> g_mod_roots;  // low priority first
 const nxi::GameImage::Entry kModDir{0, 0, true};
 
+fs::path find_case_insensitive(const fs::path& base, const std::string& rel) {
+    fs::path current = base;
+    size_t start = 0;
+    std::error_code ec;
+    while (start < rel.size()) {
+        size_t next = rel.find('/', start);
+        std::string part = (next == std::string::npos) ? rel.substr(start) : rel.substr(start, next - start);
+        start = (next == std::string::npos) ? rel.size() : next + 1;
+        if (part.empty()) continue;
+
+        fs::path direct = current / fs::u8path(part);
+        if (fs::exists(direct, ec)) {
+            current = direct;
+            continue;
+        }
+        bool found = false;
+        if (fs::is_directory(current, ec)) {
+            for (auto& entry : fs::directory_iterator(current, ec)) {
+                auto name_u8 = entry.path().filename().u8string();
+                std::string name(name_u8.begin(), name_u8.end());
+                if (name.size() == part.size()) {
+                    bool match = true;
+                    for (size_t i = 0; i < name.size(); i++) {
+                        if (std::tolower(static_cast<unsigned char>(name[i])) !=
+                            std::tolower(static_cast<unsigned char>(part[i]))) {
+                            match = false;
+                            break;
+                        }
+                    }
+                    if (match) {
+                        current = entry.path();
+                        found = true;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!found) return {};
+    }
+    return current;
+}
+
 void scan_mods() {
     g_mod_roots.clear();
     std::error_code ec;
     fs::path root = data_root() / "mods";
-    if (!fs::is_directory(root, ec)) return;
     std::vector<fs::path> found;
-    for (auto& e : fs::directory_iterator(root, ec)) {
-        if (!e.is_directory(ec)) continue;
-        auto u8 = e.path().filename().u8string();
-        std::string name(u8.begin(), u8.end());
-        if (name.empty() || name[0] == '.' || name[0] == '_') continue;
-        if (fs::is_directory(e.path() / "romfs", ec)) found.push_back(e.path() / "romfs");
+
+    // Check direct mods/romfs (Atmosphere layout dropped directly into mods/)
+    if (fs::is_directory(root / "romfs", ec)) {
+        found.push_back(root / "romfs");
     }
+
+    // Check atmosphere/contents/<title_id>/romfs
+    fs::path atmos = data_root() / "atmosphere" / "contents";
+    if (fs::is_directory(atmos, ec)) {
+        for (auto& e : fs::directory_iterator(atmos, ec)) {
+            if (e.is_directory(ec) && fs::is_directory(e.path() / "romfs", ec))
+                found.push_back(e.path() / "romfs");
+        }
+    }
+
+    // Check mods/<ModName>...
+    if (fs::is_directory(root, ec)) {
+        for (auto& e : fs::directory_iterator(root, ec)) {
+            if (!e.is_directory(ec)) continue;
+            auto u8 = e.path().filename().u8string();
+            std::string name(u8.begin(), u8.end());
+            if (name.empty() || name[0] == '.' || name[0] == '_') continue;
+            if (name == "romfs" || name == "exefs") continue;
+            if (fs::is_directory(e.path() / "romfs", ec)) {
+                found.push_back(e.path() / "romfs");
+            } else if (fs::is_directory(e.path() / "CPK", ec) || fs::is_directory(e.path() / "cpk", ec) ||
+                       fs::is_directory(e.path() / "sound", ec) || fs::is_directory(e.path() / "movie", ec) ||
+                       fs::is_directory(e.path() / "field", ec) || fs::is_directory(e.path() / "app_config", ec)) {
+                found.push_back(e.path());
+            }
+        }
+    }
+
     std::sort(found.begin(), found.end());
+    found.erase(std::unique(found.begin(), found.end()), found.end());
     g_mod_roots = std::move(found);
-    for (auto& r : g_mod_roots) log("fs: mod active: %s", r.parent_path().filename().string().c_str());
+    for (auto& r : g_mod_roots) log("fs: mod active: %s", r.string().c_str());
+
+    // Crowd removal option (NX_NO_CROWD=1): stub RESRCCROWDUNIT.BIN to prevent crowd spawning
+    if (const char* e = std::getenv("NX_NO_CROWD")) {
+        if (e[0] == '1' || std::strcmp(e, "true") == 0) {
+            log("fs: crowd removal active (NX_NO_CROWD=1): stubbing RESRCCROWDUNIT.BIN");
+            add_virtual_file("resource/resrccrowdunit.bin", "");
+            add_virtual_file("base/resource/resrccrowdunit.bin", "");
+            add_virtual_file("cpk/patch1/base/resource/resrccrowdunit.bin", "");
+        }
+    }
 }
 
 bool safe_rel(const std::string& rel) {  // no ".." part: a mod path never leaves its folder
@@ -194,6 +272,8 @@ fs::path mod_file(const std::string& rel) {
     for (auto it = g_mod_roots.rbegin(); it != g_mod_roots.rend(); ++it) {
         fs::path p = *it / fs::u8path(rel);
         if (fs::is_regular_file(p, ec)) return p;
+        fs::path ci = find_case_insensitive(*it, rel);
+        if (!ci.empty() && fs::is_regular_file(ci, ec)) return ci;
     }
     return {};
 }
@@ -201,8 +281,13 @@ fs::path mod_file(const std::string& rel) {
 bool mod_has_dir(const std::string& rel) {
     if (g_mod_roots.empty() || !safe_rel(rel)) return false;
     std::error_code ec;
-    for (auto& r : g_mod_roots)
+    for (auto& r : g_mod_roots) {
         if (fs::is_directory(rel.empty() ? r : r / fs::u8path(rel), ec)) return true;
+        if (!rel.empty()) {
+            fs::path ci = find_case_insensitive(r, rel);
+            if (!ci.empty() && fs::is_directory(ci, ec)) return true;
+        }
+    }
     return false;
 }
 

@@ -380,6 +380,17 @@ bool shadow_draw_skipped(const Targets& t) {
     return d && d->width == d->height && d->width >= 512 && !(d->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
 }
 
+// NX_DISABLE_BLOOM=1 (the launcher's "Post-procesado: desactivado"): no draws into bloom/blur mip chains.
+bool bloom_draw_skipped(const Targets& t) {
+    static const bool off = [] {
+        const char* e = std::getenv("NX_DISABLE_BLOOM");
+        return e && (e[0] == '1' || std::strcmp(e, "true") == 0);
+    }();
+    if (!off) return false;
+    if (t.color_count > 0 && t.views.level[0] > 0) return true;
+    return false;
+}
+
 // Live experiments while playing (debugging HUD glitches without a restart): a file named live_flags in the data
 // folder holds words, read about once a second while it exists (removing it turns them off). ui_always: draws into a
 // 1280x720 or larger RGBA8 target that test depth use ALWAYS (draw order alone, as if no depth buffer).
@@ -519,6 +530,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     g_stats.total++;
     if (g_state.rasterizer_discard || !g_state.render_enable) return false;  // nothing reaches the targets
     if (shadow_draw_skipped(t)) return false;
+    if (bloom_draw_skipped(t)) return false;
     static thread_local std::vector<const ShaderInfo*> combined;
     const auto* shaders = bound_graphics_shaders(combined);
     if (!shaders || shaders->empty()) {

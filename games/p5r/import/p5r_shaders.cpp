@@ -391,7 +391,10 @@ long extract_shaders(const nxi::GameImage& game, const std::string& out_dir,
     try {
         make_dir(out_dir);
         const nxi::GameImage::Entry* cpk = game.find("CPK/ALL_USEU.CPK");
-        if (!cpk) throw Fail("the game file has no CPK/ALL_USEU.CPK (is it Persona 5 Royal?)");
+        if (!cpk) cpk = game.find("CPK/ALL_JP.CPK");
+        if (!cpk) cpk = game.find("CPK/ALL_ASIA.CPK");
+        if (!cpk) cpk = game.find("CPK/ALL.CPK");
+        if (!cpk) throw Fail("the game file has no CPK/ALL_USEU.CPK or ALL_JP.CPK (is it Persona 5 Royal?)");
         auto main_it = game.exefs().find("main");
         if (main_it == game.exefs().end()) throw Fail("the game file's ExeFS has no main");
         std::vector<CpkFile> gscs;

@@ -31,15 +31,16 @@ public class ControlsEditor extends Activity {
     // The game's layout (a copy of kP5R and the stick's place in runtime/src/touch_layout.cpp): name, label, x, y
     // (0..1 across the landscape screen), radius (a fraction of its height), group (moved together).
     static final String[] NAMES = {"A", "B", "X", "Y", "R", "ZR", "L", "ZL", "MINUS", "PLUS", "UP", "DOWN", "LEFT",
-            "RIGHT", "STICK"};
-    static final String[] LABELS = {"A", "B", "X", "Y", "R", "ZR", "L", "ZL", "−", "+", "▲", "▼", "◀", "▶", ""};
+            "RIGHT", "STICK", "L3", "R3"};
+    static final String[] LABELS = {"A", "B", "X", "Y", "R", "ZR", "L", "ZL", "−", "+", "▲", "▼", "◀", "▶", "", "L3", "R3"};
     static final float[][] DEFAULTS = {
             {0.940f, 0.66f, 0.068f}, {0.875f, 0.80f, 0.068f}, {0.875f, 0.52f, 0.068f}, {0.810f, 0.66f, 0.068f},
             {0.945f, 0.08f, 0.052f}, {0.945f, 0.24f, 0.052f}, {0.055f, 0.08f, 0.052f}, {0.055f, 0.24f, 0.052f},
             {0.440f, 0.07f, 0.045f}, {0.560f, 0.07f, 0.045f},
             {0.135f, 0.31f, 0.048f}, {0.135f, 0.49f, 0.048f}, {0.085f, 0.40f, 0.048f}, {0.185f, 0.40f, 0.048f},
-            {0.150f, 0.76f, 0.120f}};
-    static final int[] GROUP = {0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7, 7, 7, 8};
+            {0.150f, 0.76f, 0.120f},
+            {0.055f, 0.58f, 0.046f}, {0.740f, 0.82f, 0.046f}};
+    static final int[] GROUP = {0, 0, 0, 0, 1, 2, 3, 4, 5, 6, 7, 7, 7, 7, 8, 9, 10};
     static final int STICK = 14;
 
     float[][] pos = new float[NAMES.length][];
