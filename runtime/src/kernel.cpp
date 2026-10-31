@@ -475,9 +475,50 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
             c.x[1] = 0;
             break;
         }
-        case 0x07:
-            log("svcExitProcess");
+        case 0x07: {
+            // Keep the final guest context: startup exits can be an intentional game decision or an SDK
+            // failure path. The symbolic PCs and nearby instructions let us distinguish them from one log.
+            const uint32_t insn_m8 = ld<uint32_t>(pc - 8);
+            const uint32_t insn_m4 = ld<uint32_t>(pc - 4);
+            const uint32_t insn_0 = ld<uint32_t>(pc);
+            const uint32_t insn_p4 = ld<uint32_t>(pc + 4);
+            log("svcExitProcess: pc=%s lr=%s sp=%llx x0=%llx x1=%llx x2=%llx x3=%llx x4=%llx x5=%llx x6=%llx x7=%llx",
+                describe(pc).c_str(), describe(c.x[30]).c_str(), (unsigned long long)c.x[31],
+                (unsigned long long)c.x[0], (unsigned long long)c.x[1], (unsigned long long)c.x[2],
+                (unsigned long long)c.x[3], (unsigned long long)c.x[4], (unsigned long long)c.x[5],
+                (unsigned long long)c.x[6], (unsigned long long)c.x[7]);
+            log("svcExitProcess: x19=%llx x20=%llx x21=%llx x22=%llx x23=%llx x29=%llx insn[-8,-4,0,+4]=%08x,%08x,%08x,%08x",
+                (unsigned long long)c.x[19], (unsigned long long)c.x[20], (unsigned long long)c.x[21],
+                (unsigned long long)c.x[22], (unsigned long long)c.x[23], (unsigned long long)c.x[29],
+                insn_m8, insn_m4, insn_0, insn_p4);
+            // The LR only identifies ExitProcessImpl's return site, not who triggered shutdown.
+            // Dump a small stack window and symbol-like candidates to identify the preceding caller.
+            for (int i = 0; i < 12; ++i) {
+                const uint64_t a = c.x[31] + uint64_t(i) * 8;
+                const uint64_t v = ld<uint64_t>(a);
+                log("svcExitProcess: stack[%02d] @%llx = %llx (%s)", i,
+                    (unsigned long long)a, (unsigned long long)v, describe(v).c_str());
+            }
+            uint64_t fp = c.x[29];
+            for (int i = 0; i < 8 && fp >= c.x[31] && fp < c.x[31] + 0x100000; ++i) {
+                const uint64_t prev = ld<uint64_t>(fp);
+                const uint64_t ret = ld<uint64_t>(fp + 8);
+                log("svcExitProcess: frame[%02d] fp=%llx prev=%llx ret=%llx (%s)", i,
+                    (unsigned long long)fp, (unsigned long long)prev, (unsigned long long)ret, describe(ret).c_str());
+                // Dump nearby guest instructions around the first return address in main. The current NCE log
+                // shows main calling exit(), but not the branch/condition that selected that path. This lets the
+                // next device log identify the actual startup failure without guessing at SDK import ABIs.
+                if (describe(ret).rfind("main+", 0) == 0) {
+                    for (int j = -12; j <= 3; ++j) {
+                        const uint64_t at = ret + int64_t(j) * 4;
+                        log("svcExitProcess: caller_insn %s %08x", describe(at).c_str(), ld<uint32_t>(at));
+                    }
+                }
+                if (prev <= fp || prev - fp > 0x100000) break;
+                fp = prev;
+            }
             plat::exit_process(0);
+        }
         case 0x08: {  // CreateThread(entry x1, arg x2, stack_top x3, prio w4, core w5) -> handle
             auto t = new_thread(c.x[1], c.x[2], c.x[3], int(c.x[4]), int32_t(c.x[5]));
             c.x[1] = t->handle;

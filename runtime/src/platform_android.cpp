@@ -59,6 +59,24 @@ void boot();
 namespace nx::plat {
 
 namespace {
+// Breadcrumbs before android_main: the normal logger starts too late to diagnose
+// failures during NativeActivity creation or native-library initialization.
+void early_startup_log(const char* message) {
+    __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, message);
+    if (std::strcmp(nx::game::kInfo.id, "jjk") != 0) return;
+    static constexpr char path[] = "/storage/emulated/0/Jujutsu Kaisen Cursed Clash/runtime.log";
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    (void)::write(fd, message, std::strlen(message));
+    (void)::write(fd, "\n", 1);
+    (void)::fsync(fd);
+    ::close(fd);
+}
+
+__attribute__((constructor)) void jjk_native_library_loaded() {
+    early_startup_log("[native] libjjk load constructor reached");
+}
+
 android_app* g_app = nullptr;
 std::string g_root;
 std::atomic<ANativeWindow*> g_window{nullptr};
@@ -260,7 +278,31 @@ bool make_dirs(const std::string& path) {
     return !ec;
 }
 
-void log_line(const char* line) { __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line); }
+void log_line(const char* line) {
+    __android_log_write(ANDROID_LOG_INFO, nx::game::kInfo.id, line);
+
+    // Keep a persistent copy in the user-visible game folder.
+    static std::mutex file_log_mutex;
+    std::lock_guard<std::mutex> lock(file_log_mutex);
+    const std::string root = !g_root.empty()
+        ? g_root
+        : std::string("/storage/emulated/0/Jujutsu Kaisen Cursed Clash");
+    const std::string path = root + "/runtime.log";
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd >= 0) {
+        const size_t len = std::strlen(line);
+        size_t done = 0;
+        while (done < len) {
+            const ssize_t n = ::write(fd, line + done, len - done);
+            if (n < 0 && errno == EINTR) continue;
+            if (n <= 0) break;
+            done += size_t(n);
+        }
+        (void)::write(fd, "\n", 1);
+        (void)::fsync(fd);
+        ::close(fd);
+    }
+}
 
 std::string data_root() { return g_root; }
 
@@ -428,8 +470,25 @@ namespace {
 
 struct sigaction g_previous[32];  // the handlers before ours (debuggerd's)
 
+// Signal-safe fallback: do not depend on C++ streams, mutexes, or the normal logger
+// when a native fault occurs. This path is the visible top-level JJK data folder.
+void write_crash_marker(int sig) {
+    static const char path[] = "/storage/emulated/0/Jujutsu Kaisen Cursed Clash/crash.log";
+    const int fd = ::open(path, O_WRONLY | O_CREAT | O_APPEND | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    static const char prefix[] = "\n=== JJK native crash; signal ";
+    (void)::write(fd, prefix, sizeof(prefix) - 1);
+    char digit = char('0' + (sig >= 0 && sig <= 9 ? sig : 0));
+    (void)::write(fd, &digit, 1);
+    static const char suffix[] = " ===\n";
+    (void)::write(fd, suffix, sizeof(suffix) - 1);
+    (void)::fsync(fd);
+    ::close(fd);
+}
+
 void crash(int sig, siginfo_t* info, void* uc) {
     if ((sig == SIGSEGV || sig == SIGBUS) && nx::plat::write_watch_fault(info->si_addr)) return;  // write_watch.cpp
+    write_crash_marker(sig);
     nx::log("CRASH: signal %d, fault address %p", sig, info->si_addr);
 #if NX_NCE
     // In the game's own code: its registers are in the signal's context, not in the thread's CPU.
@@ -588,6 +647,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_io_github_belmantegu_wonderrecomp_GameAc
 }
 
 extern "C" JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, void* saved, size_t size) {
+    nx::plat::early_startup_log("[native] ANativeActivity_onCreate entered");
     g_activity = activity;
     if (g_ui_pipe[0] < 0 && pipe2(g_ui_pipe, O_NONBLOCK | O_CLOEXEC) == 0)
         ALooper_addFd(ALooper_forThread(), g_ui_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_ui_request, nullptr);
@@ -633,6 +693,7 @@ static bool has_data(const std::string& root) { return access((root + kDataProbe
 
 extern "C" void android_main(android_app* app) {
     using namespace nx::plat;
+    early_startup_log("[native] android_main entered");
     g_app = app;
     // Game data: Internal storage/<game title> (put there by the player, needs all-files access) or the app's own
     // external files folder (adb push).
@@ -643,21 +704,41 @@ extern "C" void android_main(android_app* app) {
         std::getline(f, chosen);
         while (!chosen.empty() && (chosen.back() == '\r' || chosen.back() == '\n' || chosen.back() == ' ')) chosen.pop_back();
     }
-    const std::string shared = !chosen.empty() ? chosen : std::string("/storage/emulated/0/") + nx::game::kInfo.title;
-    const std::string own = app->activity->externalDataPath ? app->activity->externalDataPath : shared;
-    if (!has_data(own) && !has_all_files_access(app)) {
-        request_all_files_access(app);
-        while (!has_all_files_access(app)) {  // keep the app responsive until the switch is turned on
-            int events;
-            android_poll_source* src;
-            while (ALooper_pollOnce(100, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0) {
-                if (src) src->process(app, src);
-                if (app->destroyRequested) _exit(0);
-            }
-        }
+    // Keep the Java launcher's canonical folder name (without the title's colon) as an
+    // explicit candidate even if an old/invalid data_root.txt value exists.
+    const std::string shared = "/storage/emulated/0/Jujutsu Kaisen Cursed Clash";
+    const std::string legacy_shared = std::string("/storage/emulated/0/") + nx::game::kInfo.title;
+    const std::string own = app->activity->externalDataPath ? app->activity->externalDataPath : "";
+    // Never let a stale configured path hide the actual prepared folder. Test every known root
+    // and choose the first one containing exefs/main; keep a deterministic fallback for diagnostics.
+    early_startup_log("[native] selecting game data directory");
+    const bool chosen_has_data = !chosen.empty() && has_data(chosen);
+    const bool shared_has_data = has_data(shared);
+    const bool own_has_data = !own.empty() && has_data(own);
+    const bool legacy_has_data = has_data(legacy_shared);
+    if (chosen_has_data) {
+        g_root = chosen;
+        early_startup_log("[native] selected configured data root");
+    } else if (shared_has_data) {
+        g_root = shared;
+        early_startup_log("[native] selected canonical shared JJK folder");
+    } else if (own_has_data) {
+        g_root = own;
+        early_startup_log("[native] selected app external-data folder");
+    } else if (legacy_has_data) {
+        g_root = legacy_shared;
+        early_startup_log("[native] selected legacy title-named folder");
+    } else {
+        g_root = !chosen.empty() ? chosen : !own.empty() ? own : shared;
+        early_startup_log("[native] ERROR: no candidate data root contains readable exefs/main");
+        early_startup_log(chosen.empty() ? "[native] configured root is empty" : chosen.c_str());
+        early_startup_log(shared_has_data ? "[native] canonical folder readable" : "[native] canonical folder missing exefs/main or unreadable");
+        early_startup_log(own.empty() ? "[native] app external-data path unavailable" : own.c_str());
+        early_startup_log(legacy_has_data ? "[native] legacy folder readable" : "[native] legacy folder missing exefs/main or unreadable");
     }
-    // The picked folder wins over the app's own one; else the own one (adb push), else Internal storage/<title>.
-    g_root = !chosen.empty() && has_data(chosen) ? chosen : has_data(own) ? own : shared;
+    early_startup_log("[native] data-root selected; normal runtime logging will begin");
+    // Create a visible log immediately, before the guest thread or renderer starts.
+    nx::plat::log_line("JJK runtime logger initialized; startup reached data-root selection");
     // config.txt's NX_* lines become environment variables (the NVN layer reads its switches with getenv), without
     // overriding a variable already set. Android defaults: handheld (720p, the lighter GPU load).
     {
@@ -679,6 +760,13 @@ extern "C" void android_main(android_app* app) {
             unsetenv("NX_HANDHELD");
         else
             setenv("NX_HANDHELD", "1", 0);
+    }
+    // JJK has no verified pretranslated shader set yet. Capture the exact NVN Maxwell code/control
+    // blocks encountered at runtime so they can be fed through the same Ryujinx translator used by P5R.
+    // Respect an explicit config override; default capture on only for JJK to avoid changing other ports.
+    if (std::strcmp(nx::game::kInfo.id, "jjk") == 0 && !std::getenv("NX_DUMP_SHADER_MISSES")) {
+        setenv("NX_DUMP_SHADER_MISSES", "1", 0);
+        early_startup_log("[native] JJK shader-miss capture enabled; missing NVN shaders will be saved for translation");
     }
     // The heap (scudo) zero-fills every allocation and gives freed pages back at once by default: in the replay, a
     // memset under each allocation and madvise churn (docs/nvn/android-perf/PLAN.md, phase 2). NX_MALLOC_TUNE=0: as

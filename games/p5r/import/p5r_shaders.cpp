@@ -386,6 +386,23 @@ long extract(const std::string& group, const std::vector<uint8_t>& data, bool gs
 
 }  // namespace
 
+long extract_exefs_shaders(const nxi::GameImage& game, const std::string& out_dir, std::string& error) {
+    try {
+        make_dir(out_dir);
+        auto main_it = game.exefs().find("main");
+        if (main_it == game.exefs().end()) throw Fail("the game file's ExeFS has no main");
+        std::vector<uint8_t> flat;
+        if (!nxi::nso_to_flat_image(main_it->second, flat, error)) return -1;
+        std::set<std::string> seen;
+        return extract("exefs", flat, false, out_dir, seen);
+    } catch (const Fail& e) {
+        error = e.what();
+    } catch (const std::bad_alloc&) {
+        error = "out of memory";
+    }
+    return -1;
+}
+
 long extract_shaders(const nxi::GameImage& game, const std::string& out_dir,
                      const std::function<void(int, int)>& progress, std::string& error) {
     try {
