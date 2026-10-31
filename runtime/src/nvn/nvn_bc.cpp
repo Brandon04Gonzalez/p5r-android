@@ -206,7 +206,7 @@ bool bc_host_decode(uint32_t nvn_format) {
     Kind k = kind(nvn_format);
     if (k == kNone || k == kBc6) return false;
     static const bool force = std::getenv("NX_FORCE_BC_DECODE") != nullptr;
-    if (force || is_xclipse()) return true;
+    if (force) return true;
     if (!vk_features().textureCompressionBC) return true;
     VkFormat vk = vk_format(nvn_format);
     if (vk != VK_FORMAT_UNDEFINED && vk_physical() && vk::p_vkGetPhysicalDeviceFormatProperties) {

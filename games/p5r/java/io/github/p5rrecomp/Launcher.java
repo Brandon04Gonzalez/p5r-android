@@ -271,9 +271,14 @@ public class Launcher extends Activity {
 
     // The build ID the port is made for (Persona 5 Royal 1.0.0, the base game): the start of exefs/main's module ID
     // (NSO header +0x40). The native build refuses another (runtime main.cpp); say so here instead of closing.
-    static final String BUILD_ID = "708BCACA873EA32B";
+    static final String[] KNOWN_BUILDS = {
+        "708BCACA873EA32B",  // US
+        "B78A03E489E5BD92",  // EU
+        "6E1F4CAE92A28C91",  // JP
+        "2F2253ACD6BE5D87"   // Asia
+    };
 
-    // Null when exefs/main is missing or the right version, else its build ID.
+    // Null when exefs/main is missing or a recognized base game version, else its build ID.
     String wrongBuild() {
         File main = new File(dataDir(), "exefs/main");
         if (!main.canRead()) return null;
@@ -286,7 +291,11 @@ public class Launcher extends Activity {
         }
         StringBuilder hex = new StringBuilder();
         for (byte b : id) hex.append(String.format("%02X", b & 0xFF));
-        return hex.toString().equals(BUILD_ID) ? null : hex.toString();
+        String have = hex.toString();
+        for (String k : KNOWN_BUILDS) {
+            if (have.equals(k)) return null;
+        }
+        return have;
     }
 
     @Override
@@ -851,7 +860,7 @@ public class Launcher extends Activity {
             sb.append("Date: ").append(new java.util.Date().toString()).append("\n\n");
 
             try {
-                Process p = Runtime.getRuntime().exec(new String[] {"logcat", "-d", "-s", "p5r:V", "DEBUG:V", "vulkan:V"});
+                Process p = Runtime.getRuntime().exec(new String[] {"logcat", "-d", "-t", "500"});
                 try (BufferedReader br = new BufferedReader(new java.io.InputStreamReader(p.getInputStream()))) {
                     String line;
                     while ((line = br.readLine()) != null) sb.append(line).append("\n");

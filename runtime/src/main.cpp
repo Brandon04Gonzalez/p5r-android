@@ -193,21 +193,24 @@ void boot() {
             auto m = nce::load_nso(mod_file, name, base, error);
             if (m) nso.push_back(std::move(m));
             else log("nce: error loading mod %s: %s", mod_file.c_str(), error.c_str());
-        } else if (image) {
-            auto it = image->exefs().find(name);
-            if (it != image->exefs().end()) {
-                auto m = nce::load_nso_bytes(it->second, std::string("ExeFS/") + name, name, base, error);
-                if (m) nso.push_back(std::move(m));
-            } else if (name == "main" || name == "sdk") {
-                fatal("the game file's ExeFS has no %s", name.c_str());
-            }
-        } else {
-            std::error_code ec;
-            if (fs::is_regular_file(fs::u8path(exefs) / fs::u8path(name), ec)) {
-                auto m = nce::load_nso(exefs + "/" + name, name, base, error);
-                if (m) nso.push_back(std::move(m));
-            } else if (name == "main" || name == "sdk") {
-                fatal("exefs/%s not found (copy the exefs folder of your own dump there)", name.c_str());
+        } else if (name == "main" || name == "sdk") {
+            // Only main and sdk come from base game. Base game subsdk0 is the Switch Tegra NVN driver and must not be loaded.
+            if (image) {
+                auto it = image->exefs().find(name);
+                if (it != image->exefs().end()) {
+                    auto m = nce::load_nso_bytes(it->second, std::string("ExeFS/") + name, name, base, error);
+                    if (m) nso.push_back(std::move(m));
+                } else {
+                    fatal("the game file's ExeFS has no %s", name.c_str());
+                }
+            } else {
+                std::error_code ec;
+                if (fs::is_regular_file(fs::u8path(exefs) / fs::u8path(name), ec)) {
+                    auto m = nce::load_nso(exefs + "/" + name, name, base, error);
+                    if (m) nso.push_back(std::move(m));
+                } else {
+                    fatal("exefs/%s not found (copy the exefs folder of your own dump there)", name.c_str());
+                }
             }
         }
     }

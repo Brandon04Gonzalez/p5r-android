@@ -158,7 +158,7 @@ bool init() {
     VkPhysicalDeviceProperties props{};
     p_vkGetPhysicalDeviceProperties(g_physical, &props);
     g_device_props = props;
-    if (is_xclipse()) log("nvn/vk: Samsung Xclipse GPU detected (forcing CPU BC texture decode for compatibility)");
+    if (is_xclipse()) log("nvn/vk: Samsung Xclipse GPU detected");
     if (is_mali()) log("nvn/vk: ARM Mali GPU detected (emulating R11G11B10F as RGBA16F to prevent green/purple flickering)");
     if (is_adreno_8xx()) log("nvn/vk: Qualcomm Adreno 8xx GPU detected (disabling chunked submits to avoid battle hang)");
     p_vkGetPhysicalDeviceMemoryProperties(g_physical, &g_memory);
