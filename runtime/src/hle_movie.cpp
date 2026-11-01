@@ -155,7 +155,7 @@ struct Decoder {
     // Per-window counts for the movie: line (pump thread, every 2 s while the decoder runs).
     struct Stats {
         uint64_t sent = 0, decoded = 0, acquired = 0, got = 0, released = 0, empty_acquires = 0;
-        uint64_t convert_ns = 0, copy_ns = 0, send_wait_ns = 0, max_got_gap_ns = 0;
+        uint64_t convert_ns = 0, copy_ns = 0, send_wait_ns = 0, max_got_gap_ns = 0, max_pump_ns = 0;
     } win;
     uint64_t last_got_ns = 0, win_from_ns = 0, last_sent_ns = 0;
     int64_t last_sent_pts = 0, last_got_pts = 0;
@@ -278,6 +278,7 @@ void read_codec_format(Decoder& d) {
 // first). True when an output became ready.
 bool pump(Decoder& d, int64_t wait_us) {
     if (!d.codec) return false;
+    const uint64_t pump_from = plat::monotonic_ns();
     while (!d.to_codec.empty()) {
         ssize_t i = AMediaCodec_dequeueInputBuffer(d.codec, 0);
         if (i < 0) break;
@@ -317,6 +318,7 @@ bool pump(Decoder& d, int64_t wait_us) {
         d.decoded += info.size > 0;
         any = true;
     }
+    d.win.max_pump_ns = std::max(d.win.max_pump_ns, plat::monotonic_ns() - pump_from);
     return any;
 }
 
@@ -494,12 +496,13 @@ void movie_pump_thread(CPU& c) {
                 int busy = 0;
                 for (const auto& o : d->outputs) busy += o.busy;
                 log("movie: per s: sent %.1f, decoded %.1f, acquired %.1f (+%.1f empty), got %.1f, released %.1f; "
-                    "longest gap between gots %.0f ms; convert %.2f ms, copy %.2f ms, send wait %.2f ms per picture; "
-                    "queued for the codec %zu, ready %zu, slots busy %d",
+                    "longest gap between gots %.0f ms; convert %.2f ms, copy %.2f ms, send wait %.2f ms per picture, "
+                    "longest pump %.2f ms; queued for the codec %zu, ready %zu, slots busy %d",
                     w.sent / s, w.decoded / s, w.acquired / s, w.empty_acquires / s, w.got / s, w.released / s,
                     double(w.max_got_gap_ns) / 1e6, w.decoded ? double(w.convert_ns) / 1e6 / double(w.decoded) : 0.0,
                     w.got ? double(w.copy_ns) / 1e6 / double(w.got) : 0.0,
-                    w.sent ? double(w.send_wait_ns) / 1e6 / double(w.sent) : 0.0, d->to_codec.size(), d->ready.size(), busy);
+                    w.sent ? double(w.send_wait_ns) / 1e6 / double(w.sent) : 0.0, double(w.max_pump_ns) / 1e6,
+                    d->to_codec.size(), d->ready.size(), busy);
                 d->win = {};
                 d->win_from_ns = now;
             }

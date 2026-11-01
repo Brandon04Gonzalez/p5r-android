@@ -66,6 +66,9 @@ uint64_t g_device = 0;                      // frames the callback gave the devi
 std::atomic<uint64_t> g_latency_ns{0};      // audio_latency_ns
 std::deque<Pending> g_pending;
 std::atomic<uint32_t> g_delay_frames{0};
+std::atomic<uint64_t> g_occ_min{~uint64_t(0)}, g_occ_max{0};
+std::atomic<uint64_t> g_truncations{0}, g_pending_max{0};
+std::atomic<uint64_t> g_latency_ok{0}, g_latency_early{0};
 AudioDone g_done = nullptr;
 AAudioStream* g_stream = nullptr;
 // Per ~2 s, logged from the callback: how the device pulls (callbacks, frames per call) and how often the game's
@@ -100,7 +103,10 @@ aaudio_data_callback_result_t audio_cb(AAudioStream*, void*, void* out, int32_t 
     std::vector<void*> finished;
     {
         std::lock_guard lk(g_audio);
-        const uint64_t n = std::min<uint64_t>(uint64_t(frames), g_written - g_read);
+        const uint64_t occupancy = g_written - g_read;
+        g_occ_min.store(std::min(g_occ_min.load(std::memory_order_relaxed), occupancy), std::memory_order_relaxed);
+        g_occ_max.store(std::max(g_occ_max.load(std::memory_order_relaxed), occupancy), std::memory_order_relaxed);
+        const uint64_t n = std::min<uint64_t>(uint64_t(frames), occupancy);
         for (uint64_t k = 0; k < n; k++) dst[k] = g_ring[(g_read + k) % kRingFrames];
         g_read += n;
         g_device += uint64_t(frames);
@@ -153,13 +159,20 @@ static void measure_latency(uint64_t start, uint64_t read, uint64_t device) {
     static uint32_t n = 0;
     if (n++ % 8) return;
     int64_t pos = 0, at = 0;
-    if (AAudioStream_getTimestamp(g_stream, CLOCK_MONOTONIC, &pos, &at) != AAUDIO_OK || at <= 0) return;
+    if (AAudioStream_getTimestamp(g_stream, CLOCK_MONOTONIC, &pos, &at) != AAUDIO_OK || at <= 0) {
+        g_latency_early.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     const int64_t frame = int64_t(device + (start - read));  // the device's index of the buffer's first frame
     const int64_t when = at + (frame - pos) * 1000000000ll / 48000;
     const int64_t now = int64_t(monotonic_ns());
-    if (when <= now || when - now > 2000000000ll) return;
+    if (when <= now || when - now > 2000000000ll) {
+        g_latency_early.fetch_add(1, std::memory_order_relaxed);
+        return;
+    }
     const uint64_t l = uint64_t(when - now), old = g_latency_ns.load(std::memory_order_relaxed);
     g_latency_ns.store(old ? old + (int64_t(l) - int64_t(old)) / 8 : l, std::memory_order_relaxed);
+    g_latency_ok.fetch_add(1, std::memory_order_relaxed);
 }
 
 bool audio_submit(const void* data, size_t bytes, void* ctx) {
@@ -168,17 +181,31 @@ bool audio_submit(const void* data, size_t bytes, void* ctx) {
     {
         std::lock_guard lk(g_audio);
         start = g_written, read = g_read, device = g_device;
-        const uint64_t n = std::min<uint64_t>(bytes / 4, kRingFrames - (g_written - g_read));  // never more than a full ring
+        const uint64_t want = bytes / 4;
+        const uint64_t n = std::min<uint64_t>(want, kRingFrames - (g_written - g_read));  // never more than a full ring
+        if (n < want) g_truncations.fetch_add(1, std::memory_order_relaxed);
         const auto* src = static_cast<const uint8_t*>(data);
         for (uint64_t k = 0; k < n; k++) std::memcpy(&g_ring[(g_written + k) % kRingFrames], src + 4 * k, 4);
         g_written += n;
         g_pending.push_back({g_written, ctx});
+        g_pending_max.store(std::max(g_pending_max.load(std::memory_order_relaxed), uint64_t(g_pending.size())),
+                            std::memory_order_relaxed);
     }
     measure_latency(start, read, device);
     return true;
 }
 
 uint64_t audio_latency_ns() { return g_latency_ns.load(std::memory_order_relaxed); }
+
+AudioDiagnostics audio_diagnostics() {
+    const uint64_t mn = g_occ_min.load(std::memory_order_relaxed);
+    return {mn == ~uint64_t(0) ? 0 : mn,
+            g_occ_max.load(std::memory_order_relaxed),
+            g_truncations.load(std::memory_order_relaxed),
+            g_pending_max.load(std::memory_order_relaxed),
+            g_latency_ok.load(std::memory_order_relaxed),
+            g_latency_early.load(std::memory_order_relaxed)};
+}
 
 void audio_set_delay_ms(uint32_t ms) { g_delay_frames.store(std::min<uint32_t>(ms, 500) * 48, std::memory_order_relaxed); }
 

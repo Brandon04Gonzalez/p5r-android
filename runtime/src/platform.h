@@ -131,6 +131,14 @@ void audio_set_delay_ms(uint32_t ms);
 // The sound's latency as measured (Android: AAudio's timestamps): from a buffer handed to audio_submit to its first
 // frame at the speaker, ns, smoothed, the delay above included; 0 while unknown, and elsewhere.
 uint64_t audio_latency_ns();
+// Counters from the AAudio path (platform_android_audio.cpp): ring occupancy at the callback, submits truncated by
+// the ring, the most buffers pending at once, and measure_latency outcomes. Defined on Android only.
+struct AudioDiagnostics {
+    uint64_t ring_min = 0, ring_max = 0;
+    uint64_t truncations = 0, max_pending = 0;
+    uint64_t latency_ok = 0, latency_early = 0;
+};
+AudioDiagnostics audio_diagnostics();
 
 // Vulkan: the loader's vkGetInstanceProcAddr and the surface extension of this platform.
 void* vulkan_get_instance_proc_addr();
