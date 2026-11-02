@@ -323,22 +323,27 @@ void screen_size(uint32_t& w, uint32_t& h) {
 void window_size(uint32_t& w, uint32_t& h) {
     uint32_t sw = 0, sh = 0;
     screen_size(sw, sh);
-    std::string r = setting("resolution");
-    if (r.empty()) r = setting("NX_RES");
-    if (r.empty()) r = setting("RESOLUTION");
-    unsigned cw = 0, ch = 0;
-    if (!r.empty() && std::sscanf(r.c_str(), "%ux%u", &cw, &ch) == 2 && cw && ch) {
-        w = cw;
-        h = ch;
-        return;
-    }
-    uint32_t target_h = 0;
-    if (r == "360p" || r == "360") target_h = 360;
-    else if (r == "480p" || r == "480") target_h = 480;
-    else if (r == "720p" || r == "720") target_h = 720;
-    else if (r == "1080p" || r == "1080") target_h = 1080;
+    if (!sw || !sh) { w = 1280; h = 720; return; }
 
-    if (target_h && sh) {
+    std::string nr = setting("NX_RES");
+    std::string res = setting("RESOLUTION");
+    std::string r = setting("resolution");
+
+    auto parse_target_h = [](const std::string& s) -> uint32_t {
+        if (s == "360p" || s == "360") return 360;
+        if (s == "480p" || s == "480") return 480;
+        if (s == "720p" || s == "720") return 720;
+        if (s == "1080p" || s == "1080") return 1080;
+        unsigned cw = 0, ch = 0;
+        if (!s.empty() && std::sscanf(s.c_str(), "%ux%u", &cw, &ch) == 2 && ch) return ch;
+        return 0;
+    };
+
+    uint32_t target_h = parse_target_h(nr);
+    if (!target_h) target_h = parse_target_h(res);
+    if (!target_h) target_h = parse_target_h(r);
+
+    if (target_h) {
         float scale = float(target_h) / float(sh);
         w = uint32_t(float(sw) * scale + 0.5f) & ~1u;
         h = target_h & ~1u;
@@ -701,6 +706,7 @@ extern "C" void android_main(android_app* app) {
     // config.txt's NX_* lines become environment variables (the NVN layer reads its switches with getenv), without
     // overriding a variable already set. Android defaults: handheld (720p, the lighter GPU load).
     {
+        unsetenv("NX_STRETCH");
         std::ifstream f(g_root + "/config.txt");
         std::string line;
         while (std::getline(f, line)) {

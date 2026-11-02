@@ -838,23 +838,23 @@ public class Launcher extends Activity {
         final String res = config.get("RESOLUTION");
         if ("360p".equals(res)) {
             config.put("NX_HANDHELD", "1");
-            config.put("resolution", "640x360");
-            config.put("NX_RENDER_RES", "640x360");
+            config.put("resolution", "360p");
+            config.put("NX_RENDER_RES", "360p");
             config.put("NX_RES", "360p");
         } else if ("480p".equals(res)) {
             config.put("NX_HANDHELD", "1");
-            config.put("resolution", "854x480");
-            config.put("NX_RENDER_RES", "854x480");
+            config.put("resolution", "480p");
+            config.put("NX_RENDER_RES", "480p");
             config.put("NX_RES", "480p");
         } else if ("1080p".equals(res)) {
             config.put("NX_HANDHELD", "0");
-            config.put("resolution", "1920x1080");
-            config.put("NX_RENDER_RES", "1920x1080");
+            config.put("resolution", "1080p");
+            config.put("NX_RENDER_RES", "1080p");
             config.put("NX_RES", "1080p");
         } else {
             config.put("NX_HANDHELD", "1");
-            config.put("resolution", "1280x720");
-            config.put("NX_RENDER_RES", "1280x720");
+            config.put("resolution", "720p");
+            config.put("NX_RENDER_RES", "720p");
             config.put("NX_RES", "720p");
         }
         for (String k : new String[] {"RENDER_SCALE", "NX_ANISO_MAX", "NX_LOD_BIAS"}) config.remove(k);
