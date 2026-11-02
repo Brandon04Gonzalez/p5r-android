@@ -37,6 +37,9 @@
 #define VK_NO_PROTOTYPES
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vulkan.h>
+#if defined(NX_CUSTOM_DRIVER)
+#include <adrenotools/driver.h>
+#endif
 
 #include <nx/game.h>
 #include <nx/runtime.h>
@@ -61,6 +64,7 @@ namespace nx::plat {
 namespace {
 android_app* g_app = nullptr;
 std::string g_root;
+std::string g_internal_dir;  // ANativeActivity::internalDataPath (the imported GPU driver lives under it)
 std::atomic<ANativeWindow*> g_window{nullptr};
 std::atomic<uint64_t> g_window_gen{0};  // bumped for every new window
 std::atomic<bool> g_visible{false};
@@ -391,9 +395,44 @@ float default_render_scale() {
 
 // ---- Vulkan ---------------------------------------------------------------------------------------------------
 
+#if defined(NX_CUSTOM_DRIVER)
+// A GPU driver the user imported (the launcher's "Import GPU driver", e.g. Mesa Turnip for Adreno), opened with
+// libadrenotools in place of the system driver. <files>/gpu_driver/active.txt holds the driver's file name; without
+// it, or with NX_SYSTEM_DRIVER=1 in config.txt, or if the driver fails to open, the system libvulkan.so is used.
+void* open_custom_vulkan() {
+    if (const char* e = getenv("NX_SYSTEM_DRIVER"); e && e[0] == '1') return nullptr;
+    if (g_internal_dir.empty()) return nullptr;
+    const std::string dir = g_internal_dir + "/gpu_driver/";
+    std::string name;
+    {
+        std::ifstream f(dir + "active.txt");
+        std::getline(f, name);
+    }
+    while (!name.empty() && (name.back() == '\r' || name.back() == '\n' || name.back() == ' ')) name.pop_back();
+    if (name.empty()) return nullptr;
+    Dl_info info{};
+    if (!dladdr(reinterpret_cast<void*>(&open_custom_vulkan), &info) || !info.dli_fname) return nullptr;
+    std::string libdir = info.dli_fname;  // .../lib/arm64/libp5r.so: the hook libraries are next to it
+    libdir = libdir.substr(0, libdir.rfind('/') + 1);
+    nx::log("gpu driver: opening custom driver %s%s (hooks in %s)", dir.c_str(), name.c_str(), libdir.c_str());
+    void* h = adrenotools_open_libvulkan(RTLD_NOW | RTLD_LOCAL, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, libdir.c_str(),
+                                         dir.c_str(), name.c_str(), nullptr, nullptr);
+    nx::log("gpu driver: %s", h ? "custom driver opened" : "failed, the system driver is used");
+    return h;
+}
+#endif
+
 void* vulkan_get_instance_proc_addr() {
-    void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-    return lib ? dlsym(lib, "vkGetInstanceProcAddr") : nullptr;
+    static void* gipa = []() -> void* {  // once: the custom driver is opened only once
+        void* lib = nullptr;
+#if defined(NX_CUSTOM_DRIVER)
+        lib = open_custom_vulkan();
+        if (lib && !dlsym(lib, "vkGetInstanceProcAddr")) lib = nullptr;
+#endif
+        if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+        return lib ? dlsym(lib, "vkGetInstanceProcAddr") : nullptr;
+    }();
+    return gipa;
 }
 
 const char* vulkan_surface_extension() { return VK_KHR_ANDROID_SURFACE_EXTENSION_NAME; }
@@ -589,6 +628,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_io_github_belmantegu_wonderrecomp_GameAc
 
 extern "C" JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, void* saved, size_t size) {
     g_activity = activity;
+    if (activity->internalDataPath) nx::plat::g_internal_dir = activity->internalDataPath;
     if (g_ui_pipe[0] < 0 && pipe2(g_ui_pipe, O_NONBLOCK | O_CLOEXEC) == 0)
         ALooper_addFd(ALooper_forThread(), g_ui_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_ui_request, nullptr);
     glue_ANativeActivity_onCreate(activity, saved, size);

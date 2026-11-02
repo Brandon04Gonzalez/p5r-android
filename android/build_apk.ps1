@@ -38,6 +38,10 @@ if ($Nce -and $Game -eq "p5r") {
     }
     $targets += "p5rimport"
     $extraLibs += @("$build\libp5rimport.so", $harness)
+    # libadrenotools' hook libraries (custom GPU drivers): loaded by name from nativeLibraryDir at run time.
+    foreach ($h in @("libhook_impl.so", "libmain_hook.so", "libfile_redirect_hook.so", "libgsl_alloc_hook.so")) {
+        $extraLibs += "$build\adrenotools\src\hook\$h"
+    }
 }
 cmake --build $build --target @targets
 if ($LASTEXITCODE) { throw "native build failed" }

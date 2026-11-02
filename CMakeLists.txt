@@ -222,6 +222,15 @@ if(ANDROID)
         COMPILE_DEFINITIONS "ANativeActivity_onCreate=glue_ANativeActivity_onCreate")
     target_link_libraries(${NX_GAME} PRIVATE ${NX_GAME_LIBS} android log aaudio mediandk)
     target_compile_options(${NX_GAME} PRIVATE -fvisibility=hidden -fno-semantic-interposition -march=armv8-a+crypto)
+    # Custom GPU drivers (Turnip): libadrenotools opens a driver .so the user imported, in place of the system Vulkan
+    # driver (platform_android.cpp). Its hook libraries (libhook_impl.so and the three *_hook.so) are packed in the
+    # APK next to lib<game>.so (android/build_apk.ps1) and found through the app's nativeLibraryDir.
+    set(BUILD_SHARED_LIBS OFF)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+    add_subdirectory(third_party/libadrenotools adrenotools EXCLUDE_FROM_ALL)
+    target_link_libraries(${NX_GAME} PRIVATE adrenotools)
+    add_dependencies(${NX_GAME} hook_impl main_hook file_redirect_hook gsl_alloc_hook)
+    target_compile_definitions(${NX_GAME} PRIVATE NX_CUSTOM_DRIVER=1)
     # The glue's ANativeActivity_onCreate must be exported. 16 KB page alignment: Android 15+ devices with 16 KB pages.
     target_link_options(${NX_GAME} PRIVATE -u ANativeActivity_onCreate -Wl,-z,max-page-size=16384)
 elseif(APPLE)

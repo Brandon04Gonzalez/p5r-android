@@ -94,7 +94,7 @@ public class Launcher extends Activity {
     final Map<String, String> config = new LinkedHashMap<>();
     TextView status;
     Button play;
-    static final int PICK_ZIP = 1, PICK_FOLDER = 2, PICK_GAME = 3, PICK_KEYS = 4, PICK_ICON = 5, PREPARE = 6, PICK_CPK = 7;
+    static final int PICK_ZIP = 1, PICK_FOLDER = 2, PICK_GAME = 3, PICK_KEYS = 4, PICK_ICON = 5, PREPARE = 6, PICK_CPK = 7, PICK_DRIVER = 8;
 
     String t(String spanish, String english) { return Lang.t(spanish, english); }
 
@@ -527,6 +527,40 @@ public class Launcher extends Activity {
         });
         root.addView(transRow);
 
+        // Custom GPU driver (e.g. Mesa Turnip for Adreno): imported into the app's private files, opened by the runtime
+        LinearLayout drvRow = new LinearLayout(this);
+        drvRow.setOrientation(LinearLayout.HORIZONTAL);
+        drvRow.setGravity(Gravity.CENTER_VERTICAL);
+        drvRow.setPadding(0, dp(4), 0, dp(4));
+        driverName = new TextView(this);
+        driverName.setTextColor(Color.WHITE);
+        driverName.setTextSize(17);
+        drvRow.addView(driverName, new LinearLayout.LayoutParams(0, LinearLayout.LayoutParams.WRAP_CONTENT, 1));
+        Button drvImport = new Button(this);
+        drvImport.setAllCaps(false);
+        drvImport.setMinWidth(dp(88));
+        drvImport.setText(t("Importar", "Import"));
+        drvRow.addView(drvImport);
+        Button drvRemove = new Button(this);
+        drvRemove.setAllCaps(false);
+        drvRemove.setMinWidth(dp(88));
+        drvRemove.setText(t("Quitar", "Remove"));
+        drvRow.addView(drvRemove);
+        drvImport.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                pick(PICK_DRIVER, "*/*", false);
+            }
+        });
+        drvRemove.setOnClickListener(new View.OnClickListener() {
+            @Override
+            public void onClick(View v) {
+                removeDriver();
+            }
+        });
+        root.addView(drvRow);
+        showDriver();
+
         // Debug logs export
         LinearLayout logsRow = new LinearLayout(this);
         logsRow.setOrientation(LinearLayout.HORIZONTAL);
@@ -714,6 +748,10 @@ public class Launcher extends Activity {
             onIconPicked(data.getData());
             return;
         }
+        if (request == PICK_DRIVER) {
+            importDriver(data.getData());
+            return;
+        }
         if (request == PICK_CPK) {
             importCpk(data.getData());
             return;
@@ -827,6 +865,99 @@ public class Launcher extends Activity {
     }
 
     int dp(int v) { return Math.round(v * getResources().getDisplayMetrics().density); }
+
+    // ---- custom GPU driver ------------------------------------------------------------------------------------
+    // <files>/gpu_driver/<name>.so and active.txt (its name): the runtime opens it with libadrenotools instead of the
+    // system Vulkan driver (platform_android.cpp). A .so, or a .zip holding one (the AdrenoTools driver packages:
+    // the .so and a meta.json whose "libraryName" is the file to load).
+    TextView driverName;
+
+    File driverDir() {
+        File d = new File(getFilesDir(), "gpu_driver");
+        if (!d.exists()) d.mkdirs();
+        return d;
+    }
+
+    String activeDriver() {
+        try (java.io.BufferedReader r = new java.io.BufferedReader(new FileReader(new File(driverDir(), "active.txt")))) {
+            String line = r.readLine();
+            return line == null ? "" : line.trim();
+        } catch (Exception e) {
+            return "";
+        }
+    }
+
+    void showDriver() {
+        if (driverName == null) return;
+        String a = activeDriver();
+        driverName.setText(a.isEmpty() ? t("Driver de GPU: del sistema", "GPU driver: system")
+                : Lang.f("Driver de GPU: %s", "GPU driver: %s", a));
+    }
+
+    void removeDriver() {
+        File[] files = driverDir().listFiles();
+        if (files != null) for (File f : files) f.delete();
+        showDriver();
+        Toast.makeText(this, t("Driver del sistema activado", "System driver restored"), Toast.LENGTH_LONG).show();
+    }
+
+    static void copy(InputStream in, File dest) throws java.io.IOException {
+        try (OutputStream out = new FileOutputStream(dest)) {
+            byte[] buf = new byte[65536];
+            int n;
+            while ((n = in.read(buf)) > 0) out.write(buf, 0, n);
+        }
+    }
+
+    void importDriver(Uri uri) {
+        try {
+            String picked = displayName(uri);
+            File dir = driverDir();
+            File[] old = dir.listFiles();
+            if (old != null) for (File f : old) f.delete();
+            String libName = null;
+            if (picked.toLowerCase(Locale.ROOT).endsWith(".zip")) {
+                String soEntry = null, wanted = null;
+                try (java.util.zip.ZipInputStream zin = new java.util.zip.ZipInputStream(getContentResolver().openInputStream(uri))) {
+                    java.util.zip.ZipEntry e;
+                    while ((e = zin.getNextEntry()) != null) {
+                        String base = new File(e.getName()).getName();
+                        if (e.isDirectory()) continue;
+                        if (base.equals("meta.json")) {
+                            java.io.ByteArrayOutputStream bo = new java.io.ByteArrayOutputStream();
+                            byte[] buf = new byte[8192];
+                            int n;
+                            while ((n = zin.read(buf)) > 0) bo.write(buf, 0, n);
+                            java.util.regex.Matcher m = java.util.regex.Pattern.compile("\"libraryName\"\\s*:\\s*\"([^\"]+)\"")
+                                    .matcher(bo.toString("UTF-8"));
+                            if (m.find()) wanted = m.group(1);
+                        } else if (base.endsWith(".so")) {
+                            copy(zin, new File(dir, base));
+                            if (soEntry == null) soEntry = base;
+                        }
+                    }
+                }
+                libName = wanted != null && new File(dir, wanted).exists() ? wanted : soEntry;
+            } else {
+                libName = picked.endsWith(".so") ? picked : picked + ".so";
+                try (InputStream in = getContentResolver().openInputStream(uri)) {
+                    if (in == null) throw new java.io.IOException("Cannot open selected file");
+                    copy(in, new File(dir, libName));
+                }
+            }
+            if (libName == null) throw new java.io.IOException(t("No hay ningun .so dentro", "No .so file inside"));
+            try (FileWriter w = new FileWriter(new File(dir, "active.txt"))) {
+                w.write(libName + "\n");
+            }
+            showDriver();
+            tell(t("Driver importado", "Driver imported"),
+                    Lang.f("%s\n\nCierra el juego por completo y abrelo otra vez. Para volver al driver del sistema pulsa Quitar.",
+                            "%s\n\nClose the game completely and start it again. To go back to the system driver press Remove.",
+                            libName));
+        } catch (Exception e) {
+            tell(t("No se pudo importar el driver", "Driver import failed"), String.valueOf(e.getMessage()));
+        }
+    }
 
     void importCpk(Uri uri) {
         try {
