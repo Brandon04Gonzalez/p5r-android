@@ -29,7 +29,16 @@ jar="$sdk/platforms/android-35/android.jar"
 for p in "$ndk" "$bt" "$jar"; do [ -e "$p" ] || { echo "missing $p" >&2; exit 1; }; done
 
 priv="$root/private/p5r"
-out="$priv/apk_nce"
+test_shoo="${TEST_SHOO:-0}"
+if [ "$test_shoo" = 1 ]; then
+    out="$priv/apk_testshoo"
+    manifest="$root/games/p5r/AndroidManifest.testshoo.xml"
+    apk_name="p5r-testshoo"
+else
+    out="$priv/apk_nce"
+    manifest="$root/games/p5r/AndroidManifest.xml"
+    apk_name="p5r"
+fi
 build="$priv/ba_nce"
 harness="$root/private/build/spirv_harness_android/libspirvharness.so"
 if [ ! -f "$harness" ]; then
@@ -66,7 +75,7 @@ mkdir -p "$out/lib/arm64-v8a" "$out/res"
 "$llvm/llvm-strip" --strip-unneeded -o "$out/lib/arm64-v8a/libspirvharness.so" "$harness"
 
 "$bt/aapt2" compile --dir "$root/android/res" -o "$out/res.zip"
-manifest="$root/games/p5r/AndroidManifest.xml"
+manifest="$manifest"
 res_zips=("$out/res.zip")
 icon_res="$root/games/p5r/icon/res"
 [ -d "$icon_res" ] || icon_res="$priv/icon/res"
@@ -98,8 +107,8 @@ key_alias="${P5R_KEY_ALIAS:-androiddebugkey}"
 key_pass="${P5R_KEY_PASSWORD:-$ks_pass}"
 [ -f "$ks" ] || { echo "missing keystore $ks" >&2; exit 1; }
 "$bt/apksigner" sign --ks "$ks" --ks-key-alias "$key_alias" --ks-pass "pass:$ks_pass" \
-    --key-pass "pass:$key_pass" --out "$out/p5r.apk" "$out/aligned.apk"
-"$bt/apksigner" verify "$out/p5r.apk"
-echo "APK: $out/p5r.apk ($(du -h "$out/p5r.apk" | cut -f1))"
+    --key-pass "pass:$key_pass" --out "$out/$apk_name.apk" "$out/aligned.apk"
+"$bt/apksigner" verify "$out/$apk_name.apk"
+echo "APK: $out/$apk_name.apk ($(du -h "$out/$apk_name.apk" | cut -f1))"
 
-if [ "$install" = 1 ]; then "$sdk/platform-tools/adb" install -r "$out/p5r.apk"; fi
+if [ "$install" = 1 ]; then "$sdk/platform-tools/adb" install -r "$out/$apk_name.apk"; fi
