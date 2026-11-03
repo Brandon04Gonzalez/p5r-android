@@ -75,7 +75,6 @@ mkdir -p "$out/lib/arm64-v8a" "$out/res"
 "$llvm/llvm-strip" --strip-unneeded -o "$out/lib/arm64-v8a/libspirvharness.so" "$harness"
 
 "$bt/aapt2" compile --dir "$root/android/res" -o "$out/res.zip"
-manifest="$manifest"
 res_zips=("$out/res.zip")
 icon_res="$root/games/p5r/icon/res"
 [ -d "$icon_res" ] || icon_res="$priv/icon/res"
