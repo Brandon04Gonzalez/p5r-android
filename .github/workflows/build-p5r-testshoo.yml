@@ -75,6 +75,19 @@ jobs:
       - name: Build APK
         run: bash games/p5r/tools/build_android.sh
 
+      - name: Verify Test Shoo APK package
+        run: |
+          apk="private/p5r/apk_testshoo/p5r-testshoo.apk"
+          aapt2="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}/build-tools/35.0.0/aapt2"
+          badging="$("$aapt2" dump badging "$apk")"
+          printf '%s\n' "$badging" | sed -n '1,3p'
+          actual="$(printf '%s\n' "$badging" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
+          if [ "$actual" != "io.github.p5rrecomp.testshoo" ]; then
+            echo "Test Shoo APK package is '$actual', expected 'io.github.p5rrecomp.testshoo'" >&2
+            exit 1
+          fi
+          echo "Verified Test Shoo package: $actual"
+
       - uses: actions/upload-artifact@v4
         with:
           name: p5r-apk-testshoo

@@ -84,6 +84,7 @@ if [ -d "$icon_res" ]; then
     sed 's|<application|<application android:icon="@mipmap/ic_launcher"|' "$manifest" > "$out/AndroidManifest.xml"
     manifest="$out/AndroidManifest.xml"
 fi
+echo "Linking APK with manifest: $manifest"
 "$bt/aapt2" link -o "$out/base.apk" -I "$jar" --manifest "$manifest" "${res_zips[@]}"
 
 (cd "$out" && zip -q -r -9 base.apk lib)
@@ -108,6 +109,15 @@ key_pass="${P5R_KEY_PASSWORD:-$ks_pass}"
 "$bt/apksigner" sign --ks "$ks" --ks-key-alias "$key_alias" --ks-pass "pass:$ks_pass" \
     --key-pass "pass:$key_pass" --out "$out/$apk_name.apk" "$out/aligned.apk"
 "$bt/apksigner" verify "$out/$apk_name.apk"
+if [ "$test_shoo" = 1 ]; then
+    badging="$("$bt/aapt2" dump badging "$out/$apk_name.apk")"
+    actual_package="$(printf '%s\n' "$badging" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
+    if [ "$actual_package" != "io.github.p5rrecomp.testshoo" ]; then
+        echo "Test Shoo APK package is '$actual_package', expected 'io.github.p5rrecomp.testshoo'" >&2
+        exit 1
+    fi
+    echo "Verified Test Shoo package: $actual_package"
+fi
 echo "APK: $out/$apk_name.apk ($(du -h "$out/$apk_name.apk" | cut -f1))"
 
 if [ "$install" = 1 ]; then "$sdk/platform-tools/adb" install -r "$out/$apk_name.apk"; fi
