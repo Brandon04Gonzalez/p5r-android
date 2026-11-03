@@ -1,4 +1,4 @@
-name: Build P5R Android APK
+name: Build Persona 5 Royal Test Shoo
 
 on:
   workflow_dispatch:
