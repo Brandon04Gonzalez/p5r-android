@@ -13,6 +13,9 @@
 namespace p5r {
 
 // Distinct code blocks written, or -1 with `error` set. progress(done, total) counts the GSC files and main.
+// Generic Switch ExeFS shader extraction, without P5R's CPK/GSC-specific cache.
+long extract_exefs_shaders(const nxi::GameImage& game, const std::string& out_dir, std::string& error);
+
 long extract_shaders(const nxi::GameImage& game, const std::string& out_dir,
                      const std::function<void(int, int)>& progress, std::string& error);
 

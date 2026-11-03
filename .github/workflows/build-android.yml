@@ -1,0 +1,191 @@
+name: JJK Android NCE Build
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - "CMakeLists.txt"
+      - "runtime/**"
+      - "android/wonder/importer/**"
+      - "games/p5r/**"
+      - "games/jjk/**"
+      - ".github/workflows/build-android.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  runtime-tests:
+    name: Host runtime tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build g++
+
+      - name: Configure tests
+        run: cmake -S . -B build -G Ninja -DNX_TESTS=ON
+
+      - name: Build tests
+        run: cmake --build build
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+  android-importer-cli:
+    name: Android ARM64 game-inspection CLI
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;28.2.13676358"
+
+      - name: Compile importer for Android ARM64
+        shell: bash
+        run: |
+          set -euxo pipefail
+          NDK="$ANDROID_NDK_HOME"
+          CXX="$NDK/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++"
+          "$CXX" --target=aarch64-linux-android29 -std=c++17 -O2 -static-libstdc++ \
+            -Wall -Wextra \
+            -o nximport-arm64 \
+            android/wonder/importer/nximport_cli.cpp \
+            android/wonder/importer/nximport.cpp \
+            android/wonder/importer/nxcrypto.cpp
+          file nximport-arm64
+          readelf -h nximport-arm64 | grep -E 'Class:|Machine:'
+
+      - name: Upload Android importer CLI
+        uses: actions/upload-artifact@v4
+        with:
+          name: jjk-inspector-android-arm64
+          path: nximport-arm64
+          if-no-files-found: error
+          retention-days: 7
+
+  android-nce:
+    name: JJK Android ARM64 build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install Android SDK and NDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: "ndk;28.2.13676358"
+
+      - name: Install Android platform APIs and APK build tools
+        run: yes | sdkmanager "platforms;android-35" "build-tools;35.0.0"
+
+      - name: Install CMake and Ninja
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y cmake ninja-build git
+
+      - name: Get Vulkan headers
+        run: |
+          mkdir -p private/third_party
+          git clone --depth 1 --branch v1.4.357 https://github.com/KhronosGroup/Vulkan-Headers.git private/third_party/Vulkan-Headers-1.4.357
+          ln -s include private/third_party/Vulkan-Headers-1.4.357/Include
+
+      - name: Build Android ARM64 SPIR-V shader harness
+        shell: bash
+        run: |
+          set -euxo pipefail
+          mkdir -p private/third_party/ryubing
+          curl -fsSL https://codeberg.org/Software_arch/Ryubing/archive/a82350bb77.tar.gz -o /tmp/ryubing.tar.gz
+          tar -xzf /tmp/ryubing.tar.gz -C private/third_party/ryubing --strip-components=1
+          docker run --rm -v "$GITHUB_WORKSPACE:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh games/p5r/tools/build_harness_android.sh
+          test -s private/build/spirv_harness_android/libspirvharness.so
+
+      - name: Configure JJK Android ARM64 native execution build
+        env:
+          VULKAN_SDK: ${{ github.workspace }}/private/third_party/Vulkan-Headers-1.4.357
+        run: |
+          cmake -S . -B build-android-jjk -G Ninja \
+            -DCMAKE_TOOLCHAIN_FILE="$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake" \
+            -DANDROID_ABI=arm64-v8a \
+            -DANDROID_PLATFORM=android-29 \
+            -DANDROID_STL=c++_static \
+            -DNX_GAME=jjk \
+            -DNX_NCE=ON \
+            -DNX_RELEASE=ON
+
+      - name: Compile JJK native library
+        run: cmake --build build-android-jjk --target jjk jjkimport --parallel 2
+
+      - name: Upload JJK native library for diagnostics
+        uses: actions/upload-artifact@v4
+        with:
+          name: jjk-android-arm64-runtime-check
+          path: |
+            build-android-jjk/libjjk.so
+            build-android-jjk/libjjkimport.so
+          if-no-files-found: error
+          retention-days: 3
+
+      - name: Check launcher method declarations
+        shell: bash
+        run: |
+          set -euo pipefail
+          FILE=games/jjk/java/io/github/jjkport/Launcher.java
+          COUNT=$(grep -Ec '^[[:space:]]*(public|protected|private)?[[:space:]]*(static[[:space:]]+)?String[[:space:]]+wrongBuild[[:space:]]*\(' "$FILE" || true)
+          echo "wrongBuild declarations: $COUNT"
+          test "$COUNT" -eq 1
+
+      - name: Compile JJK Android launcher Java
+        run: |
+          mkdir -p build-jjk-java
+          javac -encoding UTF-8 -source 8 -target 8 \
+            -bootclasspath "$ANDROID_HOME/platforms/android-35/android.jar" \
+            -d build-jjk-java \
+            $(find games/jjk/java -name '*.java' -print)
+
+      - name: Package and sign JJK NCE APK
+        shell: bash
+        run: |
+          set -euo pipefail
+          SDK="$ANDROID_HOME"
+          BT="$SDK/build-tools/35.0.0"
+          JAR="$SDK/platforms/android-35/android.jar"
+          OUT="$GITHUB_WORKSPACE/out-jjk-apk"
+          mkdir -p "$OUT/lib/arm64-v8a" "$OUT/gen" "$OUT/classes" "$OUT/dex" "$OUT/stage"
+          cp build-android-jjk/libjjk.so "$OUT/lib/arm64-v8a/libjjk.so"
+          cp build-android-jjk/libjjkimport.so "$OUT/lib/arm64-v8a/libjjkimport.so"
+          cp private/build/spirv_harness_android/libspirvharness.so "$OUT/lib/arm64-v8a/libspirvharness.so"
+          "$BT/aapt2" compile --dir android/res -o "$OUT/res.zip"
+          "$BT/aapt2" compile --dir games/jjk/icon/res -o "$OUT/icon.zip"
+          sed 's/<application/<application android:icon="@mipmap\/ic_launcher"/' games/jjk/AndroidManifest.xml > "$OUT/AndroidManifest.xml"
+          "$BT/aapt2" link -o "$OUT/base.apk" -I "$JAR" --manifest "$OUT/AndroidManifest.xml" --java "$OUT/gen" --min-sdk-version 29 --target-sdk-version 35 "$OUT/res.zip" "$OUT/icon.zip"
+          find games/jjk/java "$OUT/gen" -name '*.java' > "$OUT/sources.txt"
+          javac -encoding UTF-8 -source 8 -target 8 -Xlint:-options -bootclasspath "$JAR" -d "$OUT/classes" @"$OUT/sources.txt"
+          find "$OUT/classes" -name '*.class' > "$OUT/classes.txt"
+          "$BT/d8" --release --min-api 29 --lib "$JAR" --output "$OUT/dex" @"$OUT/classes.txt"
+          (cd "$OUT" && zip -q -r base.apk lib && zip -q -j base.apk dex/classes.dex)
+          "$BT/zipalign" -f -p 4 "$OUT/base.apk" "$OUT/aligned.apk"
+          keytool -genkeypair -keystore "$OUT/debug.keystore" -storepass android -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+          "$BT/apksigner" sign --ks "$OUT/debug.keystore" --ks-pass pass:android --key-pass pass:android --out "$OUT/jjk.apk" "$OUT/aligned.apk"
+          "$BT/apksigner" verify "$OUT/jjk.apk"
+          "$BT/aapt2" dump badging "$OUT/jjk.apk" | grep -E "package: name='io.github.jjkport'|application-label:'Jujutsu Kaisen: Cursed Clash'"
+          "$BT/aapt2" dump badging "$OUT/jjk.apk" | grep -q "application-icon-160:'res/mipmap-anydpi-v26/ic_launcher.xml'" || true
+          sha256sum "$OUT/jjk.apk"
+
+      - name: Upload installable JJK APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: jjk-nce-apk
+          path: out-jjk-apk/jjk.apk
+          if-no-files-found: error
+          retention-days: 14

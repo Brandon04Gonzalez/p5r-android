@@ -11,6 +11,7 @@
 #include <cstring>
 #include <map>
 #include <mutex>
+#include <utility>
 
 #include "platform.h"
 
@@ -446,7 +447,26 @@ struct Region {
     }
 };
 
-std::map<uint64_t, Region> g_regions;  // by module base
+// A B instruction reaches +/-128 MiB. Keep stub pools near the code they patch.
+bool branch_in_range(uint64_t from, uint64_t to) {
+    const int64_t d = int64_t(to - from);
+    return !(d & 3) && d >= -(int64_t(1) << 27) && d < (int64_t(1) << 27);
+}
+
+Region* region_for_site(std::vector<Region>& regions, uint64_t pc, size_t reserve_bytes = 0x100) {
+    Region* best = nullptr;
+    uint64_t best_distance = UINT64_MAX;
+    for (Region& r : regions) {
+        if (r.cur + reserve_bytes > r.end || !branch_in_range(pc, r.cur) ||
+            !branch_in_range(r.cur + reserve_bytes, pc + 4))
+            continue;
+        const uint64_t d = pc > r.cur ? pc - r.cur : r.cur - pc;
+        if (d < best_distance) best = &r, best_distance = d;
+    }
+    return best;
+}
+
+std::map<uint64_t, std::vector<Region>> g_regions;  // module base -> nearby stub pools
 std::mutex g_regions_lock;
 uint64_t g_return = 0;  // nce_return (the thunk region's copy)
 
@@ -560,21 +580,56 @@ void init() {
 
 void prepare_module(const LoadedModule& m) {
     const ModuleInfo* mi = m.info;
-    Region r;
-    r.base = r.cur = m.base + ((m.size + 0xFFFF) & ~uint64_t(0xFFFF));
-    r.end = r.base + kRegionSize;
-    if (!commit(r.base, kRegionSize)) fatal("nce: no room for %s's stubs at %llx", mi->name, (unsigned long long)r.base);
-    r.copy_common();
+    std::vector<Region> regions;
+
+    // Keep a pool after the module for late code and add one before it for early code.
+    // A single pool at the end fails once a large NSO exceeds the +/-128 MiB B range.
+    Region end_region;
+    end_region.base = end_region.cur = m.base + ((m.size + 0xFFFF) & ~uint64_t(0xFFFF));
+    end_region.end = end_region.base + kRegionSize;
+    if (!commit(end_region.base, kRegionSize))
+        fatal("nce: no room for %s's end stub pool at %llx", mi->name, (unsigned long long)end_region.base);
+    end_region.copy_common();
+    regions.push_back(end_region);
+
+    const uint64_t near_base = m.base - kRegionSize;
+    bool near_ready = false;
+    if (m.base > kModuleBase) {
+        // The pool before sdk usually sits in the gap after main, inside the already-reserved module arena.
+        bool overlaps = module_at(near_base) != nullptr;
+        for (const auto& [module_base, pools] : g_regions)
+            for (const Region& pool : pools)
+                if (near_base < pool.end && near_base + kRegionSize > pool.base) overlaps = true;
+        if (!overlaps) near_ready = commit(near_base, kRegionSize);
+    } else {
+        // main begins at kModuleBase, so reserve its early pool just outside the module arena.
+        near_ready = plat::reserve(near_base, kRegionSize) && commit(near_base, kRegionSize);
+    }
+    if (near_ready) {
+        Region near_region;
+        near_region.base = near_region.cur = near_base;
+        near_region.end = near_base + kRegionSize;
+        near_region.copy_common();
+        regions.push_back(near_region);
+    } else {
+        log("nce: %s early stub pool unavailable", mi->name);
+    }
 
     const uint64_t text = m.base + mi->text, text_end = text + mi->text_size;
     size_t svcs = 0, tls = 0, counters = 0, others = 0;
     for (uint64_t pc = text; pc < text_end; pc += 4) {
         const uint32_t w = ld<uint32_t>(pc);
         uint64_t stub = 0;
+        Region* r = nullptr;
+        const bool is_svc = (w & 0xFFE0001Fu) == 0xD4000001u;
+        const bool is_sysreg = (w & 0xFFD00000u) == 0xD5100000u;
+        if (is_svc || is_sysreg) r = region_for_site(regions, pc);
+        if (is_svc && !r)
+            fatal("nce: no in-range stub pool for %s svc at %llx", mi->name, (unsigned long long)pc);
         if ((w & 0xFFE0001Fu) == 0xD4000001u) {  // svc #imm
             if (g_svc_sites.size() >= 0x10000) fatal("nce: too many svc sites");
             g_svc_sites.push_back({(w >> 5) & 0xFFFF, pc});
-            stub = svc_stub(r, uint32_t(g_svc_sites.size() - 1), pc);
+            stub = svc_stub(*r, uint32_t(g_svc_sites.size() - 1), pc);
             svcs++;
         } else if ((w & 0xFFD00000u) == 0xD5100000u) {  // mrs / msr (register)
             const bool read = w & (1u << 21);
@@ -583,27 +638,33 @@ void prepare_module(const LoadedModule& m) {
                 st<uint32_t>(pc, kNop);  // a read into xzr
                 continue;
             }
+            const bool needs_stub = (read && (sysreg == 0xDE83 || sysreg == 0xDE82 || sysreg == 0xDF01 ||
+                                               sysreg == 0xDF02 || sysreg == 0xDF00)) ||
+                                    (!read && sysreg == 0xDE82);
+            if (needs_stub && !r)
+                fatal("nce: no in-range stub pool for %s system-register site at %llx", mi->name,
+                      (unsigned long long)pc);
             if (read && (sysreg == 0xDE83 || sysreg == 0xDE82)) {  // TPIDRRO_EL0 / TPIDR_EL0
-                stub = r.emit(mrs_tpidr(n));
-                r.emit(ldr_off(n, n, sysreg == 0xDE83 ? 0x118 : 0x110));
-                r.emit(b_to(r.cur, pc + 4));
+                stub = r->emit(mrs_tpidr(n));
+                r->emit(ldr_off(n, n, sysreg == 0xDE83 ? 0x118 : 0x110));
+                r->emit(b_to(r->cur, pc + 4));
                 tls++;
             } else if (!read && sysreg == 0xDE82) {  // msr TPIDR_EL0, xN
                 const uint32_t s = n == 0 ? 1 : 0;
-                stub = r.emit(0xF81F0FE0u | s);  // str xS, [sp, #-16]!
-                r.emit(mrs_tpidr(s));
-                r.emit(str_off(n, s, 0x110));
-                r.emit(0xF84107E0u | s);  // ldr xS, [sp], #16
-                r.emit(b_to(r.cur, pc + 4));
+                stub = r->emit(0xF81F0FE0u | s);  // str xS, [sp, #-16]!
+                r->emit(mrs_tpidr(s));
+                r->emit(str_off(n, s, 0x110));
+                r->emit(0xF84107E0u | s);  // ldr xS, [sp], #16
+                r->emit(b_to(r->cur, pc + 4));
                 tls++;
             } else if (read && (sysreg == 0xDF01 || sysreg == 0xDF02)) {  // CNTPCT_EL0 / CNTVCT_EL0
-                stub = counter_stub(r, n, pc);
+                stub = counter_stub(*r, n, pc);
                 counters++;
             } else if (read && sysreg == 0xDF00) {  // CNTFRQ_EL0
-                stub = r.cur;
-                const uint64_t ldr = r.emit(0);
-                r.emit(b_to(r.cur, pc + 4));
-                st<uint32_t>(ldr, ldr_literal(ldr, r.emit64(19200000), n));
+                stub = r->cur;
+                const uint64_t ldr = r->emit(0);
+                r->emit(b_to(r->cur, pc + 4));
+                st<uint32_t>(ldr, ldr_literal(ldr, r->emit64(19200000), n));
                 counters++;
             } else if (sysreg != 0xDA20 && sysreg != 0xDA21 && sysreg != 0xDA10 && sysreg != 0xD801 &&
                        sysreg != 0xD807) {  // FPCR, FPSR, NZCV, CTR_EL0, DCZID_EL0 run as they are
@@ -611,16 +672,28 @@ void prepare_module(const LoadedModule& m) {
                     log("nce: %s %#x at %s left as is", read ? "mrs" : "msr", sysreg, describe(pc).c_str());
             }
         }
-        if (stub) st<uint32_t>(pc, b_to(pc, stub));
+        if (stub) {
+            if (!r || !branch_in_range(pc, stub))
+                fatal("nce: selected stub for %s at %llx is out of range (%llx)", mi->name,
+                      (unsigned long long)pc, (unsigned long long)stub);
+            st<uint32_t>(pc, b_to(pc, stub));
+        }
     }
-    if (!protect(text, mi->text_size, PROT_READ | PROT_EXEC) || !protect(r.base, kRegionSize, PROT_READ | PROT_EXEC))
-        fatal("nce: this system does not let the app run code it loaded (mprotect PROT_EXEC failed)");
+    if (!protect(text, mi->text_size, PROT_READ | PROT_EXEC))
+        fatal("nce: this system does not let the app run code it loaded (mprotect text PROT_EXEC failed)");
+    uint64_t total_stub_bytes = 0;
+    for (Region& pool : regions) {
+        if (!protect(pool.base, kRegionSize, PROT_READ | PROT_EXEC))
+            fatal("nce: this system does not let the app run stub code at %llx (mprotect PROT_EXEC failed)",
+                  (unsigned long long)pool.base);
+        clear_cache(pool.base, pool.cur - pool.base);
+        total_stub_bytes += pool.cur - pool.base;
+    }
     clear_cache(text, mi->text_size);
-    clear_cache(r.base, r.cur - r.base);
-    log("nce: %s ready: %zu svc, %zu TLS and %zu counter sites patched, stubs %llu bytes", mi->name, svcs, tls,
-        counters, (unsigned long long)(r.cur - r.base));
+    log("nce: %s ready: %zu svc, %zu TLS and %zu counter sites patched, %llu stub bytes in %zu pools",
+        mi->name, svcs, tls, counters, (unsigned long long)total_stub_bytes, regions.size());
     std::lock_guard lk(g_regions_lock);
-    g_regions[m.base] = r;
+    g_regions[m.base] = std::move(regions);
 }
 
 void enter(CPU& c, uint64_t target) {
@@ -654,9 +727,15 @@ uint64_t hook(uint64_t addr, HleFn fn) {
     g_hooks[index] = fn;
     g_hook_count.store(index + 1);
 
-    Region& r = it->second;
+    Region* selected = region_for_site(it->second, addr);
+    if (!selected) {
+        log("nce: hook at %s: no in-range stub pool", describe(addr).c_str());
+        return 0;
+    }
+    Region& r = *selected;
     const uint64_t from = r.cur;
-    if (!protect(r.base, kRegionSize, PROT_READ | PROT_WRITE | PROT_EXEC)) protect(r.base, kRegionSize, PROT_READ | PROT_WRITE);
+    if (!protect(r.base, kRegionSize, PROT_READ | PROT_WRITE | PROT_EXEC))
+        protect(r.base, kRegionSize, PROT_READ | PROT_WRITE);
     const uint64_t original = r.emit(first);
     r.emit(b_to(r.cur, addr + 4));
     const uint64_t stub = r.emit(kPushX16X17);
@@ -676,7 +755,8 @@ bool guest_fault_context(void* ucontext, CPU& c, uint64_t& pc) {
     const auto* uc = static_cast<const ucontext_t*>(ucontext);
     pc = uc->uc_mcontext.pc;
     bool guest = module_at(pc) != nullptr || pc - kThunkBase < kThunkSize + kThunkExtra;
-    for (auto& [base, r] : g_regions) guest = guest || (pc >= r.base && pc < r.end);
+    for (auto& [base, pools] : g_regions)
+        for (const Region& r : pools) guest = guest || (pc >= r.base && pc < r.end);
     if (!guest) return false;
     for (int k = 0; k < 31; k++) c.x[k] = uc->uc_mcontext.regs[k];
     c.x[31] = uc->uc_mcontext.sp;

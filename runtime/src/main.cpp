@@ -116,9 +116,9 @@ static void init_module(CPU& c, const ModuleInfo& m) {
     log("%s constructors: %zu", m.name, status == 1 ? m.init_count : 0);
 }
 
-static void rtld_init(CPU&) {}
-static void rtld_fini(CPU&) {}
-static void rtld_mark(CPU&) {}
+static void rtld_init(CPU&) { log("startup callback: __rtld_init"); }
+static void rtld_fini(CPU&) { log("startup callback: __rtld_fini"); }
+static void rtld_mark(CPU&) { log("startup callback: __rtld_mark"); }
 
 // nnMain, as called by nn::init::Start: the constructors need the program's allocator, which nninitStartup has
 // set up by now, so they run here, right before the real nnMain.
@@ -138,7 +138,7 @@ static void nn_main(CPU& c) {
 static void long_jmp(CPU& c) { throw LongJmp{c.x[0], uint32_t(c.x[1])}; }
 
 static void process_return(CPU&) {
-    log("nn::init::Start returned");
+    log("startup callback: __process_return (nn::init::Start returned)");
     plat::exit_process(0);
 }
 
