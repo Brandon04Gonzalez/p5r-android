@@ -171,6 +171,17 @@ std::unique_ptr<NsoModule> load_nso_bytes(const std::vector<uint8_t>& raw, const
         sym.value = st_value, sym.size = st_size;
         sym.type = st_info & 0xF, sym.bind = st_info >> 4, sym.imported = st_shndx == 0;
     }
+    // Resolve linker-defined relocation boundaries against this NSO's own dynamic tables.
+    // Keep these symbols marked imported so their addresses are not exported globally.
+    for (uint64_t i = 0; i < nsyms; i++) {
+        const std::string& n = m->names[i];
+        if (n == "__rel_dyn_start") m->symbols[i].value = dyn.count(DT_RELA) ? dyn[DT_RELA] : 0;
+        else if (n == "__rel_dyn_end")
+            m->symbols[i].value = dyn.count(DT_RELA) && dyn.count(DT_RELASZ) ? dyn[DT_RELA] + dyn[DT_RELASZ] : 0;
+        else if (n == "__rel_plt_start") m->symbols[i].value = dyn.count(DT_JMPREL) ? dyn[DT_JMPREL] : 0;
+        else if (n == "__rel_plt_end")
+            m->symbols[i].value = dyn.count(DT_JMPREL) && dyn.count(DT_PLTRELSZ) ? dyn[DT_JMPREL] + dyn[DT_PLTRELSZ] : 0;
+    }
     for (uint64_t i = 0; i < nsyms; i++) m->symbols[i].name = m->names[i].c_str();
 
     auto relocs = [&](uint64_t start, uint64_t bytes) {

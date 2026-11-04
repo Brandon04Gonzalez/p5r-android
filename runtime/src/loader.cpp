@@ -95,9 +95,44 @@ HleFn hle_lookup(const char* name) {
     return it == registry().end() ? nullptr : it->second;
 }
 
+static void get_default_user_exception_stack(CPU& c);
+static void set_user_exception_handler(CPU& c);
+static void is_virtual_address_memory_enabled(CPU& c);
+
+NX_HLE("nnosGetDefaultUserExceptionStackForApplication", get_default_user_exception_stack);
+NX_HLE("_ZN2nn2os23SetUserExceptionHandlerEPFvPNS0_17UserExceptionInfoEEPvmS2_", set_user_exception_handler);
+NX_HLE("_ZN2nn2os29IsVirtualAddressMemoryEnabledEv", is_virtual_address_memory_enabled);
+
 static void missing_stub(CPU& c) {
-    // Name comes from the thunk that dispatched here.
-    log("missing import called: %s (lr %s) -> 0", t_missing_name, describe(c.x[30]).c_str());
+    // Preserve the incoming ABI context in the log before applying the generic zero-return fallback.
+    // This is especially useful for SDK bootstrap imports whose signatures are not present in stripped NSOs.
+    log("missing import called: %s (lr %s) x0=%llx x1=%llx x2=%llx x3=%llx x4=%llx x5=%llx x6=%llx x7=%llx sp=%llx -> 0",
+        t_missing_name, describe(c.x[30]).c_str(),
+        (unsigned long long)c.x[0], (unsigned long long)c.x[1], (unsigned long long)c.x[2],
+        (unsigned long long)c.x[3], (unsigned long long)c.x[4], (unsigned long long)c.x[5],
+        (unsigned long long)c.x[6], (unsigned long long)c.x[7], (unsigned long long)c.x[31]);
+    c.x[0] = 0;
+}
+
+// SDK bootstrap asks for the application's default user-exception stack before registering its handler.
+// Returning null here makes nnosInitialize continue with an invalid stack and can terminate startup.
+static void get_default_user_exception_stack(CPU& c) {
+    constexpr uint64_t kExceptionStackSize = 0x10000;
+    static const uint64_t stack = kernel_alloc(kExceptionStackSize, 0x1000);
+    if (c.x[0]) *reinterpret_cast<uint64_t*>(c.x[0]) = kExceptionStackSize;
+    c.x[0] = stack;
+}
+
+// The Android runtime does not expose Horizon's user-exception handler registration. Keep startup working;
+// exceptions remain handled by the host/runtime rather than installing a Switch-specific handler.
+static void set_user_exception_handler(CPU& c) {
+    c.x[0] = 0;
+}
+
+// Some titles explicitly abort if Horizon reports virtual-address-memory mode enabled.
+// The Android NCE runtime does not emulate VAMM's reserved address-space layout, so report it disabled.
+static void is_virtual_address_memory_enabled(CPU& c) {
+    log("HLE nn::os::IsVirtualAddressMemoryEnabled -> false (Android NCE has no VAMM reservation)");
     c.x[0] = 0;
 }
 
