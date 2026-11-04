@@ -15,6 +15,7 @@
 #include <thread>
 #include <vector>
 
+#include "diagnostics.h"
 #include "kernel.h"
 #include "platform.h"
 
@@ -277,13 +278,38 @@ struct RenderOut {
 };
 RenderOut g_render;
 
+// g_render.lock, timed for the diagnostic build. The lock itself is unchanged (no extra blocking); the waiter and the
+// hold times are recorded as atomics so a callback blocked here shows up in the summary.
+#if NX_DIAGNOSTICS_ON
+class RenderLock {
+public:
+    explicit RenderLock(std::mutex& m) : lk(m, std::defer_lock) {
+        const uint64_t t0 = plat::monotonic_ns();
+        lk.lock();
+        const uint64_t t1 = plat::monotonic_ns();
+        diag::render_lock_wait(t1 - t0, t1);
+        held_from_ = t1;
+    }
+    ~RenderLock() {
+        const uint64_t t = plat::monotonic_ns();
+        diag::render_lock_hold(t - held_from_, t);
+    }
+
+private:
+    std::unique_lock<std::mutex> lk;
+    uint64_t held_from_ = 0;
+};
+#else
+using RenderLock = std::lock_guard<std::mutex>;
+#endif
+
 bool render_owns(void* ctx) {
     auto p = static_cast<const uint8_t*>(ctx), b = reinterpret_cast<const uint8_t*>(g_render.blocks);
     return p >= b && p < b + sizeof g_render.blocks;
 }
 
 void render_block_done(void* ctx) {
-    std::lock_guard lk(g_render.lock);
+    RenderLock lk(g_render.lock);
     g_render.free.push_back(int((static_cast<int16_t*>(ctx) - g_render.blocks[0]) / (kFrame * 2)));
 }
 
@@ -314,7 +340,7 @@ void capture_device_sink(uint64_t proc) {  // proc: nn::audio::dsp::CommandListP
         // Six channels without the sdk's own downmix (FL FR FC LFE RL RR): fold them to stereo here.
         const int32_t *c = nullptr, *rl = nullptr, *rr = nullptr;
         if (inputs >= 6 && !downmixed) c = ch(2), rl = ch(4), rr = ch(5);
-        std::lock_guard lk(g_render.lock);
+        RenderLock lk(g_render.lock);
         for (int s = 0; s < kFrame; s++) {
             int64_t a = l[s], b = r[s];
             if (c) {
@@ -387,7 +413,7 @@ void write_wav(const char* path, const std::vector<int16_t>& pcm) {
 void render_submit() {
     static const bool device = device_open();
     static const char* dump_path = std::getenv("NX_AUDIO_DUMP");
-    std::lock_guard lk(g_render.lock);
+    RenderLock lk(g_render.lock);
     RenderOut& o = g_render;
     if (!o.mixed) return;
     o.mixed = false;

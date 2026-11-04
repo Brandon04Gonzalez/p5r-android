@@ -36,6 +36,7 @@ endif()
 option(NX_TESTS "Build the standalone unit tests" OFF)
 # The public build: no log file and no file-triggered diagnostics (runtime/src/platform.h kDiagnostics).
 option(NX_RELEASE "Public build: no nx.log file, no file-triggered diagnostics" OFF)
+option(NX_DIAGNOSTICS "Unified low-overhead diagnostics (video, buffers, render lock, audio) for Test Shoo" OFF)
 if(NX_TESTS AND NOT ANDROID)
     enable_testing()
     add_executable(gpu_pick_test tests/gpu_pick_test.cpp runtime/src/nvn/nvn_gpu_pick.cpp)
@@ -127,6 +128,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/hle_pl.cpp
     runtime/src/hle_fiber.cpp
     runtime/src/hle_movie.cpp
+    runtime/src/diagnostics.cpp
     runtime/src/input_script.cpp
     runtime/src/touch_layout.cpp
     runtime/src/perf_hint.cpp
@@ -277,4 +279,8 @@ if(NX_RELEASE)
 endif()
 if(NX_NCE)
     target_compile_definitions(${NX_GAME} PRIVATE NX_NCE=1)
+endif()
+if(NX_DIAGNOSTICS)
+    target_compile_definitions(${NX_GAME} PRIVATE NX_DIAGNOSTICS=1)
+    message(STATUS "NX_DIAGNOSTICS: unified diagnostics enabled")
 endif()

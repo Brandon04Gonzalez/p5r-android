@@ -40,6 +40,7 @@
 #include <nx/game.h>
 #include <nx/runtime.h>
 
+#include "diagnostics.h"
 #include "kernel.h"
 #include "platform.h"
 #include "platform_android.h"
@@ -98,12 +99,17 @@ void cb_stats(int32_t frames, size_t missing_bytes) {
 }
 
 aaudio_data_callback_result_t audio_cb(AAudioStream*, void*, void* out, int32_t frames) {
+#if NX_DIAGNOSTICS_ON
+    const uint64_t diag_start = monotonic_ns();
+#endif
     auto* dst = static_cast<uint32_t*>(out);
     size_t missing = 0;
+    uint64_t occupancy_now = 0, pending_now = 0;
     std::vector<void*> finished;
     {
         std::lock_guard lk(g_audio);
         const uint64_t occupancy = g_written - g_read;
+        occupancy_now = occupancy;
         g_occ_min.store(std::min(g_occ_min.load(std::memory_order_relaxed), occupancy), std::memory_order_relaxed);
         g_occ_max.store(std::max(g_occ_max.load(std::memory_order_relaxed), occupancy), std::memory_order_relaxed);
         const uint64_t n = std::min<uint64_t>(uint64_t(frames), occupancy);
@@ -117,9 +123,13 @@ aaudio_data_callback_result_t audio_cb(AAudioStream*, void*, void* out, int32_t 
             finished.push_back(g_pending.front().ctx);
             g_pending.pop_front();
         }
+        pending_now = g_pending.size();
     }
     cb_stats(frames, missing * 4);
     for (void* c : finished) g_done(c);
+#if NX_DIAGNOSTICS_ON
+    diag::audio_callback(diag_start, monotonic_ns(), frames, uint64_t(missing), occupancy_now, pending_now);
+#endif
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 }  // namespace
@@ -178,6 +188,10 @@ static void measure_latency(uint64_t start, uint64_t read, uint64_t device) {
 bool audio_submit(const void* data, size_t bytes, void* ctx) {
     if (!g_stream) return false;
     uint64_t start, read, device;
+#if NX_DIAGNOSTICS_ON
+    uint64_t diag_pending = 0;
+    bool diag_truncated = false;
+#endif
     {
         std::lock_guard lk(g_audio);
         start = g_written, read = g_read, device = g_device;
@@ -190,8 +204,15 @@ bool audio_submit(const void* data, size_t bytes, void* ctx) {
         g_pending.push_back({g_written, ctx});
         g_pending_max.store(std::max(g_pending_max.load(std::memory_order_relaxed), uint64_t(g_pending.size())),
                             std::memory_order_relaxed);
+#if NX_DIAGNOSTICS_ON
+        diag_pending = g_pending.size();
+        diag_truncated = n < want;
+#endif
     }
     measure_latency(start, read, device);
+#if NX_DIAGNOSTICS_ON
+    diag::audio_submit(diag_pending, diag_truncated);
+#endif
     return true;
 }
 

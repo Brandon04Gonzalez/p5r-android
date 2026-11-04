@@ -22,6 +22,7 @@
 #include <unistd.h>
 #endif
 
+#include "diagnostics.h"
 #include "nvn.h"
 #include "nvn_ultrawide.h"
 #include "platform.h"
@@ -648,6 +649,7 @@ void QueuePresentTexture(CPU& c) {
     uint64_t n = ++g_presents;
     video_cadence(work_from);
     av_sync(work_from);
+    diag::tick(work_from);
     uw_scan(n);
     uw_cameras(n);
     tl("present<", n);

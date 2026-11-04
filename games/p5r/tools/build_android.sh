@@ -30,6 +30,12 @@ for p in "$ndk" "$bt" "$jar"; do [ -e "$p" ] || { echo "missing $p" >&2; exit 1;
 
 priv="$root/private/p5r"
 test_shoo="${TEST_SHOO:-0}"
+# Unified diagnostics: on by default for Test Shoo, overridable with NX_DIAGNOSTICS=0/1.
+diag="${NX_DIAGNOSTICS:-$test_shoo}"
+case "$diag" in
+    1|on|ON|true|TRUE) diag=ON ;;
+    *) diag=OFF ;;
+esac
 if [ "$test_shoo" = 1 ]; then
     out="$priv/apk_testshoo"
     manifest="$root/games/p5r/AndroidManifest.testshoo.xml"
@@ -39,6 +45,7 @@ else
     manifest="$root/games/p5r/AndroidManifest.xml"
     apk_name="p5r"
 fi
+echo "Diagnostics: NX_DIAGNOSTICS=$diag (Test Shoo: $test_shoo)"
 build="$priv/ba_nce"
 harness="$root/private/build/spirv_harness_android/libspirvharness.so"
 if [ ! -f "$harness" ]; then
@@ -56,11 +63,17 @@ if [ ! -d "$VULKAN_SDK/Include" ] && [ -d "$VULKAN_SDK/include" ]; then
     export VULKAN_SDK="$vulkan_stage"
 fi
 
-if [ ! -f "$build/build.ninja" ]; then
+configure=0
+[ -f "$build/build.ninja" ] || configure=1
+# Reconfigure when the diagnostic mode changed (the same build directory serves both APKs).
+if [ -f "$build/CMakeCache.txt" ] && ! grep -q "^NX_DIAGNOSTICS:BOOL=$diag$" "$build/CMakeCache.txt"; then
+    configure=1
+fi
+if [ "$configure" = 1 ]; then
     cmake -S "$root" -B "$build" -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_TOOLCHAIN_FILE="$ndk/build/cmake/android.toolchain.cmake" \
         -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static \
-        -DNX_GAME=p5r -DNX_NCE=ON
+        -DNX_GAME=p5r -DNX_NCE=ON -DNX_DIAGNOSTICS=$diag
 fi
 cmake --build "$build" --target p5r p5rimport
 
