@@ -318,7 +318,7 @@ struct CachedSet {
     uint32_t at = 0, n = 0;  // its writes in g_set_arena
     VkDescriptorSet set = VK_NULL_HANDLE;
 };
-constexpr uint32_t kSetSlots = 8192;
+constexpr uint32_t kSetSlots = 32768;
 CachedSet g_set_cache[kSetSlots];
 std::vector<SetWrite> g_set_arena;
 uint64_t g_set_generation = 1, g_set_hits = 0, g_set_misses = 0;

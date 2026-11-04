@@ -448,6 +448,9 @@ void frame_init(VkCommandPool pool, uint32_t family, VkBuffer ring, uint8_t* rin
     } else if (is_adreno_8xx()) {
         g_chunk_draws = 0;  // Adreno 8xx driver bug: chunked submissions hang the GPU during battle passes
         log("nvn/vk: Adreno 8xx GPU detected: chunk submits disabled to prevent GPU hang");
+    } else if (is_mali() || is_xclipse()) {
+        g_chunk_draws = 0;  // Mali / Xclipse TBDR GPUs stall on chunked submissions (prevents tile flushes & CPU replay stalls)
+        log("nvn/vk: Mali/Xclipse GPU detected: chunk submits disabled to prevent TBDR stalls");
     } else {
         g_chunk_draws = 150;
     }
