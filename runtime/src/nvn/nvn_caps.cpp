@@ -12,6 +12,20 @@ namespace nx::nvn {
 
 using namespace nx::vk;
 
+namespace {
+
+VideoImportCaps g_video_caps;
+
+bool extension_present(const std::vector<VkExtensionProperties>& extensions, const char* name) {
+    for (const VkExtensionProperties& e : extensions)
+        if (std::strcmp(e.extensionName, name) == 0) return true;
+    return false;
+}
+
+}  // namespace
+
+const VideoImportCaps& video_import_caps() { return g_video_caps; }
+
 void log_device_caps(VkPhysicalDevice physical, const std::vector<VkExtensionProperties>& extensions) {
     static const char* const wanted[] = {
         "VK_KHR_push_descriptor",          "VK_EXT_descriptor_buffer",        "VK_KHR_descriptor_update_template",
@@ -19,6 +33,8 @@ void log_device_caps(VkPhysicalDevice physical, const std::vector<VkExtensionPro
         "VK_EXT_extended_dynamic_state2",  "VK_EXT_extended_dynamic_state3",  "VK_GOOGLE_display_timing",
         "VK_KHR_present_wait",             "VK_KHR_present_id",               "VK_EXT_attachment_feedback_loop_layout",
         "VK_KHR_dynamic_rendering_local_read", "VK_QCOM_render_pass_store_ops", "VK_EXT_load_store_op_none",
+        "VK_ANDROID_external_memory_android_hardware_buffer", "VK_KHR_external_memory_fd",
+        "VK_KHR_sampler_ycbcr_conversion", "VK_EXT_queue_family_foreign",
     };
     std::string have, missing;
     for (const char* w : wanted) {
