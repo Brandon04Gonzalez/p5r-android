@@ -37,6 +37,7 @@
 
 #include <nx/runtime.h>
 
+#include "diagnostics.h"
 #include "platform.h"
 
 namespace nx {
@@ -155,7 +156,7 @@ struct Decoder {
     // Per-window counts for the movie: line (pump thread, every 2 s while the decoder runs).
     struct Stats {
         uint64_t sent = 0, decoded = 0, acquired = 0, got = 0, released = 0, empty_acquires = 0;
-        uint64_t convert_ns = 0, copy_ns = 0, send_wait_ns = 0, max_got_gap_ns = 0;
+        uint64_t convert_ns = 0, copy_ns = 0, send_wait_ns = 0, max_got_gap_ns = 0, max_pump_ns = 0;
     } win;
     uint64_t last_got_ns = 0, win_from_ns = 0, last_sent_ns = 0;
     int64_t last_sent_pts = 0, last_got_pts = 0;
@@ -220,6 +221,7 @@ void to_nv12(const Decoder& d, const uint8_t* src, size_t size, std::vector<uint
     int32_t stride = d.codec_stride > 0 ? d.codec_stride : w, rows = d.codec_rows > 0 ? d.codec_rows : h;
     if (d.color == kColorQcom32m && d.codec_stride <= 0) stride = (w + 127) & ~127, rows = (h + 31) & ~31;
     out.resize(size_t(w) * h * 3 / 2);
+    diag::movie_frame_alloc(out.size(), out.capacity());
     const size_t y0 = size_t(d.crop_top) * stride + d.crop_left;
     for (int32_t r = 0; r < h; r++) {
         size_t at = y0 + size_t(r) * stride;
@@ -271,6 +273,9 @@ void read_codec_format(Decoder& d) {
 
     log("movie: codec output: color format %#x (planar %d), stride %d, slice height %d, crop at %d,%d (%s)", d.color,
         d.is_planar, d.codec_stride, d.codec_rows, d.crop_left, d.crop_top, AMediaFormat_toString(f));
+    diag::movie_buffers(uint64_t(output_slots()), d.nv12_size(),
+                        uint64_t(d.max_input > 0 ? d.max_input : 0), uint64_t(d.codec_stride),
+                        uint64_t(d.codec_rows));
     AMediaFormat_delete(f);
 }
 
@@ -278,6 +283,7 @@ void read_codec_format(Decoder& d) {
 // first). True when an output became ready.
 bool pump(Decoder& d, int64_t wait_us) {
     if (!d.codec) return false;
+    const uint64_t pump_from = plat::monotonic_ns();
     while (!d.to_codec.empty()) {
         ssize_t i = AMediaCodec_dequeueInputBuffer(d.codec, 0);
         if (i < 0) break;
@@ -303,11 +309,15 @@ bool pump(Decoder& d, int64_t wait_us) {
         size_t size = 0;
         uint8_t* buf = AMediaCodec_getOutputBuffer(d.codec, size_t(o), &size);
         const uint64_t t0 = plat::monotonic_ns();
-        if (buf && info.size > 0)
+        if (buf && info.size > 0) {
             to_nv12(d, buf + info.offset, size_t(info.size), d.frames[slot]);
-        else
+            const uint64_t t1 = plat::monotonic_ns();
+            d.win.convert_ns += t1 - t0;
+            diag::movie_convert(t1 - t0, t1);
+        } else {
             d.frames[slot].clear();
-        d.win.convert_ns += plat::monotonic_ns() - t0;
+            d.win.convert_ns += plat::monotonic_ns() - t0;
+        }
         d.win.decoded++;
         AMediaCodec_releaseOutputBuffer(d.codec, size_t(o), false);
         const bool eos = info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM;
@@ -317,6 +327,10 @@ bool pump(Decoder& d, int64_t wait_us) {
         d.decoded += info.size > 0;
         any = true;
     }
+    const uint64_t pump_to = plat::monotonic_ns();
+    const uint64_t pump_ns = pump_to - pump_from;
+    d.win.max_pump_ns = std::max(d.win.max_pump_ns, pump_ns);
+    diag::movie_pump(pump_ns, pump_to);
     return any;
 }
 
@@ -419,6 +433,8 @@ void DecoderConfigure(CPU& c) {
     md_get(c.x[1], "max-input-size", d->max_input);
     if (d->max_input <= 0) d->max_input = 2 << 20;
     log("movie: decoder configured %dx%d, input buffers of %d bytes", d->width, d->height, d->max_input);
+    diag::movie_buffers(uint64_t(output_slots()), d->nv12_size(), uint64_t(d->max_input), uint64_t(d->stride()),
+                        uint64_t(d->rows()));
 #if defined(__ANDROID__)
     if (!d->codec && d->width > 0 && d->height > 0) d->codec = make_codec(*d);
 #endif
@@ -493,13 +509,15 @@ void movie_pump_thread(CPU& c) {
                 const double s = double(now - d->win_from_ns) / 1e9;
                 int busy = 0;
                 for (const auto& o : d->outputs) busy += o.busy;
+                diag::movie_queues(d->to_codec.size(), d->ready.size(), uint64_t(busy));
                 log("movie: per s: sent %.1f, decoded %.1f, acquired %.1f (+%.1f empty), got %.1f, released %.1f; "
-                    "longest gap between gots %.0f ms; convert %.2f ms, copy %.2f ms, send wait %.2f ms per picture; "
-                    "queued for the codec %zu, ready %zu, slots busy %d",
+                    "longest gap between gots %.0f ms; convert %.2f ms, copy %.2f ms, send wait %.2f ms per picture, "
+                    "longest pump %.2f ms; queued for the codec %zu, ready %zu, slots busy %d",
                     w.sent / s, w.decoded / s, w.acquired / s, w.empty_acquires / s, w.got / s, w.released / s,
                     double(w.max_got_gap_ns) / 1e6, w.decoded ? double(w.convert_ns) / 1e6 / double(w.decoded) : 0.0,
                     w.got ? double(w.copy_ns) / 1e6 / double(w.got) : 0.0,
-                    w.sent ? double(w.send_wait_ns) / 1e6 / double(w.sent) : 0.0, d->to_codec.size(), d->ready.size(), busy);
+                    w.sent ? double(w.send_wait_ns) / 1e6 / double(w.sent) : 0.0, double(w.max_pump_ns) / 1e6,
+                    d->to_codec.size(), d->ready.size(), busy);
                 d->win = {};
                 d->win_from_ns = now;
             }
@@ -638,7 +656,9 @@ void DecoderSendInputBufferForDecode(CPU& c) {
             output = pump(*d, 4000);
             for (int k = 0; (flags & kEndOfStream) && !d->codec_eos && k < 100 && d->free_slot() >= 0; k++)
                 output |= pump(*d, 20000);
-            d->win.send_wait_ns += plat::monotonic_ns() - t0;
+            const uint64_t t1 = plat::monotonic_ns();
+            d->win.send_wait_ns += t1 - t0;
+            diag::movie_send_wait(t1 - t0, t1);
             d->win.sent++;
             d->last_sent_ns = plat::monotonic_ns(), d->starve_logged = false, d->last_sent_pts = pts;
         } else
@@ -708,6 +728,7 @@ void DecoderGetOutputBuffer(CPU& c) {
     }
     const uint64_t t1 = plat::monotonic_ns();
     d->win.copy_ns += t1 - t0;
+    diag::movie_copy(t1 - t0, t1);
     d->win.got++;
     d->last_got_pts = d->outputs[index].pts;
     g_movie_last_pts = d->last_got_pts, g_movie_gots++;
@@ -731,6 +752,8 @@ void DecoderGetOutputBufferSize(CPU& c) {
     if (!d) return void(c.x[0] = kTryAgain);
     if (c.x[1]) st<int32_t>(c.x[1], int32_t(d->nv12_size()));
     if (c.x[2]) st<int32_t>(c.x[2], output_slots());
+    diag::movie_buffers(uint64_t(output_slots()), d->nv12_size(), uint64_t(d->max_input > 0 ? d->max_input : 0),
+                        uint64_t(d->stride()), uint64_t(d->rows()));
     c.x[0] = 0;
 }
 

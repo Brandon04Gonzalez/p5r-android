@@ -1,0 +1,95 @@
+name: Build Persona 5 Royal Test Shoo
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      VULKAN_SDK: ${{ github.workspace }}/private/third_party/Vulkan-Headers-1.4.357
+      TEST_SHOO: "1"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - name: Set up the Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          packages: |
+            platform-tools
+
+      - name: Install Android SDK packages
+        run: |
+          yes | sdkmanager --licenses >/dev/null || true
+          sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;28.2.13676358"
+
+      - name: Build dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq cmake ninja-build zip unzip curl
+          mkdir -p private/third_party
+          git clone --depth 1 --branch v1.4.357 \
+            https://github.com/KhronosGroup/Vulkan-Headers private/third_party/Vulkan-Headers-1.4.357
+          mkdir -p private/third_party/ryubing
+          curl -fsSL -o private/third_party/ryubing.tar.gz \
+            https://codeberg.org/Software_arch/Ryubing/archive/a82350bb77.tar.gz
+          tar -xzf private/third_party/ryubing.tar.gz -C private/third_party/ryubing --strip-components=1
+          rm private/third_party/ryubing.tar.gz
+
+      - name: Build the shader translator
+        run: docker run --rm -v "$PWD:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh games/p5r/tools/build_harness_android.sh
+
+      # Optional repository secrets: P5R_KEYSTORE_BASE64 (base64 of a JKS), P5R_KEYSTORE_PASSWORD,
+      # P5R_KEY_ALIAS and P5R_KEY_PASSWORD. Without them the build uses a generated debug key.
+      - name: Prepare signing key
+        env:
+          KEYSTORE_BASE64: ${{ secrets.P5R_KEYSTORE_BASE64 }}
+          KEYSTORE_PASSWORD: ${{ secrets.P5R_KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.P5R_KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.P5R_KEY_PASSWORD }}
+        run: |
+          mkdir -p "$HOME/.android"
+          if [ -n "${KEYSTORE_BASE64:-}" ]; then
+            printf '%s' "$KEYSTORE_BASE64" | base64 --decode > "$HOME/.android/p5r.jks"
+            {
+              echo "P5R_KEYSTORE=$HOME/.android/p5r.jks"
+              echo "P5R_KEYSTORE_PASSWORD=${KEYSTORE_PASSWORD:-android}"
+              echo "P5R_KEY_ALIAS=${KEY_ALIAS:-androiddebugkey}"
+              echo "P5R_KEY_PASSWORD=${KEY_PASSWORD:-${KEYSTORE_PASSWORD:-android}}"
+            } >> "$GITHUB_ENV"
+          else
+            keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" -storepass android \
+              -keypass android -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
+          fi
+
+      - name: Build APK
+        run: bash games/p5r/tools/build_android.sh
+
+      - name: Verify Test Shoo APK package
+        run: |
+          apk="private/p5r/apk_testshoo/p5r-testshoo.apk"
+          aapt2="${ANDROID_HOME:-${ANDROID_SDK_ROOT:-$HOME/Android/Sdk}}/build-tools/35.0.0/aapt2"
+          badging="$("$aapt2" dump badging "$apk")"
+          printf '%s\n' "$badging" | sed -n '1,3p'
+          actual="$(printf '%s\n' "$badging" | sed -n "s/^package: name='\([^']*\)'.*/\1/p")"
+          if [ "$actual" != "io.github.p5rrecomp.testshoo" ]; then
+            echo "Test Shoo APK package is '$actual', expected 'io.github.p5rrecomp.testshoo'" >&2
+            exit 1
+          fi
+          echo "Verified Test Shoo package: $actual"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: p5r-apk-testshoo
+          path: private/p5r/apk_testshoo/p5r-testshoo.apk
+          if-no-files-found: error
