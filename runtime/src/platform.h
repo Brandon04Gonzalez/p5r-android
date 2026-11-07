@@ -139,7 +139,11 @@ struct AudioDiagnostics {
     uint64_t truncations = 0, max_pending = 0;
     uint64_t latency_ok = 0, latency_early = 0;
 };
+#if defined(__ANDROID__)
 AudioDiagnostics audio_diagnostics();
+#else
+inline AudioDiagnostics audio_diagnostics() { return {}; }
+#endif
 
 // Vulkan: the loader's vkGetInstanceProcAddr and the surface extension of this platform.
 void* vulkan_get_instance_proc_addr();
