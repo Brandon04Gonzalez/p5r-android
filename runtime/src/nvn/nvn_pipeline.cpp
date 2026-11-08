@@ -716,6 +716,17 @@ PipelineKey canonical_key(const PipelineKey& in) {
                 k.depth.stencil_func[f] = in.depth.stencil_func[f], k.depth.stencil_fail[f] = in.depth.stencil_fail[f];
                 k.depth.depth_fail[f] = in.depth.depth_fail[f], k.depth.depth_pass[f] = in.depth.depth_pass[f];
             }
+            // With inverted viewport height (-vp.height), 2D UI quads have flipped primitive
+            // winding in framebuffer space (rasterized as back-facing).
+            // When culling is disabled or back-face stencil is unconfigured/defaulted, mirror front
+            // to back so both faces evaluate the identical stencil test and operations.
+            if (in.polygon.cull == 0 || (k.depth.stencil_func[1] == 0 && k.depth.depth_pass[1] == 0) ||
+                (k.depth.depth_pass[1] <= 1 && k.depth.depth_pass[0] > 1)) {
+                k.depth.stencil_func[1] = k.depth.stencil_func[0];
+                k.depth.stencil_fail[1] = k.depth.stencil_fail[0];
+                k.depth.depth_fail[1]   = k.depth.depth_fail[0];
+                k.depth.depth_pass[1]   = k.depth.depth_pass[0];
+            }
         }
     }
     k.polygon.cull = in.polygon.cull;
@@ -1003,7 +1014,7 @@ VkImageView attachment_view(GpuImage& img, uint32_t level, uint32_t layer, VkFor
     // A 3D image's slice is a layer of its 2D-array-compatible views, counted at this level.
     layer = std::min(layer, img.view_type == VK_IMAGE_VIEW_TYPE_3D ? std::max(1u, img.depth >> level) - 1 : img.layers - 1);
     if (level == 0 && layer == 0 && img.levels == 1 && img.layers == 1 && img.view_type == VK_IMAGE_VIEW_TYPE_2D &&
-        format == img.format)
+        format == img.format && !(img.aspect & VK_IMAGE_ASPECT_STENCIL_BIT))
         return img.view;
     auto& cache = g_attachment_views;
     auto& v = cache[{img.image, level, layer, format}];
