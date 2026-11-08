@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cstdarg>
 #include <cstdio>
+#include <cstring>
 #include <fstream>
 #include <mutex>
 #include <string>
@@ -13,6 +14,9 @@
 #include "kernel.h"
 
 #include "platform.h"
+#if NX_NCE
+#include "nce/nce.h"
+#endif
 
 namespace nx {
 
@@ -52,7 +56,7 @@ void log(const char* fmt, ...) {
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     std::lock_guard lk(g_log_lock);
-    if (!g_log_file) {
+    if (!g_log_file && plat::kDiagnostics) {  // NX_RELEASE: the system log only
         const char* path = std::getenv("NX_LOG");
 #if defined(__ANDROID__)
         std::string def = plat::data_root() + "/nx.log";  // next to the data, readable from the phone
@@ -91,9 +95,44 @@ HleFn hle_lookup(const char* name) {
     return it == registry().end() ? nullptr : it->second;
 }
 
+static void get_default_user_exception_stack(CPU& c);
+static void set_user_exception_handler(CPU& c);
+static void is_virtual_address_memory_enabled(CPU& c);
+
+NX_HLE("nnosGetDefaultUserExceptionStackForApplication", get_default_user_exception_stack);
+NX_HLE("_ZN2nn2os23SetUserExceptionHandlerEPFvPNS0_17UserExceptionInfoEEPvmS2_", set_user_exception_handler);
+NX_HLE("_ZN2nn2os29IsVirtualAddressMemoryEnabledEv", is_virtual_address_memory_enabled);
+
 static void missing_stub(CPU& c) {
-    // Name comes from the thunk that dispatched here.
-    log("missing import called: %s (lr %s) -> 0", t_missing_name, describe(c.x[30]).c_str());
+    // Preserve the incoming ABI context in the log before applying the generic zero-return fallback.
+    // This is especially useful for SDK bootstrap imports whose signatures are not present in stripped NSOs.
+    log("missing import called: %s (lr %s) x0=%llx x1=%llx x2=%llx x3=%llx x4=%llx x5=%llx x6=%llx x7=%llx sp=%llx -> 0",
+        t_missing_name, describe(c.x[30]).c_str(),
+        (unsigned long long)c.x[0], (unsigned long long)c.x[1], (unsigned long long)c.x[2],
+        (unsigned long long)c.x[3], (unsigned long long)c.x[4], (unsigned long long)c.x[5],
+        (unsigned long long)c.x[6], (unsigned long long)c.x[7], (unsigned long long)c.x[31]);
+    c.x[0] = 0;
+}
+
+// SDK bootstrap asks for the application's default user-exception stack before registering its handler.
+// Returning null here makes nnosInitialize continue with an invalid stack and can terminate startup.
+static void get_default_user_exception_stack(CPU& c) {
+    constexpr uint64_t kExceptionStackSize = 0x10000;
+    static const uint64_t stack = kernel_alloc(kExceptionStackSize, 0x1000);
+    if (c.x[0]) *reinterpret_cast<uint64_t*>(c.x[0]) = kExceptionStackSize;
+    c.x[0] = stack;
+}
+
+// The Android runtime does not expose Horizon's user-exception handler registration. Keep startup working;
+// exceptions remain handled by the host/runtime rather than installing a Switch-specific handler.
+static void set_user_exception_handler(CPU& c) {
+    c.x[0] = 0;
+}
+
+// Some titles explicitly abort if Horizon reports virtual-address-memory mode enabled.
+// The Android NCE runtime does not emulate VAMM's reserved address-space layout, so report it disabled.
+static void is_virtual_address_memory_enabled(CPU& c) {
+    log("HLE nn::os::IsVirtualAddressMemoryEnabled -> false (Android NCE has no VAMM reservation)");
     c.x[0] = 0;
 }
 
@@ -115,6 +154,21 @@ uint64_t hle_address_or(const char* name, HleFn fallback) {
 uint64_t hle_address(const char* name) { return hle_address_or(name, missing_stub); }
 
 const char* hle_current_name() { return t_missing_name; }
+
+uint64_t hook_function(uint64_t addr, HleFn fn) {
+#if NX_NCE
+    return nce::hook(addr, fn);
+#else
+    const LoadedModule* m = module_at(addr);
+    const uint64_t off = m ? addr - m->base : 0;
+    if (!m || !m->table || off >= m->info->text_size || !m->table[off / 4]) return 0;
+    const Fn original = m->table[off / 4];
+    m->table[off / 4] = fn;
+    char name[64];
+    std::snprintf(name, sizeof name, "__original_%llx", (unsigned long long)addr);
+    return hle_address_or(name, original);  // the original, as a thunk of its own
+#endif
+}
 
 // ---- dispatch -------------------------------------------------------------------------------------------------
 
@@ -162,6 +216,27 @@ struct FastModule {
 FastModule g_fast[4];
 size_t g_fast_count = 0;
 
+// The HLE function of thunk `index`, on c (call() for thunk addresses; nce_dispatch for the guest's calls to them).
+void hle_invoke(CPU& c, size_t index) {
+    if (index >= g_thunks.size()) fatal("call to an HLE thunk never handed out (%zu), lr %s", index, describe(c.x[30]).c_str());
+    const Thunk& th = g_thunks[index];
+    if (g_trace) log("hle %s", th.name.c_str());
+    const char* prev = t_missing_name;
+    t_missing_name = th.name.c_str();
+    KThread* kt = self_thread();
+    if (kt) kt->hle.store(t_missing_name, std::memory_order_relaxed);
+    th.fn(c);
+    t_missing_name = prev;
+    if (kt) kt->hle.store(prev, std::memory_order_relaxed);
+}
+
+#if NX_NCE
+// Native execution: guest code runs on the host CPU (nce.cpp); only the thunks are host functions.
+void call(CPU& c, uint64_t t) {
+    if (t - kThunkBase < kThunkSize) return hle_invoke(c, (t - kThunkBase) / 16);
+    nce::enter(c, t);
+}
+#else
 void call(CPU& c, uint64_t t) {
     for (size_t k = 0; k < g_fast_count; k++) {
         const FastModule& m = g_fast[k];
@@ -181,20 +256,10 @@ void call(CPU& c, uint64_t t) {
         }
     }
     uint64_t off = t - kThunkBase;
-    if (off < kThunkSize && off / 16 < g_thunks.size()) {
-        const Thunk& th = g_thunks[off / 16];
-        if (g_trace) log("hle %s", th.name.c_str());
-        const char* prev = t_missing_name;
-        t_missing_name = th.name.c_str();
-        KThread* kt = self_thread();
-        if (kt) kt->hle.store(t_missing_name, std::memory_order_relaxed);
-        th.fn(c);
-        t_missing_name = prev;
-        if (kt) kt->hle.store(prev, std::memory_order_relaxed);
-        return;
-    }
+    if (off < kThunkSize && off / 16 < g_thunks.size()) return hle_invoke(c, off / 16);
     fatal("call to %llx (%s), lr %s", (unsigned long long)t, describe(t).c_str(), describe(c.x[30]).c_str());
 }
+#endif
 
 void trace_sp(CPU& c, uint64_t pc) {
     log("sp %llx x19 %llx at %s", (unsigned long long)c.x[31], (unsigned long long)c.x[19], describe(pc).c_str());
@@ -215,26 +280,45 @@ uint64_t find_symbol(const char* name) {
     return it == g_exports.end() ? 0 : it->second;
 }
 
-void load_modules(const ModuleInfo* const* mods, size_t count, const std::string& data_dir) {
+// HLE functions that only make sense for recompiled code: natively the game's own run (longjmp unwinds the guest
+// stack itself; the SDK switches fibers by switching guest stacks, which native code follows).
+static bool recompiled_only(const char* name) {
+#if NX_NCE
+    static const char* const kNames[] = {"longjmp", "_longjmp", "_ZN2nn2os15InitializeFiberEPNS0_9FiberTypeEPFS2_PvES3_S3_mi",
+                                         "_ZN2nn2os13FinalizeFiberEPNS0_9FiberTypeE", "_ZN2nn2os13SwitchToFiberEPNS0_9FiberTypeE"};
+    for (const char* n : kNames)
+        if (std::strcmp(n, name) == 0) return true;
+#else
+    (void)name;
+#endif
+    return false;
+}
+
+void load_modules(const ModuleInfo* const* mods, size_t count, const std::string& data_dir,
+                  const uint8_t* const* images) {
     // Map every module first so symbols of all of them are known before relocating.
     for (size_t i = 0; i < count; i++) {
         const ModuleInfo* mi = mods[i];
         uint64_t image = mi->data + mi->data_size;
         uint64_t size = ((mi->bss + mi->bss_size) + 0xFFF) & ~0xFFFull;
         if (!commit(mi->base, size)) fatal("cannot commit module %s", mi->name);
-        std::string path = data_dir + "/" + mi->name + ".bin";
-        std::ifstream f(path, std::ios::binary);
-        if (!f) fatal("missing %s (run tools/nso2bin.py)", path.c_str());
-        f.read(reinterpret_cast<char*>(mi->base), std::streamsize(image));
-        if (uint64_t(f.gcount()) != image) fatal("%s: expected %llx bytes", path.c_str(), (unsigned long long)image);
+        if (images) {  // native execution: the image the NSO reader made (nce/nso.cpp)
+            std::memcpy(reinterpret_cast<void*>(mi->base), images[i], image);
+        } else {
+            std::string path = data_dir + "/" + mi->name + ".bin";
+            std::ifstream f(path, std::ios::binary);
+            if (!f) fatal("missing %s (run tools/nso2bin.py)", path.c_str());
+            f.read(reinterpret_cast<char*>(mi->base), std::streamsize(image));
+            if (uint64_t(f.gcount()) != image) fatal("%s: expected %llx bytes", path.c_str(), (unsigned long long)image);
+        }
         vm_set(mi->base + mi->text, mi->text_size, kMemCode, 5);
         vm_set(mi->base + mi->ro, mi->ro_size, kMemCode, 1);
         vm_set(mi->base + mi->data, size - mi->data, kMemCodeData, 3);
 
-        LoadedModule lm{mi, mi->base, size, new Fn[mi->text_size / 4]()};
+        LoadedModule lm{mi, mi->base, size, mi->func_count ? new Fn[mi->text_size / 4]() : nullptr};
         for (size_t k = 0; k < mi->func_count; k++) lm.table[mi->funcs[k].offset / 4] = mi->funcs[k].fn;
         g_modules.push_back(lm);
-        if (g_fast_count < 4) g_fast[g_fast_count++] = {lm.base, mi->text_size, lm.table};
+        if (g_fast_count < 4 && lm.table) g_fast[g_fast_count++] = {lm.base, mi->text_size, lm.table};
 
         for (size_t k = 0; k < mi->symbol_count; k++) {
             const Symbol& s = mi->symbols[k];
@@ -264,7 +348,7 @@ void load_modules(const ModuleInfo* const* mods, size_t count, const std::string
             const Symbol& s = mi->symbols[r.sym];
             uint64_t target = 0;
             if (s.type == 2 || s.imported) {
-                if (hle_lookup(s.name)) {
+                if (hle_lookup(s.name) && !recompiled_only(s.name)) {
                     target = hle_address(s.name);
                     hle++;
                 }
@@ -283,6 +367,9 @@ void load_modules(const ModuleInfo* const* mods, size_t count, const std::string
         }
     }
     log("linked: %zu to HLE, %zu across modules, %zu unresolved", hle, linked, missing);
+#if NX_NCE
+    for (auto& lm : g_modules) nce::prepare_module(lm);
+#endif
 }
 
 }  // namespace nx

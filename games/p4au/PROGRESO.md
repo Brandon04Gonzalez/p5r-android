@@ -1,6 +1,6 @@
 # Port nativo de Persona 4 Arena Ultimax a Android — progreso
 
-Última actualización: 2026-10-25 (sesión 3: la película de apertura en la tablet)
+Última actualización: 2026-11-04 (sesión 4: Versus local con dos jugadores en PC y modo determinista)
 
 ## Estado en una línea
 
@@ -267,19 +267,71 @@ pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancela
     - `tabfight.sh` ya no llega a Arcade (acabó en el Modo Historia: el menú recuerda la categoría) y **sobrescribe
       `config.txt` sin copia**: la del usuario está en `private/p4au/runs/user_1024/config.txt`.
 
-## Falta ❌ (por orden)
+### Sesión 4 (2026-11-03) — dos jugadores en local
 
-1. **Rendimiento en la tablet** (punto 24): el combate a 30 fps va a media velocidad. Averiguar qué bloquea
-   `gpu_present` (perfetto con frecuencia de GPU y etapas de render de Adreno; marcas `tl()` dentro de `gpu_present`
-   para separar acquire, pase de presentación y `vkQueuePresentKHR`) y por qué la GPU mide 15 ms con esperas y 31 ms
-   sin ellas. Si la GPU de verdad no llega, bajar la resolución interna (P4AU ignora `NX_RENDER_RES`: buscar dónde
-   fija 1280×768) o probar la caché de pases. Y en la CPU: el coste de hashes de la caché de búferes en combates de
-   Arcade (punto 28).
-2. Comprobar Versus (y el Modo Historia en la tablet, copiando sus datos de `story/` si hay espacio).
-3. Sonido: comprobar de oído en la tablet (ya se renderiza y se decodifica Opus, puntos 16 y 23).
-4. Controles táctiles: el panel de lucha ya está (punto 27); falta probarlo con los dedos en la tablet y ajustar
-   tamaños y opacidad (en 16:10 tapan más imagen que en el emulador).
-5. Probar en otros móviles (Mali/PowerVR) y gama media.
+31. **Versus local con dos mandos funciona en PC** (`runs/n1-versus`). El juego consulta los ids de npad 0-7 cada frame
+    (`main+31ab0` → `main+31980`, que elige el lector de estado según el estilo de `GetNpadStyleSet`); antes solo el id 0
+    decía estar conectado. Ahora `hle_hid.cpp` da al **jugador 2 (npad id 1)** el estilo full-key y su propio estado
+    cuando tiene una fuente: el **segundo mando XInput** (`read_pad2` en `platform_win.cpp`; un hueco vacío se mira cada
+    2 s), las pistas de guion `NX_INPUT_P2` (por frame) o `NX_INPUT_SCRIPT_P2` (por reloj), entrada remota, o
+    `NX_P2=1` (`NX_P2=0` lo apaga). Sin nada de eso todo sigue como antes (también en Android). También se interceptan
+    las variantes JoyLeft/JoyRight de `GetNpadState` que P4AU importa.
+    - **Ruta a Versus** (desde el menú principal en HISTORIA, la categoría que recuerda la partida guardada; frames con
+      `-FrameKeys`/`-FrameKeys2` de `run_pc.ps1`): A 500 (película), A 600 (título), DERECHA 900 (COMBATE: Arcade,
+      Lluviadepuntos, GoldenArena, **Versus**, la lista da la vuelta), ABAJO ×3 (1000/1060/1120), A 1200 → **selección
+      de mando** con un icono por mando conectado ("1" y "2"): J1 IZQUIERDA y J2 DERECHA a 1400, A los dos a 1460 →
+      personaje (J1 Yu, J2 Yosuke), tipo, color, escenario (auto) con A de los dos cada ~100 frames → VS → combate
+      (ROUND 1 hacia el frame 3400).
+    - Con J1 quieto, `NX_INPUT_P2="3600:Left:300,3960:SRight:240,..."` hace andar a Yosuke hacia Yu (cruceta) y volver
+      (stick): se mueve justo cuando se le manda.
+    - Pistas por frame ampliadas: `<frame>:<botón>[:<frames>]` (8 por defecto), botones ZL ZR y `SLeft/SRight/SUp/SDown`
+      (stick izquierdo). Van por frame presentado: no se desplazan con los volcados de frames (cada volcado para el
+      juego ~0,66 s: con `-DumpEvery 30` el arranque va a ~26 fps y las rutas por reloj fallan).
+    - **API para el juego en red** (`runtime/src/hid_input.h`): `hid::set_remote_input(jugador, frame, PadState)`
+      fija la entrada de un jugador para un frame (desde entonces solo cuenta eso; un frame sin dato es un mando
+      neutro), `clear_remote_input`, `read_local` (lo que dan los mandos y guiones locales, lo que se enviará) y
+      `connected`. `NX_INPUT_REMOTE=1` mete las pistas por frame por esa API un frame antes (`runs/n1-remote`): mismas
+      posiciones que `n1-versus` en cada frame del combate.
+    - Para N2 (determinismo): en esas dos pruebas con la misma entrada el combate empezó unos 60 frames antes en una (el reloj
+      del asalto iba una unidad por delante y la intro/"ROUND 1" salía antes): las cargas duran un número variable de
+      frames, así que el número de frame absoluto no sirve de ancla entre ejecuciones ni entre dispositivos.
+    - La ruta de Arcade con J1 solo sigue llegando al combate contra Chie (`runs/n1-arcade2`, ROUND 1 en el frame 3840):
+      A 500, A 600, DERECHA 900, A 1000, IZQUIERDA 1200, A 1260 y A cada 90 frames desde 1500. Ojo: entrar en un modo
+      guarda la categoría en `bbsave.dat` y cambia la ruta de la siguiente prueba (en estas pruebas se restauró la copia).
+
+### Sesión 4, segunda parte (2026-11-03) — determinismo para el juego en red (N2)
+
+32. **Modo determinista** `NX_DETERMINISTIC=1` (apagado por defecto; lo encenderá la sesión de red; `run_pc.ps1
+    -Deterministic`), en `runtime/src/netplay/determinism.{h,cpp}`. Con la misma entrada por frame, dos ejecuciones
+    llegan al mismo estado en el mismo frame aunque vayan a velocidades muy distintas. Auditoría con `NX_DET_TRACE=1`
+    (quién lee el reloj, la fecha y `GenerateRandomBytes`, y en qué frame e hilo se abre cada archivo):
+    - **La divergencia de N1 eran las semillas**: el juego lee el reloj solo en el hilo principal (`main+3831c`, µs):
+      el controlador de frames (`main+3849c`) cada frame y, al arrancar, la semilla de dos de sus cuatro Mersenne
+      Twister (`main+e20b8`, `main+e20e0`: los ms desde el arranque). Otra semilla en cada ejecución → otra variante
+      de la intro de Yosuke → el asalto empezaba en otro frame. En modo determinista el reloj del hilo principal es
+      1/60 s por frame presentado (+1 tick por lectura); los demás hilos siguen con el reloj real.
+    - Las cargas son asíncronas: el hilo principal encola y el hilo 0x55 abre y lee (una carga de combate se reparte
+      en 6 frames en PC). En modo determinista cada present espera a que los hilos cargadores estén parados
+      (`det::thread_idle` en `kernel.cpp`).
+    - El hilo principal arranca un hilo por cada operación de guardado (0x57-0x5a, frames 6, 11, 16 y 21), y su
+      primera apertura de `bbsave.dat` caía en frames distintos (11 o 13). En modo determinista el hilo principal
+      espera a que el hilo que arranca quede parado (`det::thread_started`), y la apertura cae siempre en el 11 y el 21.
+    - La fecha (`GetCurrentTime`) queda fija (+ frame/60) y `GenerateRandomBytes` (solo lo usa el montón de nlib) sale
+      de la semilla de sesión `NX_DET_SEED`. El audio va por reloj pero no realimenta la lógica en esta ruta.
+    - **Hash de estado** `netplay::state_hash()` (lector en `game.cpp`): reloj del asalto (`main+19d1ac0`), vida y
+      posición de los dos personajes (punteros en `main+183ac40`; vida en +0xc74: Yu 9500, Yosuke 8500), cámara y los
+      cuatro MT (`main+68b358`). `NX_DET_HASH_EVERY=10` lo escribe en el log (`NX_DET_HASH_WORDS=1` añade todas las
+      palabras) y `run_pc.ps1 -CompareTo <prueba>` compara dos pruebas frame a frame. `NX_FS_DELAY_US=<µs>` simula un
+      almacenamiento lento (para probar).
+    - **Resultado** (ruta Versus de N1, P2 golpea a P1): `n2-a` (volcado cada 120 frames) y `n2-b` (volcado cada 30 y
+      2 ms más por lectura de archivo) tienen el mismo hash en los 1483 frames comparados (10-14830); el asalto 1
+      empieza en el frame 3372 en las dos y el reloj se agota en el 9320 en las dos. Sin el modo (`n2-red-a`/`-b`) los
+      491 frames difieren y el asalto empieza en el 3527 y el 3396. Sin nada (`n2-default`) todo va como en N1.
+    - Pendiente: la primera ejecución tras compilar (`n2-boot-a`, en frío) fue 3-4 frames por detrás entre los frames
+      10 y 40 y luego convergió (igual desde el 50). Causa sin encontrar; el lockstep debe empezar después del arranque.
+    - Para N3: los dos equipos deben arrancar en modo determinista con la misma `NX_DET_SEED` y la **misma partida
+      guardada** (la categoría del menú, opciones y desbloqueos están en `bbsave.dat`), y empezar el lockstep en un
+      frame posterior al arranque en el que los dos tengan el mismo hash.
 
 ## Notas
 
@@ -287,3 +339,27 @@ pregunta "Se va a volver al menú principal. ¿Estás de acuerdo?", con "Cancela
 - `user/save/bbsave.dat` (≈950 KB) y `replay_list.dat` se crean bien. Si una prueba aborta mientras guarda, borra
   `private\p4au\user\save\bbsave.dat` (si no, el juego dice "Los datos están dañados").
 - El idioma sale del sistema (español → textos en español).
+
+### 2026-10-31 (sesión del port de NieR): arreglos de P5R v0.5.0 en el runtime
+
+Commit `c355cbb`: los cambios de runtime de P5R v0.5.0 (`254b1a0` de `p5r-main`, historia no relacionada: cherry-pick,
+no merge) que aplicaban limpios: decodificación BC por CPU en Xclipse (`nvn_bc.cpp`), R11G11B10F → RGBA16F en Mali
+(`nvn_caps.cpp`), sin trocear envíos en Adreno 8xx (`nvn_frames.cpp`, `nvn_vk.*`), `NX_DISABLE_BLOOM` (apagado),
+SixAxis con 1 estado (`hle_hid.cpp`), sensibilidad táctil y mando Nintendo/Xbox (`platform_android_input.cpp`), L3/R3
+en la tabla táctil de P5R. Más el `switch (k) {` que ese commit perdió en `platform_android_input.cpp` (el APK no
+compilaba). **Fuera**: `hle_fs.cpp` (mods sin mayúsculas / formatos de carpeta) y `main.cpp` (regiones de P5R, NCE), con
+conflictos. El lanzador de P4AU no tiene aún las opciones nuevas (P4G las tiene desde su v0.2.0). Verificado: PC y APK
+compilan; en PC arranca a 60 fps (`runs/p5rfix1`). Sin probar en la tablet.
+
+### 2026-11-02: Arreglo de aspecto de pantalla panorámica y opción NX_STRETCH
+
+- `runtime/src/platform_android.cpp`: `window_size` adaptado para calcular el ancho proporcional al aspect ratio físico del teléfono (`sw * target_h / sh`); `vulkan_create_surface` añade `ANativeWindow_setBuffersGeometry` proporcional; `unsetenv("NX_STRETCH")` en arranque.
+- `games/p4au/java/io/github/p4aurecomp/Launcher.java`: agregada opción en interfaz de usuario para **Pantalla completa (estirar)** (`NX_STRETCH=0/1`); `save()` escribe resoluciones adaptativas según modo Handheld/Docked.
+
+### 2026-11-03: Port de soluciones y PRs de Persona 5 a P4AU
+
+- **Carga de controladores GPU personalizados (`libadrenotools` / Turnip, PR #133)**: soporte completo en `CMakeLists.txt`, `build_apk.ps1`, `platform_android.cpp` e interfaz en `Launcher.java` con selector e importador de archivos `.zip`/`.so` y restauración del controlador de fábrica.
+- **Servicios HLE de Horizon OS (PR #47)**: ganchos `nn::ngc::ProfanityFilter`, `ngc:u`, `ngct:u`, y servicio `fsp-srv` (cmds 200, 202) en `svc_misc.cpp` conservando `friend:u`; applet `swkbd` (0x11) y `CreateTransferMemoryStorage` en `svc_am.cpp` conservando canales de invitación y notificación de P4AU.
+- **Prevención de interbloqueo recursivo**: sustituido `std::mutex g_fs` por `std::recursive_mutex g_fs` en `runtime/src/hle_fs.cpp`.
+- **Compatibilidad Windows PC para lector de imágenes NSP**: añadido include de `win_compat` (`sys/statvfs.h`) y directiva de inclusión de `NX_IMPORTER_DIR` en `CMakeLists.txt`.
+- **Exportación segura de depuración**: integración de `LogProvider` en manifest y lanzador.

@@ -68,17 +68,44 @@ const Cpus& cpus() {
                 if (std::fscanf(fp, "%ld", &f) != 1) f = 0;
                 std::fclose(fp);
             }
+            if (f == 0) {
+                std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%ld/cpufreq/scaling_max_freq", k);
+                if (FILE* fp = std::fopen(path, "r")) {
+                    if (std::fscanf(fp, "%ld", &f) != 1) f = 0;
+                    std::fclose(fp);
+                }
+            }
             freq.push_back(f);
         }
         std::vector<long> distinct = freq;
         std::sort(distinct.begin(), distinct.end());
         distinct.erase(std::unique(distinct.begin(), distinct.end()), distinct.end());
-        for (long f : freq)
-            x.cluster.push_back(int(std::lower_bound(distinct.begin(), distinct.end(), f) - distinct.begin()));
-        x.clusters = int(distinct.size());
+
+        bool valid_freq = !distinct.empty() && distinct.back() > 0 && distinct.size() > 1;
+        if (valid_freq) {
+            for (long f : freq)
+                x.cluster.push_back(int(std::lower_bound(distinct.begin(), distinct.end(), f) - distinct.begin()));
+            x.clusters = int(distinct.size());
+        } else if (n >= 4) {
+            // SELinux blocked cpufreq sysfs access: fall back to standard ARM big.LITTLE / DynamIQ topology
+            x.cluster.clear();
+            if (n == 8) {
+                x.cluster = {0, 0, 0, 0, 1, 1, 1, 2};
+                x.clusters = 3;
+            } else {
+                for (long k = 0; k < n; k++)
+                    x.cluster.push_back(k < n / 2 ? 0 : 1);
+                x.clusters = 2;
+            }
+            log("threads: cpufreq blocked by SELinux; using fallback topology for %ld CPUs (%d clusters)", n, x.clusters);
+        } else {
+            x.clusters = 1;
+            for (long k = 0; k < n; k++) x.cluster.push_back(0);
+        }
+
         std::string desc;
-        for (size_t k = 0; k < freq.size(); k++)
-            desc += (k ? " " : "") + std::to_string(freq[k] / 1000) + "/" + std::to_string(x.cluster[k]);
+        for (size_t k = 0; k < x.cluster.size(); k++)
+            desc += (k ? " " : "") + (k < freq.size() ? std::to_string(freq[k] / 1000) : "0") + "/" + std::to_string(x.cluster[k]);
         log("threads: %ld CPUs, MHz/cluster: %s", n, desc.c_str());
         return x;
     }();
@@ -88,7 +115,8 @@ const Cpus& cpus() {
 int affinity_mode() {
     static const int m = [] {
         const char* e = std::getenv("NX_AFFINITY");
-        return e ? std::atoi(e) : 0;
+        if (e) return std::atoi(e);
+        return 2;  // Default on Android: run on all fast cores (cl > 0, avoiding little/efficiency cluster)
     }();
     return m;
 }
@@ -159,6 +187,20 @@ Role g_roles[2] = {{"replay+present"}, {"game main"}};
 void thread_counters(uint64_t& cpu_ns, long faults[2], long switches[2]) {
     cpu_ns = thread_cpu_ns();
     thread_usage(faults, switches);
+}
+
+void place_fast_cores() {
+#if defined(__ANDROID__)
+    const Cpus& c = cpus();
+    int mode = affinity_mode();
+    if (!mode || c.clusters < 2) return;
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (size_t k = 0; k < c.cluster.size(); k++) {
+        if (c.cluster[k] > 0) CPU_SET(int(k), &set);
+    }
+    sched_setaffinity(0, sizeof set, &set);
+#endif
 }
 
 

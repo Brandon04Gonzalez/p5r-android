@@ -22,6 +22,9 @@
 #include <unistd.h>
 #endif
 
+#include "netplay/determinism.h"
+#include "netplay/netplay.h"
+#include "diagnostics.h"
 #include "nvn.h"
 #include "nvn_ultrawide.h"
 #include "platform.h"
@@ -106,7 +109,17 @@ void av_sync(uint64_t now) {
     const double want = std::clamp(3.0 * (period - 33.3), 0.0, 250.0);
     const uint32_t v = uint32_t(std::clamp(want, double(applied) - 20.0, double(applied) + 20.0) + 0.5);
     if (v != applied) plat::audio_set_delay_ms(applied = v);
-    if (n % 600 == 0) log("av sync: frame period %.1f ms, sound delayed %u ms", period, applied);
+    if (n % 600 == 0) {
+#if defined(__ANDROID__)
+        const auto a = plat::audio_diagnostics();
+        log("av sync: frame period %.1f ms, sound delayed %u ms; audio ring %llu..%llu frames, %llu truncations, %llu pending max, latency %llu ok/%llu early",
+            period, applied, (unsigned long long)a.ring_min, (unsigned long long)a.ring_max,
+            (unsigned long long)a.truncations, (unsigned long long)a.max_pending,
+            (unsigned long long)a.latency_ok, (unsigned long long)a.latency_early);
+#else
+        log("av sync: frame period %.1f ms, sound delayed %u ms", period, applied);
+#endif
+    }
 }
 
 // Submits the game made and submits whose replay (and GPU work, write-backs) finished. The game records the next frame
@@ -233,6 +246,24 @@ void SyncWait(CPU& c) {
 
 void QueueInitialize(CPU& c) { c.x[0] = 1; }  // NVNboolean (NVNqueue*, const NVNqueueBuilder*)
 void QueueFinalize(CPU&) {}
+// ---- frame skipping ----
+// NX_FRAMESKIP=1 (auto): when a present comes later than the 60 Hz schedule allows, the next frame's picture is
+// skipped (never two in a row), so a device that needs 20-25 ms to draw a fight still runs the game's logic at 60
+// steps a second, showing about every other one. 2: every other frame always. 0 or unset: every frame drawn.
+// Skipping changes what is drawn, never the game's memory (no write-backs in P4AU's fights), so a netplay peer that
+// skips stays in step with one that does not.
+std::atomic<bool> g_skip_next{false};     // the frame being recorded now: its picture is skipped
+std::atomic<bool> g_replay_skips{false};  // the replay running now belongs to such a frame
+uint64_t g_frames_skipped = 0;
+
+int frameskip_mode() {
+    static const int mode = [] {
+        const char* e = std::getenv("NX_FRAMESKIP");
+        return e ? std::atoi(e) : 0;
+    }();
+    return mode;
+}
+
 void QueueSubmitCommands(CPU& c) {  // (NVNqueue*, int count, const NVNcommandHandle*)
     plat::perf_hint_thread();  // this thread replays: part of every frame (perf_hint.cpp)
     std::vector<std::shared_ptr<CmdList>> lists;
@@ -260,9 +291,12 @@ void QueueSubmitCommands(CPU& c) {  // (NVNqueue*, int count, const NVNcommandHa
         g_sub_called++;
     }
     tl("submit-call");
-    worker_run([lists = std::move(lists), deferred] {
+    const bool skip = g_skip_next.load(std::memory_order_relaxed);
+    worker_run([lists = std::move(lists), deferred, skip] {
         tl("replay>");
+        g_replay_skips.store(skip, std::memory_order_relaxed);
         gpu_submit(lists, deferred);
+        g_replay_skips.store(false, std::memory_order_relaxed);
         tl("replay<");
         submit_done();
     });
@@ -565,11 +599,13 @@ void WindowSetPresentInterval(CPU& c) {
 // one. On the Switch the texture-available sync of the next acquire does this; ours is signaled at once, so without
 // it the game runs as fast as it can once it is faster than 60 fps. A late frame is not snapped to the next vsync
 // (an 18 ms frame stays 18 ms, not 33). NX_NO_FRAME_LIMIT=1: unpaced.
-void pace_present(int interval) {
+// Returns how late this present came against the schedule (0: on time, after any sleep).
+uint64_t pace_present(int interval) {
     static const bool off = std::getenv("NX_NO_FRAME_LIMIT") != nullptr;
     static uint64_t next = 0;
-    if (off || interval <= 0) return;
+    if (off || interval <= 0) return 0;
     uint64_t now = plat::monotonic_ns();
+    const uint64_t late = next && now > next ? now - next : 0;
     if (next > now) plat::sleep_ns(next - now), now = plat::monotonic_ns();
     static uint64_t presents = 0, at2 = 0;  // how often the game asks for 30 fps (interval 2), per 600 presents
     at2 += interval >= 2;
@@ -577,6 +613,7 @@ void pace_present(int interval) {
         log("nvn: %llu of the last 600 presents at interval >= 2", (unsigned long long)at2), at2 = 0, log_wait_sites();
     uint64_t period = uint64_t(interval) * display_period_ns();
     next = (next > now || now - next < period ? next : now) + period;
+    return late;
 }
 
 void QueuePresentTexture(CPU& c) {
@@ -596,19 +633,26 @@ void QueuePresentTexture(CPU& c) {
         // At most two presents queued: the game runs at most two frames ahead of the replay.
         static uint64_t queued[2] = {};
         static int next_slot = 0;
+        const bool skipped = g_skip_next.load(std::memory_order_relaxed);
         worker_wait(queued[next_slot]);
         if (int(c.x[2]) >= 0 && size_t(c.x[2]) < w->textures.size()) {
             uint64_t texture = w->textures[size_t(c.x[2])];
             std::array<int32_t, 4> crop{w->crop[0], w->crop[1], w->crop[2], w->crop[3]};
-            queued[next_slot] = worker_run([texture, crop] { gpu_present(texture, crop.data()); });
+            if (skipped)
+                g_frames_skipped++;
+            else
+                queued[next_slot] = worker_run([texture, crop] { gpu_present(texture, crop.data()); });
             next_slot ^= 1;
         }
-        pace_present(w->interval);
+        const uint64_t late = pace_present(w->interval);
+        const int mode = frameskip_mode();
+        g_skip_next = mode == 2 ? !skipped : mode == 1 && !skipped && late > display_period_ns() / 8;
     }
     work_from = plat::monotonic_ns();
     uint64_t n = ++g_presents;
     video_cadence(work_from);
     av_sync(work_from);
+    diag::tick(work_from);
     uw_scan(n);
     uw_cameras(n);
     tl("present<", n);
@@ -619,7 +663,12 @@ void QueuePresentTexture(CPU& c) {
                 (unsigned long long)g_tl[k].arg);
     }
     if (n == 1 || (n & (n - 1)) == 0) log("nvn: present #%llu (texture %d)", (unsigned long long)n, int(c.x[2]));
+    if (frameskip_mode() && n % 600 == 0)
+        log("nvn: frameskip: %llu of the last 600 frames not drawn", (unsigned long long)g_frames_skipped),
+            g_frames_skipped = 0;
     g_frame++;
+    det::on_present();
+    netplay::on_frame();  // netplay: the input exchange and the stall before the next frame
 }
 
 // (NVNwindow*, int x, int y, int width, int height): the part of the window textures shown. In handheld mode
@@ -637,6 +686,8 @@ void WindowSetCrop(CPU& c) {
 }
 
 }  // namespace
+
+bool render_skipped() { return g_replay_skips.load(std::memory_order_relaxed); }
 
 NX_HLE("nvnWindowSetCrop", WindowSetCrop);
 NX_HLE("nvnSyncInitialize", SyncInitialize);

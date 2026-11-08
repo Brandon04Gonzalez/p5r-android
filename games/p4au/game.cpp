@@ -15,6 +15,7 @@
 #include <nx/game.h>
 #include <nx/runtime.h>
 
+#include "netplay/determinism.h"
 #include "platform.h"
 
 namespace nx {
@@ -171,6 +172,59 @@ void focus_check(CPU& c) {
     }
 }
 
+// ---- battle state for netplay's desync check (netplay::state_words / state_hash) ----
+// Found by comparing snapshots of main's image and of the heap blocks it points to during a fight (NX_DET_SNAP, a
+// Versus Yu against Yosuke where Yosuke walks, pushes Yu into the corner and hits him) and by reading the code:
+// - main+19d1ac0: the round clock: +0 the round's length in seconds (99), +4 frames left, +8 frames gone, +0xc
+//   seconds left (the first four words, which the hash log prints).
+// - main+183ac40: pointers to the two characters (player 1, player 2; heap objects 0x2b410 apart). Per character
+//   +0xc74 health (Yu 9500, Yosuke 8500 at full), +0xc78 maximum health, +0xc7c a second health word, +0xc90 x
+//   (integer: Yu -260000 and Yosuke +260000 at the start), +0xc94 y, +0xca8 a frame counter.
+// - main+19d1b6c..main+19d1c70: one 0x28-byte entry per object the camera follows (floats, +0 x).
+// - The game's four Mersenne Twisters (mt19937ar-cok, main+5e9fc seeds one, main+5ea68 draws): an array of 0x9d0-byte
+//   generators whose pointer is at main+68b358 (main+d52c allocates it, 4 of them). Per generator: words left before
+//   the next refill (+0x9c0), the next word's index (+0x9c8 is a pointer into the state), and state words 0 and 623.
+//   main+e20b8 and main+e20e0 seed the first two at boot with the milliseconds since start-up: a different seed in
+//   every run until deterministic mode made the clock a function of the frame.
+// Heap pointers are read only when they point into committed guest memory (outside a fight they may be stale or 0).
+bool readable(uint64_t p, uint64_t size) {
+    if (!p) return false;
+    VmInfo v = vm_query(p);
+    return v.state != kMemFree && p + size <= v.addr + v.size;
+}
+
+int battle_state(uint32_t* w, int max) {
+    if (!g_main || max < 128) return 0;
+    int n = 0;
+    for (uint32_t off = 0x19d1ac0; off < 0x19d1ad0; off += 4) w[n++] = ld<uint32_t>(g_main + off);
+    for (uint64_t k = 0; k < 2; k++) {
+        uint64_t ch = ld<uint64_t>(g_main + 0x183ac40 + 8 * k);
+        bool ok = readable(ch, 0xcb0);
+        // A character object the fight's load has just allocated holds whatever that memory had before (on frames
+        // 2800-2810 of the N1 route: x, y and the counter differ between a PC and a phone, reused memory the GPU had
+        // written) until the game sets it up a few frames later: its words count only once they look set up.
+        if (ok) {
+            const int32_t hp = int32_t(ld<uint32_t>(ch + 0xc74)), max = int32_t(ld<uint32_t>(ch + 0xc78));
+            const int32_t x = int32_t(ld<uint32_t>(ch + 0xc90)), y = int32_t(ld<uint32_t>(ch + 0xc94));
+            const int32_t ctr = int32_t(ld<uint32_t>(ch + 0xca8));
+            ok = max > 0 && max <= 100000 && hp >= -100000 && hp <= max && x > -100000000 && x < 100000000 &&
+                 y > -100000000 && y < 100000000 && ctr >= 0 && ctr < 100000000;
+        }
+        for (uint32_t off : {0xc74u, 0xc78u, 0xc7cu, 0xc90u, 0xc94u, 0xca8u}) w[n++] = ok ? ld<uint32_t>(ch + off) : 0;
+    }
+    for (uint32_t off = 0x19d1b6c; off < 0x19d1c70; off += 4) w[n++] = ld<uint32_t>(g_main + off);
+    uint64_t mts = ld<uint64_t>(g_main + 0x68b358);
+    for (uint64_t k = 0; k < 4; k++) {
+        uint64_t mt = mts + k * 0x9d0;
+        bool ok = readable(mts, 4 * 0x9d0);
+        w[n++] = ok ? ld<uint32_t>(mt + 0x9c0) : 0;
+        w[n++] = ok ? uint32_t((ld<uint64_t>(mt + 0x9c8) - mt) / 4) : 0;
+        w[n++] = ok ? ld<uint32_t>(mt) : 0;
+        w[n++] = ok ? ld<uint32_t>(mt + 623 * 4) : 0;
+    }
+    return n;
+}
+
 }  // namespace
 
 NX_HLE("fputs", fputs_logged);
@@ -199,6 +253,7 @@ void game::after_init() {
     const LoadedModule* m = module_at(find_symbol("nnMain"));
     if (!m) return;
     g_main = m->base;
+    netplay::set_state_reader(battle_state);
     if (std::getenv("NX_P4AU_DEBUG")) {
         hook(m, 0xb1470, g_orig_b1470, hook_b1470);
         hook(m, 0x563c, g_orig_563c, hook_563c);

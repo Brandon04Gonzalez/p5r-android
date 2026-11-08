@@ -56,6 +56,7 @@ bool g_indirect_count = false;  // VK_KHR_draw_indirect_count (P5R's occlusion c
 bool g_dynamic_rendering = true;  // vkCmdBeginRendering (core 1.3); else render pass objects
 bool g_integrated = false;
 bool g_require_sg32 = false;  // compute pipelines are made with a required subgroup size of 32 (Maxwell's warp)  // the chosen GPU is an integrated one (unified memory, the GPU is the long side)
+VkPhysicalDeviceProperties g_device_props{};
 VkPhysicalDeviceFeatures g_features{};  // the core features enabled (vk_features())
 VkDescriptorPool g_descriptors = VK_NULL_HANDLE;
 
@@ -108,7 +109,6 @@ bool init() {
         log("nvn/vk: no Vulkan loader");
         return false;
     }
-    for (size_t k = 0; k < g_entry_count; k++) *g_entries[k].pfn = gipa(nullptr, g_entries[k].name);
     p_enum_instance_ext = reinterpret_cast<PFN_vkEnumerateInstanceExtensionProperties>(
         gipa(nullptr, "vkEnumerateInstanceExtensionProperties"));
     p_create_instance = reinterpret_cast<PFN_vkCreateInstance>(gipa(nullptr, "vkCreateInstance"));
@@ -147,6 +147,10 @@ bool init() {
     }
     VkPhysicalDeviceProperties props{};
     p_vkGetPhysicalDeviceProperties(g_physical, &props);
+    g_device_props = props;
+    if (is_xclipse()) log("nvn/vk: Samsung Xclipse GPU detected (forcing CPU BC texture decode for compatibility)");
+    if (is_mali()) log("nvn/vk: ARM Mali GPU detected (emulating R11G11B10F as RGBA16F to prevent green/purple flickering)");
+    if (is_adreno_8xx()) log("nvn/vk: Qualcomm Adreno 8xx GPU detected (disabling chunked submits to avoid battle hang)");
     p_vkGetPhysicalDeviceMemoryProperties(g_physical, &g_memory);
     g_integrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
     // An integrated GPU shares the package's power budget with the CPU: ask the desktop for its performance profile
@@ -440,6 +444,21 @@ bool vk_depth_clip_control() { return g_depth_clip_control; }
 bool vk_indirect_count() { return g_indirect_count; }
 bool vk_dynamic_rendering() { return g_dynamic_rendering; }
 const VkPhysicalDeviceFeatures& vk_features() { return g_features; }
+bool is_xclipse() {
+    return std::strstr(g_device_props.deviceName, "Xclipse") != nullptr || g_device_props.vendorID == 0x144d;
+}
+bool is_mali() {
+    return std::strstr(g_device_props.deviceName, "Mali") != nullptr || g_device_props.vendorID == 0x13b5;
+}
+bool is_adreno() {
+    return std::strstr(g_device_props.deviceName, "Adreno") != nullptr || g_device_props.vendorID == 0x5143;
+}
+bool is_adreno_8xx() {
+    const char* p = std::strstr(g_device_props.deviceName, "Adreno");
+    if (!p) return false;
+    while (*p && !(*p >= '0' && *p <= '9')) p++;
+    return *p == '8';
+}
 bool gpu_is_integrated() { return g_integrated; }
 bool gpu_require_subgroup32() { return g_require_sg32; }
 

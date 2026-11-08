@@ -5,8 +5,8 @@
      owner of the game: never published. -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="io.github.p4aurecomp"
-    android:versionCode="1"
-    android:versionName="0.1.0">
+    android:versionCode="6"
+    android:versionName="0.3.3">
 
     <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="35" />
     <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
@@ -38,6 +38,14 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+        <!-- The import on the phone: only while the game is being prepared, in its own process so the native harness
+             (C# NativeAOT, Ryujinx Maxwell shader translator) does not share state or memory with the game. -->
+        <activity
+            android:name=".ImportActivity"
+            android:exported="false"
+            android:process=":import"
+            android:theme="@android:style/Theme.Material.NoActionBar"
+            android:screenOrientation="sensorLandscape" />
         <!-- Where the on-screen controls go (NX_TOUCH_LAYOUT), full screen like the game. -->
         <activity
             android:name=".ControlsEditor"
@@ -54,5 +62,10 @@
             android:configChanges="orientation|screenSize|smallestScreenSize|screenLayout|keyboard|keyboardHidden|navigation|uiMode|density">
             <meta-data android:name="android.app.lib_name" android:value="p4au" />
         </activity>
+        <provider
+            android:name=".LogProvider"
+            android:authorities="io.github.p4aurecomp.logprovider"
+            android:exported="false"
+            android:grantUriPermissions="true" />
     </application>
 </manifest>

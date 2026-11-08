@@ -1,6 +1,11 @@
 # Build a game's Android APK (NativeActivity, no Gradle): cmake (NDK) -> lib<game>.so -> aapt2 -> zipalign -> apksigner.
 # Usage, in a dev shell (. .\dev.ps1):  android\build_apk.ps1 [-Game <game>] [-Install]   (a folder under games\, default hades)
-param([string]$Game = "hades", [switch]$Install, [string]$Abis = "arm64-v8a")  # -Abis "arm64-v8a,x86_64" (emulator)
+#   -Nce          native execution (CMake NX_NCE): the APK holds no game code, it runs the exefs of the player's dump
+#                 (build in private\<game>\ba_nce, APK in private\<game>\apk_nce)
+#   -TestPackage  installs next to the normal build: package <package>.nce, label "<label> (NCE)"
+#   -Release      the public build (CMake NX_RELEASE: no nx.log file, no file-triggered diagnostics; logcat only);
+#                 without it the build directory keeps the setting it has
+param([string]$Game = "p5r", [switch]$Install, [string]$Abis = "arm64-v8a", [switch]$Nce, [switch]$TestPackage, [switch]$Release)
 $ErrorActionPreference = "Stop"
 $root = Split-Path $PSScriptRoot
 # The SDK: ANDROID_HOME, else C:\Android\sdk, else Android Studio's default (%LOCALAPPDATA%\Android\Sdk).
@@ -8,22 +13,43 @@ $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } elseif (Test-Path "C:\Androi
 # apksigner and d8 need a JDK: JAVA_HOME, else Android Studio's own.
 if (-not $env:JAVA_HOME -and (Test-Path "C:\Program Files\Android\Android Studio\jbr")) { $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr" }
 if ($env:JAVA_HOME) { $env:PATH = "$env:JAVA_HOME\bin;$env:PATH" }
+$cmakeDir = Get-ChildItem "$sdk\cmake" -Directory -ErrorAction SilentlyContinue | Select-Object -Last 1
+if ($cmakeDir) { $env:PATH = "$($cmakeDir.FullName)\bin;$env:PATH" }
 $ndk = "$sdk\ndk\28.2.13676358"
 $bt = "$sdk\build-tools\35.0.0"
 $jar = "$sdk\platforms\android-35\android.jar"
 # Hades keeps the layout from before there were other games (private\apk, private\ba).
 $priv = if ($Game -eq "hades") { "$root\private" } else { "$root\private\$Game" }
-$out = "$priv\apk"
+$out = if ($Nce) { "$priv\apk_nce" } else { "$priv\apk" }
+$nceFlag = if ($Nce) { "ON" } else { "OFF" }
 $abiList = @($Abis -split "," | ForEach-Object { $_.Trim() } | Where-Object { $_ })
-# One build folder per ABI: arm64-v8a keeps the old one (private\<game>\ba), x86_64 (the emulator) is ba_x86_64.
-function BuildDir($abi) { if ($abi -eq "arm64-v8a") { "$priv\ba" } else { "$priv\ba_$abi" } }
+function BuildDir($abi) {
+    if ($Nce) { "$priv\ba_nce" } elseif ($abi -eq "arm64-v8a") { "$priv\ba" } else { "$priv\ba_$abi" }
+}
+$extraLibs = @()
 foreach ($abi in $abiList) {
     $build = BuildDir $abi
     if (-not (Test-Path "$build\build.ninja")) {
         cmake -S $root -B $build -G Ninja -DCMAKE_BUILD_TYPE=Release "-DCMAKE_TOOLCHAIN_FILE=$ndk\build\cmake\android.toolchain.cmake" `
-            "-DANDROID_ABI=$abi" -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static "-DNX_GAME=$Game"
+            "-DANDROID_ABI=$abi" -DANDROID_PLATFORM=android-29 -DANDROID_STL=c++_static "-DNX_GAME=$Game" "-DNX_NCE=$nceFlag"
     }
-    cmake --build $build --target $Game
+    if ($Release) { cmake -B $build -DNX_RELEASE=ON | Out-Null }
+    $targets = @($Game)
+    if (($Game -eq "p5r" -or $Game -eq "p4g" -or $Game -eq "p4au") -and $abi -eq "arm64-v8a") {
+        $harness = "$root\private\build\spirv_harness_android\libspirvharness.so"
+        if (-not (Test-Path $harness)) {
+            throw "missing $harness"
+        }
+        $importTarget = "${Game}import"
+        $targets += $importTarget
+        $extraLibs += @("$build\lib${importTarget}.so", $harness)
+    }
+    if ($abi -eq "arm64-v8a") {
+        foreach ($h in @("libhook_impl.so", "libmain_hook.so", "libfile_redirect_hook.so", "libgsl_alloc_hook.so")) {
+            $extraLibs += "$build\adrenotools\src\hook\$h"
+        }
+    }
+    cmake --build $build --target @targets
     if ($LASTEXITCODE) { throw "native build failed ($abi)" }
 }
 
@@ -33,20 +59,33 @@ foreach ($abi in $abiList) {
     New-Item -ItemType Directory -Force "$out\lib\$abi" | Out-Null
     & "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" --strip-unneeded -o "$out\lib\$abi\lib$Game.so" "$(BuildDir $abi)\lib$Game.so"
 }
+foreach ($lib in $extraLibs) {
+    & "$ndk\toolchains\llvm\prebuilt\windows-x86_64\bin\llvm-strip.exe" --strip-unneeded -o "$out\lib\arm64-v8a\$(Split-Path $lib -Leaf)" $lib
+}
 
 & "$bt\aapt2.exe" compile --dir "$PSScriptRoot\res" -o "$out\res.zip"
-# The game's own launcher icon, when the player made it from their dump (private\<game>\icon\res, e.g.
-# games\p5r\tools\nsp_icon.py): compiled with the rest, and the manifest copy names it.
+# The launcher icon: the project's own (games\<game>\icon\res, e.g. games\p5r\tools\make_icon.py), else the game's,
+# when the player made it from their dump (private\<game>\icon\res, games\p5r\tools\nsp_icon.py): compiled with the
+# rest, and the manifest copy names it.
 $manifest = "$root\games\$Game\AndroidManifest.xml"
 $resZips = @("$out\res.zip")
-if (Test-Path "$priv\icon\res") {
-    & "$bt\aapt2.exe" compile --dir "$priv\icon\res" -o "$out\icon.zip"
+$iconRes = if (Test-Path "$root\games\$Game\icon\res") { "$root\games\$Game\icon\res" } else { "$priv\icon\res" }
+if (Test-Path $iconRes) {
+    & "$bt\aapt2.exe" compile --dir $iconRes -o "$out\icon.zip"
     $resZips += "$out\icon.zip"
     $text = [System.IO.File]::ReadAllText($manifest) -replace '<application', '<application android:icon="@mipmap/ic_launcher"'
     $manifest = "$out\AndroidManifest.xml"
     [System.IO.File]::WriteAllText($manifest, $text)
 }
-& "$bt\aapt2.exe" link -o "$out\base.apk" -I $jar --manifest $manifest @resZips
+$linkArgs = @()
+if ($TestPackage) {
+    $text = [System.IO.File]::ReadAllText($manifest) -replace 'android:label="([^"]*)"', 'android:label="$1 (NCE)"'
+    $manifest = "$out\AndroidManifest.test.xml"
+    [System.IO.File]::WriteAllText($manifest, $text)
+    $package = ([regex]::Match($text, 'package="([^"]+)"')).Groups[1].Value
+    $linkArgs += @("--rename-manifest-package", "$package.nce")
+}
+& "$bt\aapt2.exe" link -o "$out\base.apk" -I $jar --manifest $manifest @linkArgs @resZips
 if ($LASTEXITCODE) { throw "aapt2 link failed" }
 
 # Add the native library (stored uncompressed would need page alignment; compressed + extractNativeLibs is fine).
@@ -56,7 +95,9 @@ Pop-Location
 Add-Type -AssemblyName System.IO.Compression.FileSystem
 $apk = [System.IO.Compression.ZipFile]::Open("$out\base.apk", "Update")
 foreach ($abi in $abiList) {
-    [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk, "$out\lib\$abi\lib$Game.so", "lib/$abi/lib$Game.so", "Optimal") | Out-Null
+    foreach ($so in Get-ChildItem "$out\lib\$abi" -Filter *.so) {
+        [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk, $so.FullName, "lib/$abi/$($so.Name)", "Optimal") | Out-Null
+    }
 }
 # Java of the game's own (games\<game>\java, e.g. Wonder's home screen): javac against android.jar, d8 to classes.dex.
 $java = "$root\games\$Game\java"
@@ -68,7 +109,7 @@ if (Test-Path $java) {
     if (-not $jdk) { throw "a JDK is needed for games\$Game\java (winget install Microsoft.OpenJDK.17)" }
     New-Item -ItemType Directory -Force "$out\classes", "$out\dex" | Out-Null
     $sources = @((Get-ChildItem $java -Recurse -Filter *.java).FullName)
-    & "$jdk\bin\javac.exe" -source 1.8 -target 1.8 -Xlint:-options -bootclasspath $jar -d "$out\classes" @sources
+    & "$jdk\bin\javac.exe" -encoding UTF-8 -source 1.8 -target 1.8 -Xlint:-options -bootclasspath $jar -d "$out\classes" @sources
     if ($LASTEXITCODE) { throw "javac failed" }
     $classes = @((Get-ChildItem "$out\classes" -Recurse -Filter *.class).FullName)
     $env:JAVA_HOME = $jdk

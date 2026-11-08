@@ -1,6 +1,7 @@
 // Scripted input for unattended runs: NX_INPUT_SCRIPT="<seconds>:<button>:<hold seconds>;..." presses buttons at
 // fixed times after the first pad read, e.g. "70:A:0.2;74:A:0.2;80:RIGHT:5" (buttons: A B X Y L R ZL ZR PLUS MINUS
 // LEFT RIGHT UP DOWN; the directions also push the left stick). Added on top of the real pad and keyboard.
+// NX_INPUT_SCRIPT_P2 is the same for player 2 (npad No2, hid_input.h), on the same clock.
 //
 // NX_INPUT_RECORD=1 (or a file path): what the player does is written in that same format, to
 // <data root>/input_record.txt: every press of a button, and the stick past half way as a direction, from the first
@@ -92,21 +93,28 @@ void record(const PadState& p, double t) {
 
 }  // namespace
 
-void input_script(PadState& p) {
-    static const char* env = std::getenv("NX_INPUT_SCRIPT");
+void input_script(PadState& p, int player) {
+    static const char* envs[2] = {std::getenv("NX_INPUT_SCRIPT"), std::getenv("NX_INPUT_SCRIPT_P2")};
     static const bool recording = std::getenv("NX_INPUT_RECORD") != nullptr;
-    if (!env && !recording) return;
-    static const uint64_t start = monotonic_ns();
+    if (player < 0 || player > 1) return;
+    const char* env = envs[player];
+    const bool rec = recording && player == 0;
+    if (!env && !rec) return;
+    static const uint64_t start = monotonic_ns();  // both players' scripts count from the first read of either
     double t = double(monotonic_ns() - start) / 1e9;
-    if (recording) record(p, t);  // what the player did, before the script adds to it
+    if (rec) record(p, t);  // what the player did, before the script adds to it
     if (!env) return;
-    static const std::vector<Press> script = parse(env);
-    for (const Press& s : script)
+    static const std::vector<Press> scripts[2] = {parse(envs[0] ? envs[0] : ""), parse(envs[1] ? envs[1] : "")};
+    for (const Press& s : scripts[player])
         if (t >= s.at && t < s.at + s.hold) {
             p.buttons |= s.bits;
             if (s.lx) p.lx = s.lx;
             if (s.ly) p.ly = s.ly;
         }
 }
+
+#ifndef _WIN32
+bool read_pad2(PadState&) { return false; }  // platform.h: only Windows gives player 2 a host pad of its own
+#endif
 
 }  // namespace nx::plat

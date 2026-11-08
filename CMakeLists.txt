@@ -34,6 +34,21 @@ endif()
 
 # Unit tests of runtime pieces that build without the game (docs/nvn/WINDOWS-PLAN.md, "Test plan"): ctest.
 option(NX_TESTS "Build the standalone unit tests" OFF)
+# The public build: no log file and no file-triggered diagnostics (runtime/src/platform.h kDiagnostics).
+option(NX_RELEASE "Public build: no nx.log file, no file-triggered diagnostics" OFF)
+option(NX_DIAGNOSTICS "Unified low-overhead diagnostics (video, buffers, render lock, audio) for Test Shoo" OFF)
+
+# Native execution (runtime/src/nce): the game's own AArch64 code from the player's exefs runs on the host CPU, so the
+# build holds no game code at all (Android and other AArch64 hosts). Without it, the recompiled modules are linked in.
+option(NX_NCE "Run the game's own code from the player's exefs natively (AArch64 hosts): no recompiled code" OFF)
+if(NX_NCE)
+    if(NOT (ANDROID OR CMAKE_SYSTEM_PROCESSOR MATCHES "aarch64|arm64|ARM64"))
+        message(FATAL_ERROR "NX_NCE needs an AArch64 host (Android arm64-v8a)")
+    endif()
+    set(NX_GAME_LIBS "")
+else()
+    set(NX_GAME_LIBS game_main game_sdk)
+endif()
 if(NX_TESTS AND NOT ANDROID)
     enable_testing()
     add_executable(gpu_pick_test tests/gpu_pick_test.cpp runtime/src/nvn/nvn_gpu_pick.cpp)
@@ -62,11 +77,12 @@ endif()
 
 # Without the generated code (a checkout with no game data) only the tests above are built.
 file(GLOB NX_GEN_PROBE "${NX_GEN_DIR}/main/*.cpp")
-if(NOT NX_GEN_PROBE)
+if(NOT NX_GEN_PROBE AND NOT NX_NCE)
     message(WARNING "No generated code in ${NX_GEN_DIR}/main: building the unit tests only")
     return()
 endif()
 
+if(NOT NX_NCE)
 foreach(mod main sdk)
     file(GLOB src CONFIGURE_DEPENDS "${NX_GEN_DIR}/${mod}/*.cpp")
     add_library(game_${mod} STATIC ${src})
@@ -91,6 +107,7 @@ foreach(mod main sdk)
         target_compile_options(game_${mod} PRIVATE -O2 -fvisibility=hidden -march=x86-64-v3 -ffp-contract=off)
     endif()
 endforeach()
+endif()
 
 set(NX_RUNTIME_SOURCES
     runtime/src/main.cpp
@@ -111,11 +128,14 @@ set(NX_RUNTIME_SOURCES
     runtime/src/hle_ro.cpp
     runtime/src/hle_vi.cpp
     runtime/src/hle_hid.cpp
+    runtime/src/netplay/determinism.cpp
+    runtime/src/netplay/netplay.cpp
     runtime/src/hle_net.cpp
     runtime/src/hle_audio.cpp
     runtime/src/hle_pl.cpp
     runtime/src/hle_fiber.cpp
     runtime/src/hle_movie.cpp
+    runtime/src/diagnostics.cpp
     runtime/src/mp4_demux.cpp
     runtime/src/hle_opus.cpp
     runtime/src/input_script.cpp
@@ -181,6 +201,17 @@ set(NX_RUNTIME_SOURCES
 )
 file(GLOB NX_GAME_SOURCES CONFIGURE_DEPENDS "${NX_GAME_DIR}/*.cpp")
 list(APPEND NX_RUNTIME_SOURCES ${NX_GAME_SOURCES})
+# The game read in place from the player's NSP/XCI (runtime/src/game_image.cpp): the importer's NCA/RomFS reader.
+set(NX_IMPORTER_DIR "${CMAKE_SOURCE_DIR}/android/wonder/importer")
+list(APPEND NX_RUNTIME_SOURCES runtime/src/game_image.cpp "${NX_IMPORTER_DIR}/nximport.cpp" "${NX_IMPORTER_DIR}/nxcrypto.cpp")
+if(WIN32)  # its POSIX calls, on Windows (only these two files see the shim)
+    set_source_files_properties("${NX_IMPORTER_DIR}/nximport.cpp" "${NX_IMPORTER_DIR}/nxcrypto.cpp" PROPERTIES
+        INCLUDE_DIRECTORIES "${CMAKE_SOURCE_DIR}/games/p5r/tools/win_compat"
+        COMPILE_DEFINITIONS "_CRT_NONSTDC_NO_WARNINGS")
+endif()
+if(NX_NCE)
+    list(APPEND NX_RUNTIME_SOURCES runtime/src/nce/nce.cpp runtime/src/nce/nso.cpp)
+endif()
 
 # Vulkan headers (the same registry version tools/gen_vk.py generated from). The loader comes with the GPU driver.
 if(DEFINED ENV{VULKAN_SDK})
@@ -195,15 +226,24 @@ if(ANDROID)
     add_library(${NX_GAME} SHARED ${NX_RUNTIME_SOURCES} runtime/src/platform_android.cpp
         runtime/src/platform_android_input.cpp runtime/src/platform_android_audio.cpp runtime/src/memguard_android.cpp
         "${GLUE}/android_native_app_glue.c")
-    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/Include" "${GLUE}")
+    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_IMPORTER_DIR}" "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/Include" "${GLUE}")
     # Our ANativeActivity_onCreate (platform_android.cpp) runs first, on the UI thread, then calls the glue's.
     set_source_files_properties("${GLUE}/android_native_app_glue.c" PROPERTIES
         COMPILE_DEFINITIONS "ANativeActivity_onCreate=glue_ANativeActivity_onCreate")
-    target_link_libraries(${NX_GAME} PRIVATE game_main game_sdk android log aaudio mediandk)
+    target_link_libraries(${NX_GAME} PRIVATE ${NX_GAME_LIBS} android log aaudio mediandk)
     if(ANDROID_ABI STREQUAL "x86_64")
         target_compile_options(${NX_GAME} PRIVATE -fvisibility=hidden -fno-semantic-interposition -march=x86-64-v2 -ffp-contract=off)
     else()
         target_compile_options(${NX_GAME} PRIVATE -fvisibility=hidden -fno-semantic-interposition -march=armv8-a+crypto)
+        # Custom GPU drivers (Turnip): libadrenotools opens a driver .so the user imported, in place of the system Vulkan
+        # driver (platform_android.cpp). Its hook libraries (libhook_impl.so and the three *_hook.so) are packed in the
+        # APK next to lib<game>.so (android/build_apk.ps1) and found through the app's nativeLibraryDir.
+        set(BUILD_SHARED_LIBS OFF)
+        set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+        add_subdirectory(third_party/libadrenotools adrenotools EXCLUDE_FROM_ALL)
+        target_link_libraries(${NX_GAME} PRIVATE adrenotools)
+        add_dependencies(${NX_GAME} hook_impl main_hook file_redirect_hook gsl_alloc_hook)
+        target_compile_definitions(${NX_GAME} PRIVATE NX_CUSTOM_DRIVER=1)
     endif()
     # The glue's ANativeActivity_onCreate must be exported. 16 KB page alignment: Android 15+ devices with 16 KB pages.
     target_link_options(${NX_GAME} PRIVATE -u ANativeActivity_onCreate -Wl,-z,max-page-size=16384)
@@ -232,8 +272,8 @@ elseif(UNIX)
     # game runs on its own thread with a 64 MiB stack (platform_linux.cpp).
 else()
     add_executable(${NX_GAME} ${NX_RUNTIME_SOURCES} runtime/src/platform_win.cpp runtime/src/memguard_win.cpp)
-    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/Include")
-    target_link_libraries(${NX_GAME} PRIVATE game_main game_sdk xinput xaudio2 ole32 psapi)
+    target_include_directories(${NX_GAME} PRIVATE runtime/include runtime/src "${NX_IMPORTER_DIR}" "${NX_GAME_DIR}" "${NX_VULKAN_SDK}/Include")
+    target_link_libraries(${NX_GAME} PRIVATE game_main game_sdk xinput xaudio2 ole32 psapi ws2_32)
     # The runtime uses the portable C library (getenv, fopen, ...) on every host: no "_s" variants.
     target_compile_definitions(${NX_GAME} PRIVATE _CRT_SECURE_NO_WARNINGS _SILENCE_CXX20_U8PATH_DEPRECATION_WARNING)
     if(MSVC)
@@ -242,6 +282,15 @@ else()
         target_link_options(${NX_GAME} PRIVATE /STACK:67108864 /HIGHENTROPYVA:NO /MAP)
     endif()
 endif()
+
+# The runtime's git revision in nx_revision.h (NX_REVISION), rewritten on every build only when it changed: netplay's
+# build id, so a peer on another build of the port is turned away at the handshake instead of desyncing later.
+add_custom_target(nx_revision
+    COMMAND ${CMAKE_COMMAND} -DSRC=${CMAKE_SOURCE_DIR} -DOUT=${CMAKE_BINARY_DIR}/nx_revision.h
+            -P ${CMAKE_SOURCE_DIR}/runtime/revision.cmake
+    BYPRODUCTS ${CMAKE_BINARY_DIR}/nx_revision.h)
+add_dependencies(${NX_GAME} nx_revision)
+target_include_directories(${NX_GAME} PRIVATE ${CMAKE_BINARY_DIR})
 
 # libopus (BSD) for hwopus (runtime/src/hle_opus.cpp), when its source is in private/third_party (P4AU's voices and
 # music). Without it the decoder gives silence.
@@ -255,4 +304,26 @@ if(EXISTS "${NX_OPUS_DIR}/CMakeLists.txt")
     add_subdirectory("${NX_OPUS_DIR}" "${CMAKE_BINARY_DIR}/opus" EXCLUDE_FROM_ALL)
     target_link_libraries(${NX_GAME} PRIVATE opus)
     target_compile_definitions(${NX_GAME} PRIVATE NX_HAVE_OPUS)
+endif()
+
+# P4AU import on the phone (games/p4au/import, ImportActivity)
+if(ANDROID AND (NX_GAME STREQUAL "p4au" OR NX_GAME STREQUAL "p4auimport"))
+    add_library(p4auimport SHARED games/p4au/import/p4au_import_jni.cpp games/p4au/import/p4au_shaders.cpp
+        "${NX_IMPORTER_DIR}/nximport.cpp" "${NX_IMPORTER_DIR}/nxcrypto.cpp")
+    target_include_directories(p4auimport PRIVATE "${NX_IMPORTER_DIR}" games/p4au/import runtime/include)
+    target_compile_options(p4auimport PRIVATE -O2 -fvisibility=hidden -march=armv8-a+crypto)
+    target_link_libraries(p4auimport PRIVATE log dl)
+    target_link_options(p4auimport PRIVATE -Wl,-z,max-page-size=16384)
+endif()
+
+
+if(NX_RELEASE)
+    target_compile_definitions(${NX_GAME} PRIVATE NX_RELEASE)
+endif()
+if(NX_NCE)
+    target_compile_definitions(${NX_GAME} PRIVATE NX_NCE=1)
+endif()
+if(NX_DIAGNOSTICS)
+    target_compile_definitions(${NX_GAME} PRIVATE NX_DIAGNOSTICS=1)
+    message(STATUS "NX_DIAGNOSTICS: unified diagnostics enabled")
 endif()

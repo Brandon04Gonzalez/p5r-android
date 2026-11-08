@@ -395,6 +395,10 @@ const DeferredValues* current_deferred();  // the submit being replayed
 // serial (0: done); worker_wait waits for a serial; worker_finish for everything queued so far.
 uint64_t worker_run(std::function<void()> job);
 void worker_wait(uint64_t serial);
+// Frame skipping (NX_FRAMESKIP, nvn_queue.cpp): true while the replay of a frame whose picture is skipped runs; its
+// draws are dropped (nvn_draw.cpp) and it is not presented, while copies, clears and fences go on as usual, so the
+// game's logic (one step per nvnQueuePresentTexture) keeps its pace on a device too slow to draw every frame.
+bool render_skipped();
 uint64_t worker_last();
 void worker_finish();
 // guest NVNtexture* of a window texture; crop: the part shown (x, y, w, h; w 0: all), scaled to the window.

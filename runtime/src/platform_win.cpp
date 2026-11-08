@@ -235,7 +235,7 @@ void window_size(uint32_t& w, uint32_t& h) {
 
 void screen_size(uint32_t& w, uint32_t& h) { window_size(w, h); }
 
-// ---- input: XInput pad 0 + keyboard ---------------------------------------------------------------------------
+// ---- input: XInput pad 0 + keyboard (player 1), XInput pad 1 (player 2) ---------------------------------------
 
 static bool key(int vk) { return g_window && GetForegroundWindow() == g_window && (GetAsyncKeyState(vk) & 0x8000); }
 
@@ -244,9 +244,10 @@ bool headless() {  // NX_HEADLESS (platform.h)
     return on;
 }
 
-void read_pad(PadState& p) {
+// One XInput pad into p; false when it is not connected.
+static bool read_xinput(DWORD index, PadState& p) {
     XINPUT_STATE xs{};
-    if (XInputGetState(0, &xs) == ERROR_SUCCESS) {
+    if (XInputGetState(index, &xs) == ERROR_SUCCESS) {
         const auto& g = xs.Gamepad;
         if (g.wButtons & XINPUT_GAMEPAD_B) p.buttons |= kA;  // Nintendo layout
         if (g.wButtons & XINPUT_GAMEPAD_A) p.buttons |= kB;
@@ -269,7 +270,13 @@ void read_pad(PadState& p) {
         p.ly = dz(g.sThumbLY);
         p.rx = dz(g.sThumbRX);
         p.ry = dz(g.sThumbRY);
+        return true;
     }
+    return false;
+}
+
+void read_pad(PadState& p) {
+    read_xinput(0, p);
     // Keyboard: WASD / arrows move, Space A, Shift B (dash), J X, K Y, Q/E L/R, Z/C ZL/ZR, Enter +, Esc -.
     if (key('A') || key(VK_LEFT)) p.lx = -kStickMax;
     if (key('D') || key(VK_RIGHT)) p.lx = kStickMax;
@@ -286,6 +293,16 @@ void read_pad(PadState& p) {
     if (key(VK_RETURN)) p.buttons |= kPlus;
     if (key(VK_ESCAPE)) p.buttons |= kMinus;
     input_script(p);  // NX_INPUT_SCRIPT (input_script.cpp): unattended runs
+}
+
+// The second XInput pad. XInputGetState on an empty slot is slow, so a missing pad is looked for every 2 s.
+bool read_pad2(PadState& p) {
+    static std::atomic<uint64_t> next_look{0};
+    uint64_t now = monotonic_ns();
+    if (now < next_look) return false;
+    if (read_xinput(1, p)) return true;
+    next_look = now + 2'000'000'000ull;
+    return false;
 }
 
 // ---- audio: XAudio2 -------------------------------------------------------------------------------------------

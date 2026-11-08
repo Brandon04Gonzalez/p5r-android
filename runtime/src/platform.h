@@ -8,6 +8,16 @@
 
 namespace nx::plat {
 
+// NX_RELEASE (CMake option, the public build): no nx.log file in the data folder and none of the diagnostics a file
+// there turns on (press, input_record.txt, live_flags, trace_draws, trace_tasks, dump_hud, dump_frames, dump_threads,
+// profile, p5r_fps, watch/peek): a player's folder only holds the game data, the saves and config.txt. The log still
+// goes to the system log (Android logcat).
+#if defined(NX_RELEASE)
+constexpr bool kDiagnostics = false;
+#else
+constexpr bool kDiagnostics = true;
+#endif
+
 // ---- memory: fixed-address reservations (guest pointers are host pointers) ----
 bool reserve(uint64_t addr, uint64_t size);  // exactly at addr, no access
 bool commit(uint64_t addr, uint64_t size);   // read/write
@@ -69,9 +79,12 @@ struct PadState {
     int32_t lx = 0, ly = 0, rx = 0, ry = 0;
 };
 void read_pad(PadState& p);  // player 1
+// Player 2's own host pad (hid_input.h): the second XInput controller on Windows; true while it is connected. False
+// elsewhere, where every host pad and the touch controls drive player 1 (input_script.cpp has that fallback).
+bool read_pad2(PadState& p);
 // Touch controls to draw over the picture (touch_layout.cpp, platform_android_input.cpp): circles at x, y (0..1
 // across the landscape screen), radius r (a fraction of its height), opacity alpha, and a label drawn in the middle
-// (touch_label(): up to two glyphs of tools/shaders/present/overlay.glsl; 0 none). 0 where nothing is drawn.
+// (touch_label(): up to two glyphs of kFont in nvn/nvn_present.cpp; 0 none). 0 where nothing is drawn.
 struct OverlayShape {
     float x, y, r, alpha;
     uint32_t label = 0;
@@ -86,6 +99,7 @@ void gpu_turbo();  // NX_GPU_TURBO=1: the Adreno GPU at its highest clock (perf_
 // role 0: the thread that replays and presents (frame_presented ticks it); 1: the game's main thread.
 void frame_thread_tick(int role);
 void frame_presented();  // after each present to the display
+void place_fast_cores();  // Pin current thread to performance/big cores (frame_stats.cpp; Android)
 // Linux: asks power-profiles-daemon for its performance profile for as long as this process lives (frame_stats.cpp).
 void request_performance_profile();
 // Write watches (write_watch.cpp; page protection, POSIX): add fails when unsupported or full; take re-arms and
@@ -107,7 +121,7 @@ uint64_t memguard_overlap_ns(uint64_t from, uint64_t to);
 // The calling thread's CPU time, page faults (major, minor) and context switches (voluntary, involuntary)
 // (frame_stats.cpp; Linux and Android, zeros elsewhere).
 void thread_counters(uint64_t& cpu_ns, long faults[2], long switches[2]);
-void input_script(PadState& p);  // NX_INPUT_SCRIPT presses (input_script.cpp), for unattended runs
+void input_script(PadState& p, int player = 0);
 
 // Audio: s16 stereo 48 kHz. `done` is called (on any thread) when a submitted buffer has been played.
 using AudioDone = void (*)(void* ctx);
@@ -118,6 +132,21 @@ void audio_pause(bool paused);  // app in the background
 // Sound later than the game mixes it, by `ms`, so it stays with the picture when frames are slow (Android; elsewhere
 // nothing). The game's buffers still come back at the real-time rate.
 void audio_set_delay_ms(uint32_t ms);
+// The sound's latency as measured (Android: AAudio's timestamps): from a buffer handed to audio_submit to its first
+// frame at the speaker, ns, smoothed, the delay above included; 0 while unknown, and elsewhere.
+uint64_t audio_latency_ns();
+// Counters from the AAudio path (platform_android_audio.cpp): ring occupancy at the callback, submits truncated by
+// the ring, the most buffers pending at once, and measure_latency outcomes. Defined on Android only.
+struct AudioDiagnostics {
+    uint64_t ring_min = 0, ring_max = 0;
+    uint64_t truncations = 0, max_pending = 0;
+    uint64_t latency_ok = 0, latency_early = 0;
+};
+#if defined(__ANDROID__)
+AudioDiagnostics audio_diagnostics();
+#else
+inline AudioDiagnostics audio_diagnostics() { return {}; }
+#endif
 
 // Vulkan: the loader's vkGetInstanceProcAddr and the surface extension of this platform.
 void* vulkan_get_instance_proc_addr();

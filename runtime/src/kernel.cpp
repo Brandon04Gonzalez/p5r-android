@@ -17,6 +17,10 @@
 #include <nx/game.h>
 
 #include "kernel_state.h"
+#include "netplay/determinism.h"
+#if NX_NCE
+#include "nce/nce.h"
+#endif
 #include "platform.h"
 
 namespace nx {
@@ -77,7 +81,12 @@ uint64_t heap_size() { return g_heap_size; }
 CPU& current_cpu() { return t_self->ctx; }
 CPU* current_cpu_or_null() { return t_self ? &t_self->ctx : nullptr; }
 
-uint64_t system_tick() { return plat::monotonic_ns() * 192 / 10000; }  // 19.2 MHz
+#if NX_NCE
+// Native execution: the counter the game's own mrs CNTPCT_EL0 reads (nce.cpp), lined up with monotonic_ns at boot.
+uint64_t system_tick() { return det::system_tick(nce::tick()); }
+#else
+uint64_t system_tick() { return det::system_tick(plat::monotonic_ns() * 192 / 10000); }  // 19.2 MHz
+#endif
 
 // The spin throttles below (a 0.5 ms nap for threads spinning on the tick or on yields) were made for Hades on phones.
 // Wonder's job system joins its workers by yielding in a loop: every join became >= 1 ms and the main thread spent
@@ -98,6 +107,7 @@ static bool spin_naps() {
 std::atomic<uint64_t> g_tick_calls{0}, g_yield_calls{0}, g_sleep_calls{0};
 static void hle_get_system_tick(CPU& c) {
     g_tick_calls.fetch_add(1, std::memory_order_relaxed);
+    if (det::tracing()) det::note("os::GetSystemTick", c);
     if (KThread* t = spin_naps() ? t_self : nullptr) {
         uint64_t now = plat::monotonic_ns();
         if (now - t->last_tick_call < 20'000) {
@@ -323,6 +333,10 @@ static uint32_t svc_signal_to_address(uint64_t addr, uint32_t type, int32_t valu
     return 0;
 }
 
+// Deterministic mode (netplay/determinism.h): what each thread in WaitSynchronization waits on, so that a waiter
+// whose object is already signalled (about to run) does not pass for idle. Under the kernel lock.
+static std::unordered_map<KThread*, std::vector<std::shared_ptr<KObject>>> g_sync_objects;
+
 static uint32_t svc_wait_synchronization(CPU& c, uint64_t handles, int32_t count, int64_t timeout) {
     std::unique_lock lk(g_k);
     std::vector<std::shared_ptr<KObject>> objs;
@@ -343,9 +357,13 @@ static uint32_t svc_wait_synchronization(CPU& c, uint64_t handles, int32_t count
     // between its own check and this svc was lost (P5R's video decoder thread never saw its exit event; the game
     // waited for that thread for ever).
     g_sync_waiters.push_back(self);
+    if (det::enabled()) g_sync_objects[self] = objs;  // det::thread_idle: is one of them signalled already?
     struct Leave {
         KThread* t;
-        ~Leave() { remove(g_sync_waiters, t); }
+        ~Leave() {
+            remove(g_sync_waiters, t);
+            if (det::enabled()) g_sync_objects.erase(t);
+        }
     } leave{self};
     for (;;) {
         if (self->cancel) {
@@ -405,6 +423,8 @@ static std::shared_ptr<KThread> new_thread(uint64_t entry, uint64_t arg, uint64_
     return t;
 }
 
+static KThread* g_main_thread = nullptr;  // the first guest thread: nnMain's
+
 uint32_t create_main_thread(uint64_t stack_size) {
     uint64_t stack = kernel_alloc(stack_size);
     vm_set(stack, stack_size, kMemStack, 3);
@@ -412,7 +432,35 @@ uint32_t create_main_thread(uint64_t stack_size) {
     t->started = true;
     t_self = t.get();
     t->host_tid = plat::current_thread_id();
+    g_main_thread = t.get();
+    det::set_main_thread(t.get());
     return t->handle;
+}
+
+// Deterministic mode: whether guest thread `id` is idle, that is blocked with nothing that would wake it pending: on a
+// condition variable or an address (a signal takes it off those lists under the kernel lock), on objects none of
+// which is signalled, or on a mutex the main thread holds (it waits for the frame to end) -- or gone.
+bool det::thread_idle(uint64_t id) {
+    std::shared_ptr<KThread> t;
+    KThread* main = g_main_thread;
+    {
+        std::lock_guard al(g_all_lock);
+        for (auto& w : g_all)
+            if (auto p = w.lock(); p && p->id == id) t = p;
+    }
+    if (!t || t->exited) return true;
+    std::lock_guard lk(g_k);
+    auto in = [&](const std::vector<KThread*>& v) { return std::find(v.begin(), v.end(), t.get()) != v.end(); };
+    if (in(g_cv_waiters) || in(g_addr_waiters)) return true;
+    if (in(g_mutex_waiters)) return main && (load32(t->wait_mutex) & ~kHandleWaitMask) == main->handle;
+    if (in(g_sync_waiters)) {
+        auto it = g_sync_objects.find(t.get());
+        if (t->cancel || it == g_sync_objects.end()) return false;
+        for (const auto& o : it->second)
+            if (o->signaled()) return false;
+        return true;
+    }
+    return false;
 }
 
 
@@ -468,9 +516,47 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
             c.x[1] = 0;
             break;
         }
-        case 0x07:
-            log("svcExitProcess");
+        case 0x07: {
+            // Keep the final guest context: startup exits can be an intentional game decision or an SDK
+            // failure path. The symbolic PCs and nearby instructions let us distinguish them from one log.
+            const uint32_t insn_m8 = ld<uint32_t>(pc - 8);
+            const uint32_t insn_m4 = ld<uint32_t>(pc - 4);
+            const uint32_t insn_0 = ld<uint32_t>(pc);
+            const uint32_t insn_p4 = ld<uint32_t>(pc + 4);
+            log("svcExitProcess: pc=%s lr=%s sp=%llx x0=%llx x1=%llx x2=%llx x3=%llx x4=%llx x5=%llx x6=%llx x7=%llx",
+                describe(pc).c_str(), describe(c.x[30]).c_str(), (unsigned long long)c.x[31],
+                (unsigned long long)c.x[0], (unsigned long long)c.x[1], (unsigned long long)c.x[2],
+                (unsigned long long)c.x[3], (unsigned long long)c.x[4], (unsigned long long)c.x[5],
+                (unsigned long long)c.x[6], (unsigned long long)c.x[7]);
+            log("svcExitProcess: x19=%llx x20=%llx x21=%llx x22=%llx x23=%llx x29=%llx insn[-8,-4,0,+4]=%08x,%08x,%08x,%08x",
+                (unsigned long long)c.x[19], (unsigned long long)c.x[20], (unsigned long long)c.x[21],
+                (unsigned long long)c.x[22], (unsigned long long)c.x[23], (unsigned long long)c.x[29],
+                insn_m8, insn_m4, insn_0, insn_p4);
+            // The LR only identifies ExitProcessImpl's return site, not who triggered shutdown.
+            // Dump a small stack window and symbol-like candidates to identify the preceding caller.
+            for (int i = 0; i < 12; ++i) {
+                const uint64_t a = c.x[31] + uint64_t(i) * 8;
+                const uint64_t v = ld<uint64_t>(a);
+                log("svcExitProcess: stack[%02d] @%llx = %llx (%s)", i,
+                    (unsigned long long)a, (unsigned long long)v, describe(v).c_str());
+            }
+            uint64_t fp = c.x[29];
+            for (int i = 0; i < 8 && fp >= c.x[31] && fp < c.x[31] + 0x100000; ++i) {
+                const uint64_t prev = ld<uint64_t>(fp);
+                const uint64_t ret = ld<uint64_t>(fp + 8);
+                log("svcExitProcess: frame[%02d] fp=%llx prev=%llx ret=%llx (%s)", i,
+                    (unsigned long long)fp, (unsigned long long)prev, (unsigned long long)ret, describe(ret).c_str());
+                if (describe(ret).rfind("main+", 0) == 0) {
+                    for (int j = -12; j <= 3; ++j) {
+                        const uint64_t at = ret + int64_t(j) * 4;
+                        log("svcExitProcess: caller_insn %s %08x", describe(at).c_str(), ld<uint32_t>(at));
+                    }
+                }
+                if (prev <= fp || prev - fp > 0x100000) break;
+                fp = prev;
+            }
             plat::exit_process(0);
+        }
         case 0x08: {  // CreateThread(entry x1, arg x2, stack_top x3, prio w4, core w5) -> handle
             auto t = new_thread(c.x[1], c.x[2], c.x[3], int(c.x[4]), int32_t(c.x[5]));
             c.x[1] = t->handle;
@@ -485,6 +571,7 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
             }
             t->started = true;
             plat::start_thread(thread_main, t.get(), 64ull << 20);  // host stack: recompiled calls nest deeply
+            det::thread_started(t->id);  // deterministic mode: the new thread's first run, before the caller goes on
             break;
         }
         case 0x0A: {  // ExitThread
@@ -608,6 +695,7 @@ static void svc_impl(CPU& c, uint32_t imm, uint64_t pc) {
             rc = svc_signal_process_wide_key(c.x[0], int32_t(c.x[1]));
             break;
         case 0x1E:  // GetSystemTick
+            if (det::tracing()) det::note("svcGetSystemTick", c);
             c.x[0] = system_tick();
             return;
         case 0x1F: {  // ConnectToNamedPort(name x1) -> handle

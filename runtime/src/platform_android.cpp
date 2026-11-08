@@ -37,6 +37,9 @@
 #define VK_NO_PROTOTYPES
 #define VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vulkan.h>
+#if defined(NX_CUSTOM_DRIVER)
+#include <adrenotools/driver.h>
+#endif
 
 #include <nx/game.h>
 #include <nx/runtime.h>
@@ -44,6 +47,9 @@
 #include "kernel.h"
 #include "platform.h"
 #include "platform_android.h"
+#if NX_NCE
+#include "nce/nce.h"
+#endif
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
@@ -58,6 +64,7 @@ namespace nx::plat {
 namespace {
 android_app* g_app = nullptr;
 std::string g_root;
+std::string g_internal_dir;  // ANativeActivity::internalDataPath (the imported GPU driver lives under it)
 std::atomic<ANativeWindow*> g_window{nullptr};
 std::atomic<uint64_t> g_window_gen{0};  // bumped for every new window
 std::atomic<bool> g_visible{false};
@@ -94,6 +101,7 @@ struct ThreadStart {
 };
 
 static void* thread_entry(void* p) {
+    nx::plat::place_fast_cores();
     ThreadStart s = *static_cast<ThreadStart*>(p);
     delete static_cast<ThreadStart*>(p);
     s.fn(s.arg);
@@ -112,6 +120,11 @@ void start_thread(ThreadFn fn, void* arg, size_t stack_size) {
 
 void exit_thread() { pthread_exit(nullptr); }
 void exit_process(int code) { _exit(code); }
+
+// Not ANativeActivity_finish first: the launcher would come back in this process and die with it ("proc died without
+// state saved" finishes it, and the home screen shows). Ending the process right away loses only the game's activity;
+// the launcher below it was stopped with its state saved, so the system brings it back in a new process.
+void leave_game() { _exit(0); }
 
 void sleep_ns(int64_t ns) {
     timespec ts{time_t(ns / 1000000000), long(ns % 1000000000)};
@@ -325,15 +338,39 @@ void screen_size(uint32_t& w, uint32_t& h) {
 // The render size: resolution=WxH if set, else the screen's size times the render scale (render_scale=0.5..1, or
 // the GPU's default), never taller than 1080 (the game's art is made for 720p/1080p; more only costs GPU time).
 void window_size(uint32_t& w, uint32_t& h) {
-    std::string r = setting("resolution");
-    unsigned cw = 0, ch = 0;
-    if (!r.empty() && std::sscanf(r.c_str(), "%ux%u", &cw, &ch) == 2 && cw && ch) {
-        w = cw;
-        h = ch;
-        return;
-    }
     uint32_t sw = 0, sh = 0;
     screen_size(sw, sh);
+    if (!sw || !sh) { w = 1280; h = 720; return; }
+
+    std::string nr = setting("NX_RES");
+    std::string res = setting("RESOLUTION");
+    std::string r = setting("resolution");
+
+    auto parse_target_h = [](const std::string& s) -> uint32_t {
+        if (s == "360p" || s == "360") return 360;
+        if (s == "480p" || s == "480") return 480;
+        if (s == "720p" || s == "720") return 720;
+        if (s == "1080p" || s == "1080") return 1080;
+        unsigned cw = 0, ch = 0;
+        if (!s.empty() && std::sscanf(s.c_str(), "%ux%u", &cw, &ch) == 2 && ch) return ch;
+        return 0;
+    };
+
+    uint32_t target_h = parse_target_h(nr);
+    if (!target_h) target_h = parse_target_h(res);
+    if (!target_h) target_h = parse_target_h(r);
+    if (!target_h) {
+        std::string hh = setting("NX_HANDHELD");
+        if (hh == "0") target_h = 1080;
+        else if (hh == "1") target_h = 720;
+    }
+
+    if (target_h) {
+        float scale = float(target_h) / float(sh);
+        w = uint32_t(float(sw) * scale + 0.5f) & ~1u;
+        h = target_h & ~1u;
+        return;
+    }
     std::string rs = setting("render_scale");
     float scale = rs.empty() ? default_render_scale() : std::strtof(rs.c_str(), nullptr);
     scale = std::clamp(scale, 0.25f, 1.0f);
@@ -385,18 +422,64 @@ float default_render_scale() {
 
 // ---- Vulkan ---------------------------------------------------------------------------------------------------
 
+#if defined(NX_CUSTOM_DRIVER)
+// A GPU driver the user imported (the launcher's "Import GPU driver", e.g. Mesa Turnip for Adreno), opened with
+// libadrenotools in place of the system driver. <files>/gpu_driver/active.txt holds the driver's file name; without
+// it, or with NX_SYSTEM_DRIVER=1 in config.txt, or if the driver fails to open, the system libvulkan.so is used.
+void* open_custom_vulkan() {
+    if (const char* e = getenv("NX_SYSTEM_DRIVER"); e && e[0] == '1') return nullptr;
+    if (g_internal_dir.empty()) return nullptr;
+    const std::string dir = g_internal_dir + "/gpu_driver/";
+    std::string name;
+    {
+        std::ifstream f(dir + "active.txt");
+        std::getline(f, name);
+    }
+    while (!name.empty() && (name.back() == '\r' || name.back() == '\n' || name.back() == ' ')) name.pop_back();
+    if (name.empty()) return nullptr;
+    Dl_info info{};
+    if (!dladdr(reinterpret_cast<void*>(&open_custom_vulkan), &info) || !info.dli_fname) return nullptr;
+    std::string libdir = info.dli_fname;  // .../lib/arm64/libp4au.so: the hook libraries are next to it
+    libdir = libdir.substr(0, libdir.rfind('/') + 1);
+    nx::log("gpu driver: opening custom driver %s%s (hooks in %s)", dir.c_str(), name.c_str(), libdir.c_str());
+    void* h = adrenotools_open_libvulkan(RTLD_NOW | RTLD_LOCAL, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, libdir.c_str(),
+                                         dir.c_str(), name.c_str(), nullptr, nullptr);
+    nx::log("gpu driver: %s", h ? "custom driver opened" : "failed, the system driver is used");
+    return h;
+}
+#endif
+
 void* vulkan_get_instance_proc_addr() {
-    void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-    return lib ? dlsym(lib, "vkGetInstanceProcAddr") : nullptr;
+    static void* gipa = []() -> void* {  // once: the custom driver is opened only once
+        void* lib = nullptr;
+#if defined(NX_CUSTOM_DRIVER)
+        lib = open_custom_vulkan();
+        if (lib && !dlsym(lib, "vkGetInstanceProcAddr")) lib = nullptr;
+#endif
+        if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+        return lib ? dlsym(lib, "vkGetInstanceProcAddr") : nullptr;
+    }();
+    return gipa;
 }
 
 const char* vulkan_surface_extension() { return VK_KHR_ANDROID_SURFACE_EXTENSION_NAME; }
 
 int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface, void* gipa) {
+    ANativeWindow* win = static_cast<ANativeWindow*>(native_window);
+    uint32_t rw = 0, rh = 0;
+    window_size(rw, rh);
+    if (win && rw && rh) {
+        int32_t cur_w = ANativeWindow_getWidth(win), cur_h = ANativeWindow_getHeight(win);
+        bool portrait = cur_w < cur_h;
+        int32_t bw = int32_t(portrait ? std::min(rw, rh) : std::max(rw, rh));
+        int32_t bh = int32_t(portrait ? std::max(rw, rh) : std::min(rw, rh));
+        int r_geom = ANativeWindow_setBuffersGeometry(win, bw, bh, 0);
+        nx::log("android: setBuffersGeometry %dx%d (screen %dx%d) -> %d", bw, bh, cur_w, cur_h, r_geom);
+    }
     auto create = reinterpret_cast<PFN_vkCreateAndroidSurfaceKHR>(reinterpret_cast<PFN_vkGetInstanceProcAddr>(gipa)(
         static_cast<VkInstance>(instance), "vkCreateAndroidSurfaceKHR"));
     VkAndroidSurfaceCreateInfoKHR ci{VK_STRUCTURE_TYPE_ANDROID_SURFACE_CREATE_INFO_KHR};
-    ci.window = static_cast<ANativeWindow*>(native_window);
+    ci.window = win;
     VkSurfaceKHR s = VK_NULL_HANDLE;
     VkResult r = create(static_cast<VkInstance>(instance), &ci, nullptr, &s);
     *surface = reinterpret_cast<uint64_t>(s);
@@ -414,6 +497,22 @@ struct sigaction g_previous[32];  // the handlers before ours (debuggerd's)
 void crash(int sig, siginfo_t* info, void* uc) {
     if ((sig == SIGSEGV || sig == SIGBUS) && nx::plat::write_watch_fault(info->si_addr)) return;  // write_watch.cpp
     nx::log("CRASH: signal %d, fault address %p", sig, info->si_addr);
+#if NX_NCE
+    // In the game's own code: its registers are in the signal's context, not in the thread's CPU.
+    if (nx::self_thread()) {
+        static nx::CPU fault;
+        uint64_t pc = 0;
+        if (nx::nce::guest_fault_context(uc, fault, pc)) {
+            nx::log("  in guest code at %s, lr %s, sp %llx", nx::describe(pc).c_str(), nx::describe(fault.x[30]).c_str(),
+                    (unsigned long long)fault.x[31]);
+            for (int k = 0; k < 32; k += 4)
+                nx::log("  x%-2d %016llx %016llx %016llx %016llx", k, (unsigned long long)fault.x[k],
+                        (unsigned long long)fault.x[k + 1], (unsigned long long)fault.x[k + 2],
+                        (unsigned long long)fault.x[k + 3]);
+            nx::backtrace(fault);
+        }
+    }
+#endif
     if (nx::self_thread()) {
         nx::CPU& c = nx::current_cpu();
         nx::log("  guest lr %s  sp %llx", nx::describe(c.x[30]).c_str(), (unsigned long long)c.x[31]);
@@ -557,6 +656,7 @@ extern "C" JNIEXPORT jlong JNICALL Java_io_github_belmantegu_wonderrecomp_GameAc
 
 extern "C" JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, void* saved, size_t size) {
     g_activity = activity;
+    if (activity->internalDataPath) nx::plat::g_internal_dir = activity->internalDataPath;
     if (g_ui_pipe[0] < 0 && pipe2(g_ui_pipe, O_NONBLOCK | O_CLOEXEC) == 0)
         ALooper_addFd(ALooper_forThread(), g_ui_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_ui_request, nullptr);
     glue_ANativeActivity_onCreate(activity, saved, size);
@@ -587,7 +687,12 @@ static void request_all_files_access(android_app* app) {
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
 
-static bool has_data(const std::string& root) { return access((root + "/analysis/main.bin").c_str(), R_OK) == 0; }
+#if NX_NCE
+static const char* const kDataProbe = "/exefs/main";  // native execution: the player's own exefs
+#else
+static const char* const kDataProbe = "/analysis/main.bin";
+#endif
+static bool has_data(const std::string& root) { return access((root + kDataProbe).c_str(), R_OK) == 0; }
 
 extern "C" void android_main(android_app* app) {
     using namespace nx::plat;
@@ -619,6 +724,7 @@ extern "C" void android_main(android_app* app) {
     // config.txt's NX_* lines become environment variables (the NVN layer reads its switches with getenv), without
     // overriding a variable already set. Android defaults: handheld (720p, the lighter GPU load).
     {
+        unsetenv("NX_STRETCH");
         std::ifstream f(g_root + "/config.txt");
         std::string line;
         while (std::getline(f, line)) {
@@ -658,7 +764,7 @@ extern "C" void android_main(android_app* app) {
     for (int s : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) sigaction(s, &sa, &g_previous[s]);
 
     nx::log("%s (Switch recomp) on Android, data at %s (own folder %s: %s)", nx::game::kInfo.title, g_root.c_str(),
-            own.c_str(), has_data(own) ? "has the data" : "no analysis/main.bin");
+            own.c_str(), has_data(own) ? "has the data" : kDataProbe + 1);
     static bool started = false;
     for (;;) {
         int events;

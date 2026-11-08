@@ -4,18 +4,32 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <filesystem>
 #include <string>
+#include <vector>
+
+namespace fs = std::filesystem;
 
 #include <nx/game.h>
 #include <nx/runtime.h>
 
 #include "kernel.h"
+#include "netplay/netplay.h"
 #include "platform.h"
 
+#if NX_NCE
+#include "game_image.h"
+#include "nce/nce.h"
+#include "nce/nso.h"
+#else
 extern const nx::ModuleInfo nx_module_main;
 extern const nx::ModuleInfo nx_module_sdk;
+#endif
 
 namespace nx {
+
+static const ModuleInfo* g_main = nullptr;
+static const ModuleInfo* g_sdk = nullptr;
 
 uint64_t mrs(CPU& c, uint32_t sysreg) {
     switch (sysreg) {
@@ -108,14 +122,14 @@ static void rtld_mark(CPU&) {}
 // nnMain, as called by nn::init::Start: the constructors need the program's allocator, which nninitStartup has
 // set up by now, so they run here, right before the real nnMain.
 static void nn_main(CPU& c) {
-    init_module(c, nx_module_sdk);
-    init_module(c, nx_module_main);
+    init_module(c, *g_sdk);
+    init_module(c, *g_main);
     game::after_init();
     log("entering nnMain");
     uint64_t real = 0;
-    for (size_t k = 0; k < nx_module_main.symbol_count; k++)
-        if (!nx_module_main.symbols[k].imported && std::string(nx_module_main.symbols[k].name) == "nnMain")
-            real = nx_module_main.base + nx_module_main.symbols[k].value;
+    for (size_t k = 0; k < g_main->symbol_count; k++)
+        if (!g_main->symbols[k].imported && std::string(g_main->symbols[k].name) == "nnMain")
+            real = g_main->base + g_main->symbols[k].value;
     call(c, real);
 }
 
@@ -142,18 +156,97 @@ void boot() {
     if (plat::setting("trace") == "1") g_trace = true;
     memory_init();
     kernel_init();
-    const ModuleInfo* mods[] = {&nx_module_main, &nx_module_sdk};
+#if NX_NCE
+    nce::init();
+    static std::vector<std::unique_ptr<nce::NsoModule>> nso;
+    const std::string exefs = plat::data_root() + "/exefs";
+    const nxi::GameImage* image = game_image();
+
+    auto find_mod_exefs = [](const std::string& name) -> std::string {
+        std::error_code ec;
+        fs::path root = fs::u8path(plat::data_root()) / "mods";
+        if (fs::is_regular_file(root / "exefs" / fs::u8path(name), ec))
+            return (root / "exefs" / fs::u8path(name)).string();
+        if (fs::is_directory(root, ec)) {
+            for (auto& e : fs::directory_iterator(root, ec)) {
+                if (e.is_directory(ec)) {
+                    fs::path candidate = e.path() / "exefs" / fs::u8path(name);
+                    if (fs::is_regular_file(candidate, ec)) return candidate.string();
+                }
+            }
+        }
+        return {};
+    };
+
+    std::vector<std::string> mod_names = {"main", "sdk"};
+    for (int k = 0; k <= 9; k++) mod_names.push_back("subsdk" + std::to_string(k));
+
+    uint64_t next_base = kModuleBase;
+    constexpr uint64_t kModuleSpan = 0x20000000ull;
+    for (const auto& name : mod_names) {
+        std::string mod_file = find_mod_exefs(name);
+        std::string error;
+        const uint64_t base = next_base;
+        const size_t before = nso.size();
+        if (!mod_file.empty()) {
+            log("nce: loading mod exefs override: %s", mod_file.c_str());
+            auto m = nce::load_nso(mod_file, name, base, error);
+            if (m) nso.push_back(std::move(m));
+            else log("nce: error loading mod %s: %s", mod_file.c_str(), error.c_str());
+        } else if (name == "main" || name == "sdk") {
+            if (image) {
+                auto it = image->exefs().find(name);
+                if (it != image->exefs().end()) {
+                    auto m = nce::load_nso_bytes(it->second, std::string("ExeFS/") + name, name, base, error);
+                    if (m) nso.push_back(std::move(m));
+                } else {
+                    fatal("the game file's ExeFS has no %s", name.c_str());
+                }
+            } else {
+                std::error_code ec;
+                if (fs::is_regular_file(fs::u8path(exefs) / fs::u8path(name), ec)) {
+                    auto m = nce::load_nso(exefs + "/" + name, name, base, error);
+                    if (m) nso.push_back(std::move(m));
+                } else {
+                    fatal("exefs/%s not found (copy the exefs folder of your own dump there)", name.c_str());
+                }
+            }
+        }
+        if (nso.size() > before) {
+            const ModuleInfo& mi = nso.back()->info;
+            if (base + mi.bss + mi.bss_size > kModuleBase + kModuleSpan)
+                fatal("nce: %s does not fit in the %llu MiB reserved for the modules", name.c_str(),
+                      (unsigned long long)(kModuleSpan >> 20));
+            next_base = (base + mi.bss + mi.bss_size + 0xFFFFFFFull) & ~0xFFFFFFFull;
+        }
+    }
+    if (nso.size() < 2) fatal("failed to load base modules (main and sdk required)");
+
+    g_main = &nso[0]->info, g_sdk = &nso[1]->info;
+    std::vector<const ModuleInfo*> mods;
+    std::vector<const uint8_t*> img_ptrs;
+    for (const auto& m : nso) {
+        mods.push_back(&m->info);
+        img_ptrs.push_back(m->image.data());
+    }
+    load_modules(mods.data(), mods.size(), "", img_ptrs.data());
+#else
+    g_main = &nx_module_main, g_sdk = &nx_module_sdk;
+    const ModuleInfo* mods[] = {g_main, g_sdk};
     load_modules(mods, 2, plat::data_root() + "/analysis");
+#endif
 
     uint64_t tdata = 0, tdata_end = 0;
-    if (tdata_range(nx_module_main, tdata, tdata_end) && tdata_end > tdata) {
+    if (tdata_range(*g_main, tdata, tdata_end) && tdata_end > tdata) {
         set_tls_template(tdata, tdata_end);
         log("main .tdata: %llu bytes", (unsigned long long)(tdata_end - tdata));
     }
+    // NX_NET_HOST / NX_NET_JOIN: the netplay handshake, before the guest's first instruction (netplay.h).
+    netplay::start();
     uint32_t main_thread = create_main_thread(16ull << 20);
     CPU& c = current_cpu();
     c.x[0] = main_thread;
-    c.x[1] = nx_module_main.base;
+    c.x[1] = g_main->base;
     // SDK 9: Start(thread, main base, init, fini). SDK 16 adds a first callback: rtld's sets a word to 1 (rtld+0x1330
     // in Wonder), before its init and fini that walk the module list.
     uint64_t start = find_symbol("_ZN2nn4init5StartEmmPFvvES2_");

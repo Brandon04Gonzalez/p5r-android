@@ -41,9 +41,25 @@ bool vk_indirect_count();  // VK_KHR_draw_indirect_count enabled (nvn_occlusion.
 bool vk_dynamic_rendering();  // core 1.3 dynamic rendering; without it, render pass objects (nvn_renderpass.cpp)
 // The core features the device was created with (all the GPU has): depthClamp, depthBiasClamp, depthBounds, ...
 const VkPhysicalDeviceFeatures& vk_features();
+bool is_xclipse();
+bool is_mali();
+bool is_adreno();
+bool is_adreno_8xx();
 bool gpu_require_subgroup32();  // compute pipelines pin the subgroup size to 32 (nvn_pipeline.cpp)
 bool gpu_is_integrated();  // the device in use is an integrated GPU (set when the device is made)
 VkPhysicalDevice vk_physical();
+// What the device offers for a GPU-side video picture (nvn_caps.cpp, filled in when the device is made): the Android
+// external memory extensions and whether the planes of an NV12 picture can be sampled. Read-only, and nothing here
+// enables an extension or changes a device. hle_movie.cpp reports it and takes the path it can (see its header).
+struct VideoImportCaps {
+    bool ahardwarebuffer = false;       // VK_ANDROID_external_memory_android_hardware_buffer
+    bool external_memory_fd = false;    // VK_KHR_external_memory_fd
+    bool ycbcr_conversion = false;      // VK_KHR_sampler_ycbcr_conversion
+    bool queue_family_foreign = false;  // VK_EXT_queue_family_foreign
+    bool nv12_plane = false;            // G8_B8R8_2PLANE_420_UNORM sampled with a linear filter
+    bool r8 = false, r8g8 = false;      // R8_UNORM / R8G8_UNORM likewise: the planes P5R's own shaders sample
+};
+const VideoImportCaps& video_import_caps();
 // nvn_gpu_pick.cpp: logs every device and returns the one NX_GPU asks for (default: the first discrete GPU).
 VkPhysicalDevice pick_physical_device(const std::vector<VkPhysicalDevice>& devices);
 uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want);

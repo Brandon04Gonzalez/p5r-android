@@ -13,6 +13,7 @@ public:
     void encrypt_block(const uint8_t in[16], uint8_t out[16]) const;
     void decrypt_block(const uint8_t in[16], uint8_t out[16]) const;
     ~Aes128();  // wipes the round keys
+    const uint32_t* round_keys() const { return rk_; }  // 11 x 16 bytes in FIPS-197 byte order (little-endian host)
 
 private:
     uint32_t rk_[44] = {};

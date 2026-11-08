@@ -49,7 +49,11 @@ constexpr uint64_t kAliasSize = 0x1000000000ull;
 constexpr uint64_t kStackBase = 0x6800000000ull;
 // Kept below 0x70_0000_0000: Android (39-bit address space) maps the process's own libraries and heap up there.
 constexpr uint64_t kKernelBase = 0x6A00000000ull;
+#if defined(__ANDROID__)
+inline uint64_t kThunkBase = 0x4400000000ull;
+#else
 constexpr uint64_t kThunkBase = 0x6F00000000ull;
+#endif
 #endif
 // kKernelBase: TLS pages, main thread stack (memory we hand out). kThunkBase: HLE function addresses (never mapped).
 
@@ -85,7 +89,7 @@ struct LoadedModule {
     Fn* table;  // text offset / 4 -> function
 };
 
-void load_modules(const ModuleInfo* const* mods, size_t count, const std::string& data_dir);
+void load_modules(const ModuleInfo* const* mods, size_t count, const std::string& data_dir, const uint8_t* const* images = nullptr);
 uint64_t find_symbol(const char* name);  // 0 when not found
 const LoadedModule* module_at(uint64_t addr);
 std::string describe(uint64_t addr);  // "sdk+0x1234 (symbol+0x10)"
@@ -104,6 +108,7 @@ uint64_t hle_address(const char* name);  // thunk address; unknown names get a l
 uint64_t hle_address_or(const char* name, HleFn fallback);  // unknown names get `fallback`
 const char* hle_current_name();  // inside an HLE function: the name its thunk was made for
 HleFn hle_lookup(const char* name);
+uint64_t hook_function(uint64_t addr, HleFn fn);
 
 // Call guest code at `addr` on context c (args already in x0..).
 inline void guest_call(CPU& c, uint64_t addr) { call(c, addr); }
@@ -124,6 +129,9 @@ void add_virtual_file(const std::string& path, std::string data);
 // The contents of a real game file under the data folder ("" if missing).
 std::string read_game_file(const std::string& relative_to_romfs);
 std::string guest_to_host_path(const std::string& guest);  // "rom:/a/b" -> host path (hle_fs.cpp), empty if unmounted
+// Netplay (netplay.cpp): every user's save data is served from `dir` instead of <data root>/user/save*, so both peers
+// boot from the same copy of the host's save and the players' own saves stay as they were. Before the guest starts.
+void set_save_dir(const std::string& dir);
 // The last file and directory opens of every thread (a small ring, always on), logged by the crash handlers: what
 // the game was loading when it crashed (hle_fs.cpp).
 void log_recent_files();

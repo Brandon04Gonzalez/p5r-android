@@ -378,13 +378,25 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
     if (crop && crop[2] > 0 && crop[3] > 0 && crop[0] + crop[2] <= int32_t(src.width) &&
         crop[1] + crop[3] <= int32_t(src.height))
         cx = float(crop[0]), cy = float(crop[1]), cw = float(crop[2]), ch = float(crop[3]);
+    bool sideways = r == 1 || r == 3;
+    float tw = float(sideways ? g.extent.height : g.extent.width), th = float(sideways ? g.extent.width : g.extent.height);
+    // NX_STRETCH (the launcher's "Pantalla completa"): 0 keeps the picture's aspect with bars on a wider (or taller)
+    // screen; 1 stretches it over the whole screen; 2 fills the screen keeping the aspect, cutting what overflows
+    // (on a 20:9 phone, a band at the top and bottom of a 16:9 picture).
+    static const int fill = [] {
+        const char* e = std::getenv("NX_STRETCH");
+        return e ? std::atoi(e) : 0;
+    }();
+    if (fill == 2) {
+        const float over = std::max(tw / cw, th / ch);
+        const float fx = std::min(1.0f, tw / (cw * over)), fy = std::min(1.0f, th / (ch * over));
+        cx += cw * (1 - fx) / 2, cy += ch * (1 - fy) / 2, cw *= fx, ch *= fy;
+    }
     p.crop[0] = cx / float(src.width), p.crop[1] = cy / float(src.height);
     p.crop[2] = cw / float(src.width), p.crop[3] = ch / float(src.height);
     if (origin_lower_left())  // row 0 is the bottom of the picture (and the crop's y counts from it): read upwards
         p.crop[1] = (cy + ch) / float(src.height), p.crop[3] = -ch / float(src.height);
-    bool sideways = r == 1 || r == 3;
-    float tw = float(sideways ? g.extent.height : g.extent.width), th = float(sideways ? g.extent.width : g.extent.height);
-    float scale = std::min(tw / cw, th / ch), bw = cw * scale / tw, bh = ch * scale / th;
+    float scale = std::min(tw / cw, th / ch), bw = fill ? 1 : cw * scale / tw, bh = fill ? 1 : ch * scale / th;
     p.box[0] = (1 - bw) / 2, p.box[1] = (1 - bh) / 2, p.box[2] = bw, p.box[3] = bh;
     // The touch controls (platform_android_input.cpp), in upright uv; none elsewhere.
     plat::OverlayShape shapes[kOverlayMax];

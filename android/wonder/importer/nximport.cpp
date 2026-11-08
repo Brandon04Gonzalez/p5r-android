@@ -41,6 +41,7 @@
 #include <stdexcept>
 
 #include "nxcrypto.h"
+#include "nxgame.h"
 
 #ifdef __APPLE__
 #define fdatasync fsync  // macOS (host test build) has no fdatasync
@@ -1457,6 +1458,246 @@ int run_import(const std::vector<InputFile>& inputs, const Options& opt, std::st
         error = "out of memory";
         return 1;
     }
+}
+
+// ---- the game read in place (nxgame.h) ----
+
+struct GameImage::Impl {
+    std::vector<std::unique_ptr<Storage>> files;
+    std::unique_ptr<Nca> base;
+    uint64_t title = 0;
+    std::map<std::string, std::vector<uint8_t>> exefs;
+    // RomFS: section `sec` of `base`, its data level at `level_off` in the section, the file data at `data_off` in it
+    int sec = -1;
+    uint64_t level_off = 0, level_size = 0, data_off = 0;
+    std::map<std::string, Entry> entries;                  // every file and folder (folders: dir = true)
+    std::map<std::string, std::vector<std::string>> kids;  // folder -> its children's names
+
+    // Bytes of the section's decrypted data at [pos, pos + n): no shared state, so any thread may read.
+    void read_section(uint64_t pos, void* dst, size_t n) const {
+        const Section& s = base->sec[sec];
+        if (s.crypt() == 1) {
+            base->file->read(s.off + pos, dst, n);
+            return;
+        }
+        std::vector<uint8_t> buf;
+        ctr_read(base->file.get(), s.off + pos, s.off + pos, base->key, s.upper, dst, n, buf);
+    }
+};
+
+GameImage::GameImage() : impl_(std::make_unique<Impl>()) {}
+GameImage::~GameImage() = default;
+uint64_t GameImage::title_id() const { return impl_->title; }
+const std::map<std::string, std::vector<uint8_t>>& GameImage::exefs() const { return impl_->exefs; }
+size_t GameImage::file_count() const {
+    size_t n = 0;
+    for (auto& [p, e] : impl_->entries) n += !e.dir;
+    return n;
+}
+
+const GameImage::Entry* GameImage::find(const std::string& path) const {
+    auto it = impl_->entries.find(path);
+    return it == impl_->entries.end() ? nullptr : &it->second;
+}
+
+std::vector<std::pair<std::string, GameImage::Entry>> GameImage::list(const std::string& dir) const {
+    std::vector<std::pair<std::string, Entry>> out;
+    auto it = impl_->kids.find(dir);
+    if (it == impl_->kids.end()) return out;
+    for (const std::string& name : it->second)
+        out.push_back({name, impl_->entries.at(dir.empty() ? name : dir + "/" + name)});
+    return out;
+}
+
+uint64_t GameImage::read(const Entry& file, uint64_t off, void* dst, uint64_t n) const {
+    if (file.dir || off >= file.size) return 0;
+    n = std::min(n, file.size - off);
+    try {
+        impl_->read_section(impl_->level_off + impl_->data_off + file.off + off, dst, size_t(n));
+        return n;
+    } catch (const Fail&) {
+        return 0;
+    }
+}
+
+std::unique_ptr<GameImage> GameImage::open(const std::vector<InputFile>& inputs, uint64_t title_id, std::string& error) {
+    std::unique_ptr<GameImage> g(new GameImage());
+    Impl& im = *g->impl_;
+    try {
+        if (!crypto_self_test()) fail("internal error: crypto self-test failed");
+        Keys keys;
+        bool have_prod = false;
+        struct Cont {
+            std::string name;
+            Storage* st;
+            bool xci;
+        };
+        std::vector<Cont> conts;
+        for (const InputFile& in : inputs) {
+            std::string n = lower(in.name);
+            if (n == "prod.keys" || n == "keys.txt" || n == "keys.dat") {
+                FdStorage s(in.fd, in.name);
+                keys.load_prod(read_small(s, 1 << 20));
+                have_prod = true;
+            } else if (n == "title.keys") {
+                FdStorage s(in.fd, in.name);
+                keys.load_title(read_small(s, 4 << 20));
+            } else if (ends_with(n, ".nsp") || ends_with(n, ".xci")) {
+                im.files.push_back(std::make_unique<FdStorage>(in.fd, in.name));
+                conts.push_back({in.name, im.files.back().get(), ends_with(n, ".xci")});
+            }
+        }
+        if (!have_prod) fail("prod.keys is missing");
+        if (conts.empty()) fail("no .nsp or .xci file");
+        uint8_t hk[32];
+        if (!keys.header_key(hk)) fail("prod.keys has no header_key");
+
+        struct Ent {
+            Storage* st;
+            std::string cont, name;
+            uint64_t off, size;
+        };
+        std::vector<Ent> ents;
+        std::map<std::string, Ticket> tickets;
+        for (const Cont& c : conts) {
+            std::vector<ContEntry> fl = c.xci ? read_xci(c.st, c.name, nullptr) : read_pfs(c.st, 0, false, c.name);
+            for (const ContEntry& f : fl) {
+                ents.push_back({c.st, c.name, f.name, f.off, f.size});
+                if (!ends_with(lower(f.name), ".tik") || f.size < 0x2C0) continue;
+                uint8_t t[0x2C0];
+                c.st->read(f.off, t, sizeof t);
+                if (rd32(t) != 0x10004) continue;
+                Ticket tk;
+                std::memcpy(tk.enc_key, t + 0x180, 16);
+                tk.type = t[0x281];
+                tickets[hex(t + 0x2A0, 16)] = tk;
+                secure_zero(t, sizeof t);
+            }
+        }
+        std::vector<std::unique_ptr<Nca>> programs;
+        for (const Ent& e : ents) {
+            std::string n = lower(e.name);
+            if (ends_with(n, ".ncz")) fail("%s: compressed NCZ content is not supported; use an uncompressed NSP/XCI", e.name.c_str());
+            if (!ends_with(n, ".nca")) continue;
+            auto nca = open_nca(e.st, e.off, e.size, e.name, keys, hk, tickets);
+            if (nca && nca->content_type == 0) programs.push_back(std::move(nca));
+        }
+        secure_zero(hk, sizeof hk);
+        uint64_t app = title_id & ~0xFFFull;
+        for (auto& n : programs) {
+            if (app && (n->title_id & ~0xFFFull) != app) continue;
+            bool patch = false, sparse = false;
+            for (int i = 0; i < 4; i++)
+                if (n->sec[i].present && n->sec[i].partition() == 0) patch |= n->sec[i].is_patch(), sparse |= n->sec[i].is_sparse();
+            if (patch) continue;  // an update: the base game only
+            if (sparse) fail("%s holds only part of the game (an update-split title): not supported", n->name.c_str());
+            if (im.base) fail("several games in the files given (%s, %s)", tid_str(im.base->title_id).c_str(), tid_str(n->title_id).c_str());
+            im.base = std::move(n);
+        }
+        if (!im.base) fail(app ? "the files hold no base game of title %s" : "no base game found", tid_str(app).c_str());
+        Nca& b = *im.base;
+        if (!b.key_ok) fail("%s: %s", b.name.c_str(), b.key_problem.c_str());
+        im.title = b.title_id;
+
+        // ExeFS, checked block by block against its hash table (as the import does)
+        int exe_sec = -1;
+        for (int i = 0; i < 4 && exe_sec < 0; i++)
+            if (b.sec[i].present && b.sec[i].partition() == 1) exe_sec = i;
+        if (exe_sec < 0) fail("%s has no ExeFS", b.name.c_str());
+        Storage* exe = plain_section(b, exe_sec);
+        const uint8_t* efs = b.sec[exe_sec].fs;
+        uint32_t pfs_bs = rd32(efs + 0x28);
+        uint64_t ht_off = rd64(efs + 0x30), ht_size = rd64(efs + 0x38), pfs_off = rd64(efs + 0x40), pfs_size = rd64(efs + 0x48);
+        if (!pfs_bs || ht_size > (64u << 20) || pfs_size > (1ull << 31)) fail("%s: implausible ExeFS layout", b.name.c_str());
+        std::vector<uint8_t> ht(ht_size), pfs(pfs_size);
+        exe->read(ht_off, ht.data(), ht.size());
+        uint8_t d[32];
+        sha256(ht.data(), ht.size(), d);
+        if (std::memcmp(d, efs + 0x8, 32) != 0) fail("%s: ExeFS hash table check failed (wrong key?)", b.name.c_str());
+        exe->read(pfs_off, pfs.data(), pfs.size());
+        for (uint64_t k = 0; k * pfs_bs < pfs_size; k++) {
+            size_t m = size_t(std::min<uint64_t>(pfs_bs, pfs_size - k * pfs_bs));
+            sha256(pfs.data() + k * pfs_bs, m, d);
+            if ((k + 1) * 32 > ht.size() || std::memcmp(d, ht.data() + k * 32, 32) != 0)
+                fail("%s: ExeFS block %llu fails its check", b.name.c_str(), (unsigned long long)k);
+        }
+        struct Mem : Storage {
+            const std::vector<uint8_t>& v;
+            explicit Mem(const std::vector<uint8_t>& x) : v(x) { size = x.size(); }
+            void read(uint64_t off, void* dst, size_t n) override {
+                if (off + n > size) fail("ExeFS entry outside its partition");
+                std::memcpy(dst, v.data() + off, n);
+            }
+        } mem(pfs);
+        for (const ContEntry& f : read_pfs(&mem, 0, false, "ExeFS")) {
+            std::vector<uint8_t>& out = im.exefs[f.name];
+            out.resize(size_t(f.size));
+            mem.read(f.off, out.data(), out.size());
+        }
+
+        // RomFS: the IVFC data level, its header and tables (read once; the files are read on demand)
+        for (int i = 0; i < 4 && im.sec < 0; i++)
+            if (b.sec[i].present && b.sec[i].partition() == 0) im.sec = i;
+        if (im.sec < 0) fail("%s has no RomFS", b.name.c_str());
+        if (b.sec[im.sec].crypt() != 1 && b.sec[im.sec].crypt() != 3 && b.sec[im.sec].crypt() != 4)
+            fail("%s: RomFS encryption type %d is not handled", b.name.c_str(), b.sec[im.sec].crypt());
+        const uint8_t* iv = b.sec[im.sec].fs + 0x8;
+        if (rd32(iv) != 0x43465649) fail("%s: RomFS section without an IVFC header", b.name.c_str());
+        uint32_t levels = rd32(iv + 0xC);
+        if (levels < 2 || levels > 7) fail("%s: IVFC with %u levels", b.name.c_str(), levels);
+        const uint8_t* lv = iv + 0x10 + 0x18 * (levels - 2);
+        im.level_off = rd64(lv), im.level_size = rd64(lv + 8);
+        if (im.level_off + im.level_size > b.sec[im.sec].size) fail("%s: RomFS lies outside its section", b.name.c_str());
+        uint8_t rh[0x50];
+        im.read_section(im.level_off, rh, sizeof rh);
+        uint64_t dir_off = rd64(rh + 0x18), dir_size = rd64(rh + 0x20), file_off = rd64(rh + 0x38), file_size = rd64(rh + 0x40);
+        im.data_off = rd64(rh + 0x48);
+        if (rd64(rh) != 0x50 || dir_size > (64u << 20) || file_size > (64u << 20) || dir_off + dir_size > im.level_size ||
+            file_off + file_size > im.level_size)
+            fail("%s: the RomFS header does not decrypt (wrong title key?)", b.name.c_str());
+        std::vector<uint8_t> dirs(dir_size), filet(file_size);
+        im.read_section(im.level_off + dir_off, dirs.data(), dirs.size());
+        im.read_section(im.level_off + file_off, filet.data(), filet.size());
+        std::vector<RomfsFile> rf;
+        std::vector<std::string> rd;
+        walk_romfs(dirs, filet, 0, "", rf, rd, 0);
+        auto parent_of = [](const std::string& p) {
+            size_t s = p.rfind('/');
+            return s == std::string::npos ? std::string() : p.substr(0, s);
+        };
+        auto name_of = [](const std::string& p) {
+            size_t s = p.rfind('/');
+            return s == std::string::npos ? p : p.substr(s + 1);
+        };
+        im.entries[""] = Entry{0, 0, true};
+        for (const std::string& dpath : rd) {
+            im.entries[dpath] = Entry{0, 0, true};
+            im.kids[parent_of(dpath)].push_back(name_of(dpath));
+        }
+        for (const RomfsFile& f : rf) {
+            if (im.data_off + f.off + f.size > im.level_size) fail("RomFS: %s lies outside the image", f.path.c_str());
+            im.entries[f.path] = Entry{f.off, f.size, false};
+            im.kids[parent_of(f.path)].push_back(name_of(f.path));
+        }
+        return g;
+    } catch (const Fail& e) {
+        error = e.what();
+    } catch (const std::bad_alloc&) {
+        error = "out of memory";
+    }
+    return nullptr;
+}
+
+bool nso_to_flat_image(const std::vector<uint8_t>& nso, std::vector<uint8_t>& out, std::string& error) {
+    try {
+        out = nso_to_flat(nso, "NSO");
+        return true;
+    } catch (const Fail& e) {
+        error = e.what();
+    } catch (const std::bad_alloc&) {
+        error = "out of memory";
+    }
+    return false;
 }
 
 }  // namespace nxi

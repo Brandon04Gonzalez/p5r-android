@@ -1,373 +1,139 @@
-# Super Mario Bros. Wonder Recomp
+# Persona 4 Arena Ultimax for Android (native port)
 
-<p align="center">
-  <a href="https://www.youtube.com/@belmante"><img src="docs/media/projeto-belmante.jpg" alt="Projeto Belmante" width="120"></a><br>
-  A <b>Projeto Belmante</b> project &middot; <a href="https://www.youtube.com/@belmante">youtube.com/@belmante</a>
-</p>
+An Android app that runs **your own copy** of Persona 4 Arena Ultimax (Nintendo Switch) natively on an arm64 phone or
+tablet. The Switch's operating system services, its audio, video and input, and NVN (the Switch's graphics API) are
+reimplemented on Android, with Vulkan for the graphics. The game's own code runs directly on the phone's CPU: the
+Switch and Android phones share the same CPU architecture (AArch64).
 
-Static recompilation of **Super Mario Bros. Wonder** (Nintendo Switch, 1.0.0, title ID `010015100B514000`) to native
-code. No emulator runs: the game's AArch64 machine code becomes C++ compiled for the host, and its system and graphics
-calls (NVN, Nintendo's own API) are implemented natively on **Vulkan** (MoltenVK on the Mac).
-
-Part of the [SwitchGamesRecomp](https://github.com/BelmanteGu/SwitchGamesRecomp) work (same runtime, see
-[docs/FRAMEWORK.md](docs/FRAMEWORK.md)); this repo follows Wonder alone. Living log: [PROGRESS.md](PROGRESS.md).
+**No PC needed:** install the APK, pick your game file (`.nsp` or `.xci`) and your `prod.keys` on the phone, let it
+prepare the game once, and play. The game is read from your file as it is; nothing is extracted.
 
 > [!NOTE]
-> **No game files are included.** This repository holds no game code, assets, keys or firmware, and no build
-> made from them. Everything derived from the game stays in `private/` (gitignored). You need your own legally
-> dumped copy of Wonder 1.0.0, plus your own keys and firmware. Instructions on how to obtain them are **not**
-> provided.
+> **Online play is coming soon** as an option of its own. This release plays offline: Arcade, Story and Versus (also two
+> players on one device with two controllers). Meanwhile, the best thing to do is train.
 
 > [!IMPORTANT]
-> **This project was made with a lot of AI and a lot of study.** Most of the code, tooling and documentation was
-> written with AI assistance (Anthropic's Claude), directed, tested and reviewed by a human who spent a great deal of
-> time studying the Switch's CPU, OS and graphics stack (AArch64, NVN, Maxwell shaders, Vulkan) to guide it. If you
-> don't agree with the use of AI or don't trust AI-written code, that is your right; you run the code at your own
-> discretion.
+> **No game files are included, here or in the APK.** This repository and its releases hold no game code, assets,
+> shaders, keys or firmware. The APK is only the engine: it reads the game from your own dump. You need your own
+> legally dumped copy of the game and your own `prod.keys`. How to dump them from your console is **not** covered
+> here. Please do not ask for game files or keys.
 
-> [!IMPORTANT]
-> **A note on the history of this repo.** The project was developed across several computers, and files were lost
-> when moving between them. Part of the code had to be rewritten from scratch, and some early notes, test
-> scripts and intermediate results no longer exist. If something in [PROGRESS.md](PROGRESS.md) or the docs refers
-> to a file you cannot find, that is probably why. Bug reports about gaps like this are welcome.
+Persona 4 Arena Ultimax is © ATLUS / © SEGA, developed with Arc System Works. This is an unofficial fan project, not
+affiliated with or endorsed by ATLUS, SEGA, Arc System Works or Nintendo.
 
-## Platforms
+## Community and support
 
-| Platform | Status | Graphics |
-|---|---|---|
-| macOS (Apple Silicon) | works, the reference platform | Vulkan on Metal through MoltenVK |
-| Windows (x86-64) | works, tested on NVIDIA (RTX 3050) and Intel GPUs | native Vulkan 1.3 |
-| Android (arm64) | works, tested on a Galaxy S23 | native Vulkan 1.3 |
-| Linux (x86-64) | works since 2026-10-17, tested on Ubuntu 26.04: NVIDIA RTX 3050 laptop GPU, and **60 fps on an Intel UHD integrated GPU** (720p) | native Vulkan 1.3 |
+- **Discord** (English and Spanish channels), for news, help and testing: https://discord.gg/rMgRneBTCe
+- **Support the developer (optional):** [GitHub Sponsors](https://github.com/sponsors/Brandon04Gonzalez). These ports
+  are free and made for preservation. Donating is entirely voluntary and helps with the costs of making them (test
+  devices, hardware, servers). Nothing is locked behind a donation.
 
-Linux support was added on 2026-10-17 by [BelmanteGu](https://github.com/BelmanteGu) (Projeto Belmante): the
-platform layer `runtime/src/platform_linux.cpp` (SDL3 window, gamepad, keyboard and audio, Vulkan surface through
-SDL, crash handler) and `memguard_linux.cpp`, a Linux branch in `CMakeLists.txt` and `tools/wonder_linux.sh`. The
-recompiled code and the translated shaders built on Linux are byte for byte the Mac's. See [Linux](#linux).
+## Install
 
-## State
+1. Copy your **Persona 4 Arena Ultimax** `.nsp` (or `.xci`) and your `prod.keys` to the phone (the Download folder is
+   fine). The port is made for version 1.0.0 (v0), tested with the US release (`010075A016A3A000`).
+2. Install **P4AU** from the [Releases](../../releases) page (allow installing apps from your browser or file manager
+   when Android asks).
+3. Open it and allow "All files access".
+4. **Game file (.nsp / .xci) → Choose**: pick your game file. **Keys (prod.keys) → Choose**: pick your `prod.keys`
+   (you can pick `prod.keys` and `title.keys` together). The app keeps the keys in its private storage; they are not
+   uploaded or included in the APK.
+5. Press **Prepare & Play**: the first time it translates the game's shaders on the phone (a few minutes, once). After
+   that the button says **Play**.
 
-![gameplay, ultrawide 21:9 on an RTX 3050](docs/media/wonder/gameplay-ultrawide-rtx.gif)
+Keep the game file where it is: every start reads the game from it (about 16 GB free for the file, a little more for
+the shaders).
 
-*The Flower Kingdom intro on Linux, NVIDIA RTX 3050, ultrawide 21:9 (`NX_ULTRAWIDE=1`, 2560x1080; GIF at 15 fps).*
+### Options
 
-| Title | Character select |
-|---|---|
-| ![title](docs/media/wonder/40-title-ultrawide-rtx.jpg) | ![select](docs/media/wonder/41-character-select-ultrawide-rtx.jpg) |
-| **Flower Kingdom intro** | **Opening at the castle** |
-| ![course](docs/media/wonder/42-course-ultrawide-rtx.jpg) | ![castle](docs/media/wonder/43-castle-ultrawide-rtx.jpg) |
+- **Resolution**: 720p (recommended) or 1080p.
+- **Fullscreen**: "Yes (stretch)" fills a tall phone's screen with no black bars at the sides.
+- **Skip frames when slow**: leave it on **Automatic**. On phones that cannot draw 60 pictures a second in fights, the
+  game draws one in two when it falls behind, so fights keep their normal speed (no slow motion). Fast phones never
+  skip.
+- **On-screen controls**, their size, opacity and position (a layout editor). Bluetooth controllers work too.
+- Custom GPU drivers (Turnip), save import/export, log export, and a home screen shortcut with a picture of your own.
 
-*All four on Linux, RTX 3050, ultrawide 2560x1080. Gameplay gets a wider view of the level; menus stay a centred
-16:9 area with the backdrop's edges at the sides (see [Ultrawide, frame rate and integrated GPUs](#ultrawide-frame-rate-and-integrated-gpus)).*
+## Requirements
 
-### What works
+- An arm64 Android phone or tablet with **Android 11 or newer** and **Vulkan 1.1**.
+- Tested on a moto g54 5G (MediaTek Dimensity 7020, 8 GB) and a Lenovo Tab M11 (Snapdragon 680 / Adreno 610).
 
-- **CPU:** `main` and the SDK are recompiled: 17.8M AArch64 instructions, 250k functions, about 1.4 GB of generated C++.
-  The game runs its whole frame loop natively on macOS.
-- **Graphics:** Wonder draws through **NVN**, Nintendo's own graphics API. The `nvn*` functions are implemented on
-  the host: recorded command buffers are replayed into Vulkan, running on Metal through MoltenVK.
-  - All 12,717 Maxwell shader blocks were translated to SPIR-V ahead of time, with the Ryujinx translator (MIT).
-  - Textures are untiled from the block-linear layout. ASTC and BCn are sampled natively.
-  - Render targets, samplers, views, clears, compute and write-backs are replayed per submit.
-- **Screens:** title, file and player select, character select, the opening, the world map and course 1-1 render
-  correctly.
-- **Speed:** 60 fps in the menus and in course 1-1 (headless test runs). Submits are pipelined: the frame's GPU
-  work is not waited for.
-- **Button icons:** our own glyph font for the NintendoExtended codepoints (`tools/fonts/make_button_font.py`).
-- **Audio:** the sdk's own AudioRenderer (server and DSP code) runs in process.
-- **Memory:** 3.5 to 4.2 GB in play.
-- **Dump used:** Super Mario Bros. Wonder **1.0.0**, base game, no update, from an XCI of 3,769,099,776 bytes (SHA-256 and the rest in
-  [docs/WONDER-DUMP.md](docs/WONDER-DUMP.md)). Other versions are not supported.
+## Status
 
-### Open
+The menus, Arcade, Story (with its visual novel scenes), Versus, sound and films work. P4AU's logic counts frames, so a
+phone that cannot draw 60 fps in fights uses frame skipping to keep the speed. Reports are very welcome, on Discord or
+in [Issues](../../issues): your phone model, Android version, what happened and the log (**Export logs**).
 
-The details are in the GitHub milestones.
+## How it works
 
-- **Windowed stretches at 35-40 fps (#51):** the GPU goes past the frame budget only when a window is visible.
-- **Windowed confirmation of the W7 glitch fixes (#43-#45, #47):** horizon band, silhouettes, present mode.
-- **Character-select blur:** needs a reference from a real console.
-- **Android rendering bugs and performance:** hand-off notes in [docs/nvn/android-perf/](docs/nvn/android-perf/).
-- **Android: memory pressure on the Galaxy S23.** In the course the CPU replay reaches 17-18 ms because Android
-  pushes up to 1.8 GB of the game to zram (major faults on the render thread); the GPU waits only 0.1-2 ms.
-  Measured in [docs/nvn/android-perf/MEMORY-1810.md](docs/nvn/android-perf/MEMORY-1810.md), with the plan. The
-  new-shader hitches have a first fix (below); neither change has run on a phone yet.
-- **Windows: crash after character select (#5):** not reproduced on Linux; the crash is a rail object whose
-  parameter resource was not found (analysis in [docs/nvn/DEBUG-2.md](docs/nvn/DEBUG-2.md), entry #93). Crash
-  reports now end with the last files the game opened, to find the missing one.
-- **Ultrawide:** HUD not anchored to the screen edges, menu backdrops leave side bands, restart after resizing.
-- **Above 60 fps:** the game steps once per frame, so a faster vsync speeds the game up; no real unlock yet.
-- **Linux:** SDL3 was built without Wayland, so the window goes through XWayland on a Wayland desktop.
+- **Native execution (the loader).** The APK reads `main` and `sdk` from your game file's ExeFS, maps and links them
+  as the Switch's loader would, and runs them on the phone's CPU (`runtime/src/nce/`). The few instructions that cannot
+  run on Android as they are get patched into small stubs: system calls (`svc`), the thread-pointer registers, and the
+  system counter. Calls into Switch system libraries go to the runtime's implementations.
+- **The game file, read in place.** The NSP/XCI is opened with your keys and the game's files are decrypted on the fly
+  as the game reads them (`runtime/src/game_image.cpp`).
+- **Shaders** are translated once, on the phone, from the game's Maxwell shaders to SPIR-V with
+  [Ryujinx](https://github.com/Ryubing/Ryujinx)'s shader translator (MIT), compiled to a native Android library with
+  .NET NativeAOT (`libspirvharness.so`).
+- **The runtime** is the Switch runtime of
+  [Super Mario Bros. Wonder Recomp](https://github.com/BelmanteGu/SuperMarioWonderRecomp) (SwitchGamesRecomp, MIT,
+  by BelmanteGu / Projeto Belmante), shared with the [Persona 5 Royal port](https://github.com/Brandon04Gonzalez/p5r-android).
+  This port adds P4AU's needs (`games/p4au/`): hwopus (libopus), the SDK 12 audio renderer, fighting-game controls,
+  a second local player, frame skipping, and the native loader.
 
-### Ultrawide, frame rate and integrated GPUs
+The project started as a static recompilation (the game's code translated to C++). That build is still there for
+debugging on Windows (`games/p4au/tools/build_pc.cmd`), but it needs your own recompiled game code, so it is private by
+nature. The Android APK is the native build (`NX_NCE`), which holds no game code and can be shared.
 
-Studied, implemented and measured on 2026-10-17 on the Linux port (summary and numbers in
-[docs/nvn/studies/summary-1710.md](docs/nvn/studies/summary-1710.md); the three studies:
-[ultrawide](docs/nvn/studies/ultrawide-1710.md), [fps unlock](docs/nvn/studies/fps-unlock-1710.md),
-[Intel iGPU](docs/nvn/studies/intel-igpu-1710.md)).
+## Building the APK
 
-- **Ultrawide (`NX_ULTRAWIDE=1`):** the render targets are widened to the window's shape and the game's cameras get
-  the wider aspect, so 21:9 and 32:9 show more of the level instead of stretching or bars. Off by default and free
-  when off.
-- **Frame rate:** `NX_FPS_CAP=30` holds the game's own 30 fps mode (flat 30.0 on both GPUs, less CPU). Running
-  above 60 is not possible by a switch: the simulation advances once per frame (`NX_DISPLAY_HZ` exists only as an
-  experiment and speeds the game up).
-- **Integrated GPUs: a steady 60 fps on an Intel UHD (ADL-S GT0.5) at 720p, with a correct picture.**
-  - The black characters and terrain on Intel (Mesa ANV) came from vertex-shader outputs the game leaves unwritten
-    on some paths: Maxwell reads them as zero, ANV as garbage (NaN in the lighting). They now start at zero
-    (`NX_ZERO_VS_OUTPUTS=0` turns it off; not on Apple).
-  - On Linux the runtime holds power-profiles-daemon's *performance* profile while the game runs on an integrated
-    GPU (as GameMode does; the user's profile comes back afterwards; `NX_POWER_PROFILE=0` never asks, `=1` asks on
-    any GPU). Under the power-saver profile the CPU replay of a frame took 12 ms; under performance, 5 ms.
-  - Submits are pipelined by default on integrated GPUs (`NX_PIPELINED=0` to turn off) and bound buffers are no
-    longer padded where the GPU bound-checks (`NX_PAD_BUFFERS=1` to restore).
-  - `tools/wonder_linux.sh intel` (720p, pipelined, performance profile, no fps cap) and `lightest` (+ FSR).
-  - Docked 1080p stays GPU-bound on that iGPU (about 39 fps). Details: [docs/nvn/studies/intel-60fps-1710.md](docs/nvn/studies/intel-60fps-1710.md).
-
-Flower Kingdom intro, unattended runs, uncapped (median fps in gameplay; Intel UHD ADL-S GT0.5 and RTX 3050 Laptop,
-same machine):
-
-| Configuration | Intel | RTX 3050 |
-|---|---|---|
-| before the 2026-10-17 work (docked 1080p) | 26.4 (picture wrong) | 29.5 |
-| handheld 720p before | 35.9 (picture wrong) | - |
-| **now: handheld 720p, defaults** | **60.0** (14 of 14 windows at 58+, picture right) | 53.2 |
-| now: docked 1080p | 38.9 | 30.5 |
-| `NX_FPS_CAP=30` | 30.0 flat | 30.0 flat |
-| ultrawide 2560x1080, handheld 720p | **59.0** (14 of 14 windows at 58+) | 52.8 |
-
-Before the fix (top: Intel, characters and terrain black; bottom: RTX), and after it on the Intel:
-
-![Intel vs RTX before the fix](docs/media/wonder/44-intel-silhouettes-vs-rtx.jpg)
-![Intel after the fix](docs/media/wonder/45-intel-fixed-60fps.jpg)
-
-### Windows
-
-Wonder runs on Windows 10/11 with a Vulkan 1.3 GPU (tested on an NVIDIA RTX 3050 and on Intel). The port is
-described in [docs/nvn/WINDOWS-PORT.md](docs/nvn/WINDOWS-PORT.md) and [WINDOWS-PLAN.md](docs/nvn/WINDOWS-PLAN.md),
-the PC quality work in [docs/nvn/pc-quality/](docs/nvn/pc-quality/). `dev.ps1` sets up the build environment
-(Visual Studio Build Tools, clang, CMake, Ninja, Vulkan SDK) and `tools/pack_pc_wonder.py` packs your own data for
-the PC. The recompile, shader and build steps are the same as in the macOS section below.
-
-### Linux
-
-The complete step-by-step guide (Linux, macOS, Windows, Android, with the expected checks and troubleshooting) is
-[docs/BUILD.md](docs/BUILD.md), based on the community guide by ouni666 (#8).
-
-Wonder runs on Linux x86-64 with a Vulkan 1.3 GPU (tested on Ubuntu 26.04, NVIDIA RTX 3050 laptop GPU, driver 595).
-Nothing needs root: every tool can live under `private/third_party/`.
-
-Requirements: clang, CMake, Ninja, the Vulkan loader, SDL 3 (the distribution's, or built from source with
-`-DCMAKE_INSTALL_PREFIX=private/third_party/sdl3`), the Vulkan headers 1.4.357 (`runtime/src/vk_gen.h` was
-generated from them; older distribution headers miss some types), .NET SDK 10 (tarball) and a Python 3 venv with
-`capstone lz4 zstandard fonttools`.
-
-1. **Import** the XCI with the on-device importer built for the host; `--exefs` also keeps the raw NSOs the
-   recompiler reads:
-   ```sh
-   cmake -S android/wonder/importer -B private/build/importer -G Ninja && ninja -C private/build/importer
-   private/build/importer/nximport --exefs --out private/wonder prod.keys title.keys MarioWonder.xci
-   ```
-2. **Recompile** and **translate the shaders** as in the macOS section (steps 2 and 3).
-3. **Button font:** `cp android/wonder/assets/fonts/shared_5.ttf private/wonder/fonts/`.
-4. **Build:**
-   ```sh
-   T=$PWD/private/third_party
-   CC=clang CXX=clang++ cmake -S . -B private/wonder/build -G Ninja -DNX_GAME=wonder -DCMAKE_BUILD_TYPE=Release \
-       -DCMAKE_PREFIX_PATH=$T/sdl3 -DNX_VULKAN_INCLUDE=$T/Vulkan-Headers-1.4.357/include
-   ninja -C private/wonder/build -j6 wonder
-   ```
-5. **Run:** `tools/wonder_linux.sh [quality|balanced|performance]` (uses the discrete GPU; F11 or Alt+Enter for
-   full screen).
-
-### Android
-
-The same recompiled code runs on arm64 phones with a native Vulkan 1.3 driver. On a Galaxy S23 (Snapdragon 8 Gen 2)
-the game runs with drawn touch controls, a present pass rotated to the display (16:9 with bars), a pipeline cache on
-disk and ADPF performance hints. Progress, the test list and the performance phases are in
-[docs/nvn/ANDROID-PORT.md](docs/nvn/ANDROID-PORT.md).
-
-Build and install (macOS or Linux, Android SDK with NDK 28.2):
-
-```sh
-private/venv/bin/python tools/pack_phone_wonder.py        # your data -> private/wonder/Wonder-data.zip (~4 GB)
-CMAKE_BUILD_PARALLEL_LEVEL=4 bash android/build_apk.sh --game wonder   # -> private/wonder/apk/wonder.apk
-bash tools/wonder_push_android.sh <adb serial>             # install + data to Internal storage + all-files access
-bash tools/wonder_run_android.sh <adb serial> 90 run1      # start, wait, save the log, pull frame dumps
+The same toolchain as the [P5R port](https://github.com/Brandon04Gonzalez/p5r-android#building-the-apk), plus the
+libopus 1.5.2 source in `private\third_party\opus-1.5.2`, then:
+```powershell
+curl.exe -L -o private\third_party\opus-1.5.2.tar.gz https://downloads.xiph.org/releases/opus/opus-1.5.2.tar.gz
+tar -xzf private\third_party\opus-1.5.2.tar.gz -C private\third_party
+games\p4au\tools\build_android.cmd -Nce           # -> private\p4au\apk_nce\p4au.apk; -Install installs it with adb
 ```
 
-Without a computer, copy the APK and the zip to the phone:
-1. Extract the zip into Internal storage. You get `Super Mario Bros. Wonder/`.
-2. Install the APK.
-3. Allow "all files access" when the app asks.
+## En español
 
-The APK contains recompiled game code built from your own dump. It is for you only: never share or publish it.
+Una app de Android que ejecuta **tu propia copia** de Persona 4 Arena Ultimax (Switch) de forma nativa en un móvil o
+tablet arm64. **No hace falta PC.** El APK no lleva nada del juego: lo lee de tu propio archivo.
 
-The APK has its own launcher (`android/wonder/`, see [docs/WONDER-ANDROID-OPTIONS.md](docs/WONDER-ANDROID-OPTIONS.md)): it imports
-the game on the phone from a folder with your `prod.keys` and your XCI/NSP, has the options screen and the touch layout editor.
-`LAUNCHER_ONLY=1 bash android/build_apk.sh --game wonder` builds it without the game library (the UI and the import work, Play does not).
+> [!NOTE]
+> **Muy pronto saldrá una opción para jugar en línea.** Esta versión es sin conexión: Arcade, Historia y Versus (también
+> dos jugadores en un mismo dispositivo con dos mandos). Mientras tanto, recomendamos que
+> vayan entrenando.
 
-#### Launcher, fixes and optimizations (Galaxy S23)
+- **Discord** (canales en español e inglés), para novedades, ayuda y pruebas: https://discord.gg/rMgRneBTCe
+- **Apoyar al desarrollador (opcional):** [GitHub Sponsors](https://github.com/sponsors/Brandon04Gonzalez). Los ports
+  son gratis y se hacen para preservación. Donar es totalmente voluntario y ayuda con los gastos que conlleva hacerlos
+  (dispositivos de prueba, equipo, servidores). No hay nada de pago.
 
-- **Launcher in the Wonder style:** animated background, Lucide icons, and an options screen with a reader behind every row
-  (no dead switches). Import the game on the phone from your own `prod.keys` + **XCI or NSP**; the APK carries no game data, keys or firmware.
-- **Fixes:**
-  - **Button icons showed as `??`.** The launcher now installs a stand-in button font (drawn by `tools/fonts/make_button_font.py`
-    on Fredoka, OFL, 56 KB). The title shows "Press (L) + (R) to Start" with the icons.
-  - **Closing at once on a POCO F6 (Android 15):** an address range the runtime reserved was already taken on that phone and the
-    reservation was fatal; it is now a warning.
-  - **Docked mode** (`NX_HANDHELD=0`) really renders 1080p; **mute** and the touch layout keys now work.
-- **FPS limit:** 60 keeps the game's own rule (60 fps when the phone keeps up, its own 30 fps mode when heavy); 30 holds the 30 fps
-  cadence (steady 33 ms frame, cooler). Console mode: Handheld (720p) or Docked (1080p).
-- **Optimization that worked (S23, one scene, one run each):** the "Flower Kingdom" fountain scene ran at **24 fps** with the
-  default synchronous submits and at **60 fps** with `NX_PIPELINED=2` ("GPU submits in flight = 2" in Settings > Performance):
-  replay 20.6 to 9.7 ms and GPU wait 12.7 to 1.3 ms per frame, because the CPU replay and the GPU no longer run in series.
-  Since 2026-10-17 it is **on by default** on integrated GPUs, phones included ("Automatic"); it once drew exploded meshes
-  in some courses, so "Synchronous" in the same setting is the way back if the geometry breaks.
-  The 30 fps limit and the docked mode have not been timed on a phone yet.
-- **New in the launcher (2026-10-17):** Image > **Widescreen** (fills a 19.5:9 / 20:9 screen with a wider view instead of
-  side bars), Performance > **Screen rate** 90/120 Hz (experimental: the game runs faster), Advanced > **Buffer padding**
-  (the safe mode if HUD text or characters glitch). Run on a Galaxy S23 on 2026-10-18 with widescreen on: 60 fps in the
-  menus and much of the course, with drops to 30 when Android swaps the game out (see Open).
-- **Updating from an APK built on another computer:** each build machine signs with its own debug key, so Android
-  refuses the update (`INSTALL_FAILED_UPDATE_INCOMPATIBLE`). Uninstall first; that deletes the imported data in the
-  app folder (import again; keep a copy of `user/save` first).
-- **Memory log (2026-10-18):** every 30 s nx.log shows `memory: anon, file, swapped (VmSwap) | MemAvailable, SwapFree`;
-  `NX_UPLOAD_RING_MB=<16..1024>` sets the upload ring (64 MB by default on Android since 2026-10-18, 256 elsewhere).
+1. Copia al móvil tu `.nsp` (o `.xci`) de Persona 4 Arena Ultimax (versión 1.0.0, probado con la de EE. UU.,
+   `010075A016A3A000`) y tu `prod.keys` (por ejemplo a Descargas).
+2. Instala **P4AU** desde [Releases](../../releases).
+3. Ábrelo y permite el acceso a todos los archivos.
+4. **Archivo del juego (.nsp / .xci) → Elegir**: tu archivo. **Claves (prod.keys) → Elegir**: tu `prod.keys` (puedes
+   elegir `prod.keys` y `title.keys` juntos). La app guarda las claves en su almacenamiento privado; no se suben ni se
+   incluyen en el APK.
+5. Pulsa **Preparar y Jugar**: la primera vez traduce los shaders del juego en el teléfono (unos minutos, una sola
+   vez). Después el botón dice **Jugar**.
 
-### Users and saves, pipelines (2026-10-18)
+No borres ni muevas el archivo del juego: cada vez que juegas se lee de ahí. En **Saltar cuadros si va lento** deja
+**Automático**: en móviles que no llegan a 60 imágenes por segundo en las peleas, el juego dibuja una de cada dos para
+que la pelea vaya a su velocidad normal. Si algo falla, cuéntalo en Discord o en [Issues](../../issues) con tu modelo
+de móvil y el registro (**Exportar registros**). No se proporcionan juegos ni claves.
 
-- **Several users, one save each (fixed).** Wonder keeps one save per Switch user; the runtime had one fixed user, so
-  "Add New User" did nothing and no second save could exist. Now the users live in `<data root>/users.txt`
-  (`<uid> <nickname>` per line, up to 8; the first one keeps the old uid, so existing saves load unchanged), "Add New
-  User" answers the system's account applet (playerSelect, UserCreator) with a new user ("Player 2", ...), and each
-  user has its own save folder (`user/save` for the first, `user/save_<uid>` for the others). `NX_USER=<n>` picks
-  the user to boot with; rename one by editing `users.txt`. Checked on Linux: two users listed, the second one plays
-  its own new game, the first save byte for byte unchanged. Details: [docs/nvn/DEBUG-2.md](docs/nvn/DEBUG-2.md) #94.
-- **Pipelines off the render thread.** The pipelines a session builds are remembered (`pipelines_*.keys` next to the
-  cache) and compiled on 2 worker threads at the next start, as the game loads their shaders; pipeline keys ignore
-  state Vulkan does not read (about 18% fewer pipelines). On the Intel, a warm second run built 44 pipelines on the
-  render thread instead of 255 (0.7 ms instead of 8.7). On the S23 a 7 minute session had built 2,167 pipelines in
-  17.7 s on the render thread; the effect there is expected, not measured.
-  Details: [docs/nvn/android-perf/PIPELINES-1810.md](docs/nvn/android-perf/PIPELINES-1810.md).
-- Measurements, recommended settings, what has and has not run on a device: [docs/WONDER-ANDROID-OPTIONS.md](docs/WONDER-ANDROID-OPTIONS.md).
+## Credits and license
 
-Touch controls:
-- **Right side:** A (jump, big), B, Y (dash), X.
-- **Top:** ZR, R, L, + and -.
-- **Left half:** a stick that appears where your thumb lands; pushed all the way, it also dashes.
+- Runtime: [SwitchGamesRecomp / Super Mario Bros. Wonder Recomp](https://github.com/BelmanteGu/SuperMarioWonderRecomp)
+  by BelmanteGu (Projeto Belmante), MIT.
+- Shader translation: Ryujinx's shader translator (Ryubing), MIT, built into the APK as a native library.
+- Opus decoding: [libopus](https://opus-codec.org/) (BSD-3-Clause). Custom GPU drivers:
+  [libadrenotools](https://github.com/bylaws/libadrenotools) (BSD-2-Clause).
+- The native-execution idea is the one Switch emulators call NCE; this implementation is written for this runtime.
+- Like the upstream project, this port was written with a lot of AI assistance, directed and tested by a human.
 
-A Bluetooth or USB controller works too, and the touch controls hide while it is in use.
-
-### Build and run (macOS, Apple Silicon)
-
-Requirements: Xcode command line tools, CMake, Ninja, Homebrew `sdl3` + `vulkan-headers` + `vulkan-loader` + `molten-vk`, Python 3 venv
-in `private/venv`.
-
-1. **Dump.** Dump your own cartridge (nxdumptool) and keys (Lockpick_RCM). Extract to `private/wonder/exefs` and
-   `private/wonder/romfs` with `nstool`.
-2. **Recompile the CPU code.** This takes about 6 minutes and 2.4 GB of memory for `main`:
-   ```sh
-   private/venv/bin/python -m recomp private/wonder/exefs/main private/wonder/gen/main --name main --base 0x4000000000
-   private/venv/bin/python -m recomp private/wonder/exefs/sdk  private/wonder/gen/sdk  --name sdk  --base 0x4010000000
-   ```
-3. **Translate the shaders.** Extract the shader containers with `tools/maxwell/containers.py`, then translate them
-   with the harness in `tools/maxwell/spirv_harness`. This writes `private/wonder/spirv/<hash>.spv`. See
-   [docs/nvn/TRANSLATOR.md](docs/nvn/TRANSLATOR.md).
-4. **Build the button font.** It is local only and never committed:
-   ```sh
-   private/venv/bin/python tools/fonts/make_button_font.py
-   ```
-5. **Build.** The first build takes about 15 minutes:
-   ```sh
-   cmake -S . -B private/wonder/build -G Ninja -DNX_GAME=wonder -DCMAKE_BUILD_TYPE=Release
-   ninja -C private/wonder/build -j6 wonder
-   ```
-6. **Run:**
-   ```sh
-   NX_LOG=private/wonder/nx.log private/wonder/build/wonder
-   ```
-   It plays with a gamepad (SDL) or the keyboard.
-
-Useful switches:
-
-| Switch | What it does |
-|---|---|
-| `NX_MEM_LIMIT_GB=<n>` | memory guard, ends the process past this footprint (default 8) |
-| `NX_LANGUAGE=<code>` | the game's language, as the console spells it: `es`, `es-419`, `en-US`, `en-GB`, `fr`, `fr-CA`, `de`, `it`, `nl`, `pt`, `pt-BR`, `ru`, `ja`, `ko`, `zh-Hans`, `zh-Hant` (`es-ES` and other ISO names are accepted as aliases). Falls back to `<data root>/language.txt`, else `en-US` |
-| `NX_HEADLESS=1` | no window, for unattended test runs |
-| `NX_MUTE=1` | no sound |
-| `NX_HANDHELD=1` | handheld mode, 720p |
-| `NX_PIPELINED=0` | waits for every submit, as before 60 fps (diagnosis); integrated GPUs pipeline by default |
-| `NX_ULTRAWIDE=1` | ultrawide: a wider view to the window's shape (`=2560x1080` or `=21:9` to force one) |
-| `NX_FPS_CAP=30` | the game's own 30 fps mode, always (steady, lighter) |
-| `NX_PAD_BUFFERS=1` | pads bound buffers again (if HUD text or characters glitch on a GPU) |
-| `NX_DISPLAY_HZ=<hz>` | experimental: vsync at another rate; the game runs faster or slower, not smoother |
-| `NX_ZERO_VS_OUTPUTS=0` | keeps unwritten vertex outputs undefined (the fix for black characters on Intel is on by default, not on Apple) |
-| `NX_POWER_PROFILE=0/1` | Linux: never / always hold the performance power profile while playing (default: on integrated GPUs) |
-| `NX_USER=<n>` | boot as the n-th user of `<data root>/users.txt` (users are added with "Add New User") |
-| `NX_PIPE_THREADS=<n>` / `NX_PIPE_PREWARM=0` | pipeline compile workers (2; 0 = all on the render thread) / no prewarm from the last session's keys |
-
-Every debug switch (draw traces, snapshots, bisecting toggles) is listed in [docs/nvn/SWITCHES.md](docs/nvn/SWITCHES.md).
-
-### How it works, and where it is written down
-
-| Document | What |
-|---|---|
-| [PROGRESS.md](PROGRESS.md) | living log, newest first, with screenshots |
-| [docs/NVN.md](docs/NVN.md) | the NVN → Vulkan plan: phases N0-N7, where to cut, ground rules |
-| [docs/nvn/WONDER.md](docs/nvn/WONDER.md) | facts about the game: modules, RomFS, recompilation numbers, the host GPU |
-| [docs/nvn/SHADERS.md](docs/nvn/SHADERS.md), [TRANSLATOR.md](docs/nvn/TRANSLATOR.md) | shader containers, and Maxwell → SPIR-V |
-| [docs/nvn/TILING.md](docs/nvn/TILING.md) | block-linear texture layouts |
-| [docs/nvn/DEBUG.md](docs/nvn/DEBUG.md), [DEBUG-2.md](docs/nvn/DEBUG-2.md) | every rendering bug found so far (67 entries): symptom, cause, fix, switch |
-| [docs/nvn/GLITCH-PLAN.md](docs/nvn/GLITCH-PLAN.md), [PERF-PLAN.md](docs/nvn/PERF-PLAN.md) | glitch and performance studies and plans |
-| [docs/nvn/ANDROID-PORT.md](docs/nvn/ANDROID-PORT.md) | study for the Android port: gaps, risks, milestones A0-A7 |
-
-Ground rules for this track:
-- only our own dumps, keys and firmware;
-- no leaked NVN headers: the API is reverse engineered from binaries;
-- no GPL code (Ryujinx, MIT, is used as a reference and for the offline shader translator);
-- Hades must not regress.
-
-
-## Repository layout
-
-| Path | What |
-|---|---|
-| `recomp/` | the AArch64 → C++ recompiler (Python) |
-| `runtime/` | shared runtime: kernel, IPC, `nn::*` HLE, memory, platform layers (Windows, macOS, Linux, Android) |
-| `runtime/src/nvn/` | NVN over Vulkan (Wonder) |
-| `games/<game>/` | per-game glue (entry, patches, mods) |
-| `tools/` | extraction, shader and font tools, packaging |
-| `android/` | Android project and build script |
-| `docs/` | findings, plans, debug history, screenshots (`docs/media/`) |
-
-## Credits
-
-- **Linux port** - [BelmanteGu](https://github.com/BelmanteGu) (Projeto Belmante), 2026-10-17.
-- **Build guide** (`docs/BUILD.md`) - based on the community guide by [ouni666](https://github.com/ouni666),
-  [#8](https://github.com/BelmanteGu/SuperMarioWonderRecomp/issues/8).
-- **Language selection** (`NX_LANGUAGE`, the `set` service, `Language.bat`) - [LokiCode404](https://github.com/LokiCode404),
-  [PR #4](https://github.com/BelmanteGu/SuperMarioWonderRecomp/pull/4).
-- **Ryujinx** shader translator (MIT) - used offline to translate the Maxwell shaders to SPIR-V; also a reference for
-  the Switch GPU. Ryujinx and yuzu were studied as references only; no GPL code is used.
-- **Hephaistos** by Nicolas Busseneau (MIT, copy of the license in
-  `games/hades/mods/hephaistos/LICENSE`) - the Lua widescreen mod served to Hades by the shared runtime. It is not
-  used by Wonder.
-- [SDL 3](https://libsdl.org) (zlib), [MoltenVK](https://github.com/KhronosGroup/MoltenVK) (Apache 2.0) and the
-  Vulkan headers and loader (Apache 2.0 / MIT).
-- [envytools](https://github.com/envytools/envytools), [Switchbrew](https://switchbrew.org) and the Switch homebrew
-  community's documentation.
-
-## Legal
-
-This is a fan project. It is not affiliated with, endorsed by or sponsored by Nintendo. *Super Mario Bros. Wonder* and
-*Nintendo Switch* are trademarks of Nintendo. No game files, game code, assets, keys, firmware or fonts are included,
-in this repository or in any release. You must provide your own legally obtained copy of the game. The APK or data zip
-you build from your own dump contains Nintendo's code and data: it is for you only, never share or publish it.
-The API (NVN) is reverse engineered from binaries; no leaked NVN headers are used.
-
-## License
-
-The code in this repository is open source under the [MIT License](LICENSE). Third-party components keep their own
-licenses (see Credits). The license covers this project's code only and grants nothing for Nintendo's game.
-See [CONTRIBUTING.md](CONTRIBUTING.md) to report bugs or contribute.
+MIT License, see [LICENSE](LICENSE). Third-party notices: [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
