@@ -21,14 +21,62 @@ void reserve(uint64_t addr, uint64_t size, const char* what) {
               (unsigned long long)size);
 }
 
+#if defined(__ANDROID__)
+void reserve_flex(uint64_t& base, uint64_t size, const char* what, uint64_t step = 0x100000000ull) {
+    if (plat::reserve(base, size)) return;
+    for (uint64_t cand = 0x1000000000ull; cand + size <= 0x7000000000ull; cand += step) {
+        if (cand < kModuleBase + 0x40000000ull && cand + size > kModuleBase - 0x10000000ull) continue;
+        if (plat::reserve(cand, size)) {
+            log("memory: %s range %llx (+%llx) is in use on this device: using %llx", what,
+                (unsigned long long)base, (unsigned long long)size, (unsigned long long)cand);
+            base = cand;
+            return;
+        }
+    }
+    fatal("cannot reserve %s at %llx (+%llx): the range is in use", what, (unsigned long long)base,
+          (unsigned long long)size);
+}
+#endif
+
 }  // namespace
 
 void memory_init() {
+#if defined(__ANDROID__)
+    if (!plat::reserve(kModuleBase, 0x40000000ull) && !plat::reserve(kModuleBase, 0x20000000ull)) {
+        reserve_flex(kModuleBase, 0x20000000ull, "modules", 0x40000000ull);
+    }
+    reserve_flex(kHeapBase, kHeapMax, "heap");
+    if (!plat::reserve(kAliasBase, kAliasSize)) {
+        // If a contiguous 64 GiB range is fragmented by ASLR on this kernel, try 16 GiB (4x the heap) or 8 GiB.
+        bool ok = false;
+        for (uint64_t sz : {kAliasSize, uint64_t(0x400000000ull), uint64_t(0x200000000ull)}) {
+            for (uint64_t cand = 0x1000000000ull; cand + sz <= 0x7000000000ull; cand += 0x100000000ull) {
+                if (cand < kModuleBase + 0x40000000ull && cand + sz > kModuleBase - 0x10000000ull) continue;
+                if (plat::reserve(cand, sz)) {
+                    log("memory: alias range %llx (+%llx) is in use on this device: using %llx (+%llx)",
+                        (unsigned long long)kAliasBase, (unsigned long long)kAliasSize,
+                        (unsigned long long)cand, (unsigned long long)sz);
+                    kAliasBase = cand;
+                    kAliasSize = sz;
+                    ok = true;
+                    break;
+                }
+            }
+            if (ok) break;
+        }
+        if (!ok) fatal("cannot reserve alias at %llx (+%llx): the range is in use",
+                       (unsigned long long)kAliasBase, (unsigned long long)kAliasSize);
+    }
+    reserve_flex(kStackBase, kStackSize, "stack");
+    reserve_flex(kKernelBase, kKernelSize, "kernel");
+    g_kernel_next = kKernelBase;
+#else
     reserve(kModuleBase, 0x20000000, "modules");
     reserve(kHeapBase, kHeapMax, "heap");
     reserve(kAliasBase, kAliasSize, "alias");
     reserve(kStackBase, kStackSize, "stack");
     reserve(kKernelBase, kKernelSize, "kernel");
+#endif
     // The thunk range only names HLE functions: calls to it are dispatched by address (loader.cpp) and nothing is ever
     // mapped, read or run there, so a host mapping already in it is harmless. On a POCO F6 (Android 15, Adreno 735,
     // Xiaomi 24069PC21G) something sat at 0x6F00000000 and this was fatal: the app closed as soon as the game started.
@@ -47,6 +95,13 @@ void memory_init() {
         kThunkBase = kThunkFallback[i];
         thunks_ok = true;
     }
+    for (uint64_t cand = 0x1000000000ull; !thunks_ok && cand < 0x7000000000ull; cand += 0x80000000ull) {
+        if (!plat::reserve(cand, kThunkSize + 0x10000)) continue;
+        log("memory: the HLE range %llx is in use on this device: using %llx", (unsigned long long)kThunkBase,
+            (unsigned long long)cand);
+        kThunkBase = cand;
+        thunks_ok = true;
+    }
 #endif
     if (!thunks_ok)
         fatal("cannot reserve the HLE range at %llx: the range is in use on this device", (unsigned long long)kThunkBase);
@@ -57,11 +112,9 @@ void memory_init() {
 #endif
     // Only the alias and stack regions are free for the guest to pick addresses in (nn::os maps shared memory,
     // transfer memory and thread stacks at random free addresses); everything else is reported inaccessible.
-    uint64_t end = kAddressSpaceBase + kAddressSpaceSize;
-    vm_set(kAddressSpaceBase, kAliasBase - kAddressSpaceBase, kMemInaccessible, 0);
-    if (kAliasBase + kAliasSize < kStackBase)  // Android: the alias sits below the modules (runtime.h)
-        vm_set(kAliasBase + kAliasSize, kStackBase - (kAliasBase + kAliasSize), kMemInaccessible, 0);
-    vm_set(kStackBase + kStackSize, end - (kStackBase + kStackSize), kMemInaccessible, 0);
+    vm_set(kAddressSpaceBase, kAddressSpaceSize, kMemInaccessible, 0);
+    vm_set(kAliasBase, kAliasSize, kMemFree, 0);
+    vm_set(kStackBase, kStackSize, kMemFree, 0);
 }
 
 bool commit(uint64_t addr, uint64_t size) {

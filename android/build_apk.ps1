@@ -13,6 +13,8 @@ $sdk = if ($env:ANDROID_HOME) { $env:ANDROID_HOME } elseif (Test-Path "C:\Androi
 # apksigner and d8 need a JDK: JAVA_HOME, else Android Studio's own.
 if (-not $env:JAVA_HOME -and (Test-Path "C:\Program Files\Android\Android Studio\jbr")) { $env:JAVA_HOME = "C:\Program Files\Android\Android Studio\jbr" }
 if ($env:JAVA_HOME) { $env:PATH = "$env:JAVA_HOME\bin;$env:PATH" }
+$cmakeDir = Get-ChildItem "$sdk\cmake" -Directory -ErrorAction SilentlyContinue | Select-Object -Last 1
+if ($cmakeDir) { $env:PATH = "$($cmakeDir.FullName)\bin;$env:PATH" }
 $ndk = "$sdk\ndk\28.2.13676358"
 $bt = "$sdk\build-tools\35.0.0"
 $jar = "$sdk\platforms\android-35\android.jar"
@@ -101,7 +103,7 @@ if (Test-Path $java) {
     if ($LASTEXITCODE) { throw "javac failed" }
     $classes = @((Get-ChildItem "$out\classes" -Recurse -Filter *.class).FullName)
     $env:JAVA_HOME = $jdk
-    & "$bt\d8.bat" --release --min-api 30 --lib $jar --output "$out\dex" @classes
+    & "$bt\d8.bat" --release --min-api 29 --lib $jar --output "$out\dex" @classes
     if ($LASTEXITCODE) { throw "d8 failed" }
     [System.IO.Compression.ZipFileExtensions]::CreateEntryFromFile($apk, "$out\dex\classes.dex", "classes.dex", "Optimal") | Out-Null
 }

@@ -72,8 +72,10 @@ struct File {
     FILE* f;
     std::string path;
     const nxi::GameImage::Entry* entry = nullptr;  // a RomFS file of the game image (f is null)
+    const std::string* virt = nullptr;             // an in-memory virtual file (add_virtual_file; f is null)
     File(FILE* file, std::string p) : f(file), path(std::move(p)) {}
     File(const nxi::GameImage::Entry* e, std::string p) : f(nullptr), path(std::move(p)), entry(e) {}
+    File(const std::string* v, std::string p) : f(nullptr), path(std::move(p)), virt(v) {}
     File(const File&) = delete;  // owns the FILE: one instance only
     File& operator=(const File&) = delete;
     ~File() {
@@ -121,14 +123,23 @@ std::string utf8(const fs::path& p) {
 
 std::string cstr(uint64_t p) { return p ? std::string(reinterpret_cast<const char*>(p)) : std::string(); }
 
+// Mounts served from the game image (the RomFS read in place). They keep a host folder in g_mounts too, only so the
+// runtime's virtual files (add_virtual_file) still match their paths.
+std::map<std::string, bool> g_image_mounts;
+fs::path mod_file(const std::string& rel);
+
 // "mount:/a/b" -> host path; empty when the mount is unknown.
 fs::path resolve(const std::string& guest) {
     auto colon = guest.find(':');
     if (colon == std::string::npos) return {};
-    auto it = g_mounts.find(guest.substr(0, colon));
+    std::string m = guest.substr(0, colon);
+    auto it = g_mounts.find(m);
     if (it == g_mounts.end()) return {};
     std::string rest = guest.substr(colon + 1);
     while (!rest.empty() && (rest[0] == '/' || rest[0] == '\\')) rest.erase(0, 1);
+    if (m == "rom" || g_image_mounts.count(m)) {
+        if (fs::path mp = mod_file(rest); !mp.empty()) return mp;
+    }
     return it->second / fs::u8path(rest);
 }
 
@@ -137,10 +148,6 @@ void mount(const std::string& name, const fs::path& p) {
     g_mounts[name] = p;
     log("fs: mounted %s: -> %s", name.c_str(), p.string().c_str());
 }
-
-// Mounts served from the game image (the RomFS read in place). They keep a host folder in g_mounts too, only so the
-// runtime's virtual files (add_virtual_file) still match their paths.
-std::map<std::string, bool> g_image_mounts;
 
 // The RomFS path of `guest` when its mount is served from the game image.
 bool image_rel(const std::string& guest, std::string& rel) {
@@ -426,16 +433,9 @@ void OpenFile(CPU& c) {  // (FileHandle* out, path, int mode: 1 read, 2 write, 4
     std::string guest = cstr(c.x[1]);
     fs::path p = resolve(guest);
     int mode = int(c.x[2]);
-    if (const std::string* v = find_virtual(p)) {  // served from memory, through a temporary file
-        FILE* f = std::tmpfile();
-        if (!f) {
-            c.x[0] = kPathNotFound;
-            return;
-        }
-        std::fwrite(v->data(), 1, v->size(), f);
-        std::fflush(f);
+    if (const std::string* v = find_virtual(p)) {  // served directly from memory (no std::tmpfile on Android)
         uint64_t h = g_next++;
-        g_files[h] = std::make_shared<File>(f, guest);
+        g_files[h] = std::make_shared<File>(v, guest);
         st<uint64_t>(c.x[0], h);
         note_open("OpenFile", guest, "virtual");
         if (trace_fs()) log("fs: OpenFile(%s) -> virtual, %zu bytes", guest.c_str(), v->size());
@@ -508,6 +508,11 @@ void GetFileSize(CPU& c) {  // (s64* out, FileHandle)
         c.x[0] = kTargetNotFound;
         return;
     }
+    if (file->virt) {
+        st<int64_t>(c.x[0], int64_t(file->virt->size()));
+        c.x[0] = kOk;
+        return;
+    }
     if (file->entry) {
         st<int64_t>(c.x[0], int64_t(file->entry->size));
         c.x[0] = kOk;
@@ -524,6 +529,13 @@ void GetFileSize(CPU& c) {  // (s64* out, FileHandle)
 }
 
 uint64_t read_at(const File& file, int64_t off, uint64_t buf, uint64_t size) {
+    if (file.virt) {
+        if (off < 0 || uint64_t(off) >= file.virt->size()) return 0;
+        uint64_t avail = file.virt->size() - uint64_t(off);
+        uint64_t n = std::min(size, avail);
+        if (n) std::memcpy(reinterpret_cast<void*>(buf), file.virt->data() + off, size_t(n));
+        return n;
+    }
     uint64_t t0 = plat::monotonic_ns();
     uint64_t n = file.entry ? game_image()->read(*file.entry, uint64_t(off), reinterpret_cast<void*>(buf), size)
                             : plat::read_at(file.f, off, reinterpret_cast<void*>(buf), size);

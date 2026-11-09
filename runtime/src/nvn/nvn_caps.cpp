@@ -98,9 +98,9 @@ bool native_r11g11b10() {
     if (s >= 0) return s == 1;
 #if defined(__ANDROID__)
     if (!vk_physical()) return false;  // asked before the device exists: not decided yet
-    // Mali GPUs produce NaNs and green/purple flickering with B10G11R11_UFLOAT; keep RGBA16F
-    if (is_mali()) {
-        log("nvn/vk: Mali GPU detected: R11G11B10F kept as RGBA16F to prevent green/purple flickering and bloom overexposure");
+    // Mali and Xclipse GPUs produce NaNs and green/purple flickering with B10G11R11_UFLOAT; keep RGBA16F
+    if (is_mali() || is_xclipse()) {
+        log("nvn/vk: Mali/Xclipse GPU detected: R11G11B10F kept as RGBA16F to prevent green/purple flickering and bloom overexposure");
         state.store(0, std::memory_order_release);
         return false;
     }

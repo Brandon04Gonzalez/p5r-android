@@ -861,10 +861,14 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
     ds.stencilTestEnable = has_depth && key.depth.stencil_test && !std::getenv("NX_NO_STENCIL");
     VkStencilOpState* faces[2] = {&ds.front, &ds.back};
     for (int f = 0; f < 2; f++) {
-        faces[f]->failOp = vk_stencil_op(key.depth.stencil_fail[f]);
-        faces[f]->depthFailOp = vk_stencil_op(key.depth.depth_fail[f]);
-        faces[f]->passOp = vk_stencil_op(key.depth.depth_pass[f]);
-        faces[f]->compareOp = vk_compare(key.depth.stencil_func[f]);
+        // Negative viewport height flips triangle winding between NVN and Vulkan; when back-face stencil state is not
+        // explicitly configured (stencil_func[1] == 0), mirror the front-face stencil state to both faces so UI masks
+        // (dialogue boxes, options, Morgana tutorials) pass regardless of face winding.
+        int src = (key.depth.stencil_func[1] == 0) ? 0 : f;
+        faces[f]->failOp = vk_stencil_op(key.depth.stencil_fail[src]);
+        faces[f]->depthFailOp = vk_stencil_op(key.depth.depth_fail[src]);
+        faces[f]->passOp = vk_stencil_op(key.depth.depth_pass[src]);
+        faces[f]->compareOp = vk_compare(key.depth.stencil_func[src]);
         faces[f]->compareMask = faces[f]->writeMask = 0xFF;  // dynamic: SetStencilValueMask / SetStencilMask
     }
 

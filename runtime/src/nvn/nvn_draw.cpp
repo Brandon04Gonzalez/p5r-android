@@ -772,6 +772,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     if (g_bound.pipeline != pipeline) {
         p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
         g_bound.pipeline = pipeline, g_state_set++;
+        std::memset(g_bound.raster, 0xFF, sizeof g_bound.raster);
         if (gpu_profile_on()) gpu_profile_count(1);
     } else {
         g_state_kept++;

@@ -83,6 +83,18 @@ void fatal(const char* fmt, ...) {
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
     log("FATAL: %s", buf);
+#if defined(__ANDROID__)
+    // Ensure fatal startup errors are persisted to nx.log even in release builds (where kDiagnostics is false),
+    // because exit_process(1) restarts the Launcher in a new PID that cannot read the previous PID's logcat.
+    if (!g_log_file) {
+        std::string def = plat::data_root() + "/nx.log";
+        if (FILE* f = std::fopen(def.c_str(), "a")) {
+            std::fprintf(f, "FATAL: %s\n", buf);
+            std::fflush(f);
+            std::fclose(f);
+        }
+    }
+#endif
     plat::exit_process(1);
 }
 

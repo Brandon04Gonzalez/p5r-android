@@ -199,9 +199,17 @@ uint64_t touch_hit(float x, float y, float aspect) {
     const TouchButton* b = touch_buttons(n);
     uint64_t best = 0;
     float best_d = 1e9f;
+    constexpr uint64_t kDpadMask = kUp | kDown | kLeft | kRight;
+    uint64_t dpad_hits = 0;
     for (size_t k = 0; k < n; k++) {
         float d = std::hypot((x - b[k].x) * aspect, y - b[k].y) / b[k].r;
-        if (d < 1.35f && d < best_d) best = b[k].button, best_d = d;  // a little past the drawn edge still counts
+        if ((b[k].button & kDpadMask) && d < 1.45f) dpad_hits |= b[k].button;
+        if (d < 1.25f && d < best_d) best = b[k].button, best_d = d;  // a little past the drawn edge still counts
+    }
+    if ((best & kDpadMask) && dpad_hits) {
+        if ((dpad_hits & (kUp | kDown)) == (kUp | kDown)) dpad_hits &= (best & (kUp | kDown)) | kLeft | kRight;
+        if ((dpad_hits & (kLeft | kRight)) == (kLeft | kRight)) dpad_hits &= (best & (kLeft | kRight)) | kUp | kDown;
+        return dpad_hits;
     }
     return best;
 }

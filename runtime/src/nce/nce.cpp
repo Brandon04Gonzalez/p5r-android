@@ -718,7 +718,8 @@ uint64_t hook(uint64_t addr, HleFn fn) {
         return 0;
     }
     const uint32_t first = ld<uint32_t>(addr);
-    if (pc_relative(first)) {
+    const bool is_adrp = (first & 0x9F000000u) == 0x90000000u;
+    if (pc_relative(first) && !is_adrp) {
         log("nce: hook at %s: its first instruction %08x depends on its address", describe(addr).c_str(), first);
         return 0;
     }
@@ -736,7 +737,21 @@ uint64_t hook(uint64_t addr, HleFn fn) {
     const uint64_t from = r.cur;
     if (!protect(r.base, kRegionSize, PROT_READ | PROT_WRITE | PROT_EXEC))
         protect(r.base, kRegionSize, PROT_READ | PROT_WRITE);
-    const uint64_t original = r.emit(first);
+    uint32_t relocated_first = first;
+    if (is_adrp) {
+        const int64_t immlo = (first >> 29) & 3;
+        const int64_t immhi = int64_t(int32_t(first << 8)) >> 13;
+        const uint64_t target_page = (addr & ~0xFFFull) + (( (immhi << 2) | immlo ) << 12);
+        const int64_t new_pages = int64_t(target_page - (r.cur & ~0xFFFull)) >> 12;
+        if (new_pages < -(1 << 20) || new_pages >= (1 << 20)) {
+            log("nce: hook at %s: adrp out of range from stub", describe(addr).c_str());
+            return 0;
+        }
+        const uint32_t new_lo = uint32_t(new_pages & 3) << 29;
+        const uint32_t new_hi = uint32_t((new_pages >> 2) & 0x7FFFF) << 5;
+        relocated_first = (first & 0x9F00001Fu) | new_lo | new_hi;
+    }
+    const uint64_t original = r.emit(relocated_first);
     r.emit(b_to(r.cur, addr + 4));
     const uint64_t stub = r.emit(kPushX16X17);
     r.emit(movz_w16(index));

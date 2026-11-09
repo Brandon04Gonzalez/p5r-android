@@ -91,8 +91,9 @@ bool raster_command(const Cmd& c) {
             uint8_t* v = c.op == Cmd::SetStencilRef    ? s.stencil_ref
                          : c.op == Cmd::SetStencilMask ? s.stencil_write_mask
                                                        : s.stencil_compare_mask;
-            for (int f = 0; f < 2; f++)
-                if (c.mask >> f & 1) v[f] = uint8_t(c.n);
+            // Apply to both faces when front-only or back-only is set, because negative-height viewport flips face
+            // orientation relative to NVN when front_face is not explicitly re-specified.
+            if (c.mask & 3) v[0] = v[1] = uint8_t(c.n);
             return true;
         }
         case Cmd::SetPolygonOffsetClamp:
@@ -116,12 +117,7 @@ bool raster_command(const Cmd& c) {
 void raster_dynamic(VkCommandBuffer cb, bool slack) {
     const State& s = g_state;
     auto set = [&](PFN_vkCmdSetStencilReference fn, const uint8_t* v) {  // the three setters share the signature
-        if (v[0] == v[1]) {
-            fn(cb, VK_STENCIL_FACE_FRONT_AND_BACK, v[0]);
-        } else {
-            fn(cb, VK_STENCIL_FACE_FRONT_BIT, v[0]);
-            fn(cb, VK_STENCIL_FACE_BACK_BIT, v[1]);
-        }
+        fn(cb, VK_STENCIL_FACE_FRONT_AND_BACK, v[0]);
     };
     static const bool old = std::getenv("NX_OLD_STENCIL") != nullptr;  // bisecting: reference 0, masks 0xFF
     static const uint8_t zero[2] = {0, 0}, all[2] = {0xFF, 0xFF};

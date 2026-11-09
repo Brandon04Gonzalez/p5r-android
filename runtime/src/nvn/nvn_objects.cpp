@@ -331,7 +331,7 @@ void TextureInitialize(CPU& c) {  // NVNboolean (NVNtexture*, const NVNtextureBu
     // Wonder), so it only says "packaged", and the block height is the fit that matches every BNTX texture in the
     // game: the smallest power of two >= rows * 3 / 32, at most 16 GOBs.
     uint64_t layout = driver(c, "nvnTextureBuilderGetPackagedTextureLayout", {builder});
-    if (layout >= kModuleBase && layout < kKernelBase + kKernelSize) layout = ld<uint64_t>(layout);
+    if (layout >= kAddressSpaceBase && layout < kAddressSpaceBase + kAddressSpaceSize) layout = ld<uint64_t>(layout);
     if (layout) {
         uint32_t bw = 1, bh = 1, bytes = 0;
         format_block(t.format, bw, bh, bytes);

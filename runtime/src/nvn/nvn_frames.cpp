@@ -61,7 +61,7 @@ namespace {
 
 constexpr uint32_t kMaxSlots = 8;
 constexpr uint32_t kMaxParts = 8;  // command buffers per submit: chunks, the split, the last part
-constexpr uint64_t kFenceTimeout = 2'000'000'000ull;  // a frame's work takes milliseconds; longer is a hung shader
+constexpr uint64_t kFenceTimeout = 10'000'000'000ull;  // heavy scene/shader transitions on mobile GPUs can take >2 s
 
 struct Slot {
     VkCommandPool pool = VK_NULL_HANDLE;  // its own (the parts reset together), unless NX_CB_RESET=1
@@ -139,6 +139,9 @@ uint64_t g_ring_size = 0, g_head = 0, g_tail = 0, g_begin = 0;
 std::mutex g_grave_lock;
 std::vector<std::pair<uint64_t, std::shared_ptr<GpuImage>>> g_grave;
 std::vector<std::tuple<uint64_t, VkBuffer, VkDeviceMemory>> g_staging;  // staging_alloc's, freed like the grave's
+VkBuffer g_spill_buf = VK_NULL_HANDLE;
+uint8_t* g_spill_ptr = nullptr;
+uint64_t g_spill_at = 0, g_spill_cap = 0;
 
 // GPU-written images of destroyed textures, kept a few submits for a new texture over the same memory with the same
 // shape. Wonder re-creates ~180 NVNtexture objects per frame over the same render-target memory: each got a new
@@ -166,7 +169,11 @@ void wait_fences(const VkFence* fences, uint32_t n) {
     if (!n) return;
     uint64_t t0 = plat::monotonic_ns();
     VkResult r = p_vkWaitForFences(vk_device(), n, fences, VK_TRUE, kFenceTimeout);
-    if (r == VK_TIMEOUT) gpu_hung("a submit did not finish in 2 s");
+    if (r == VK_TIMEOUT) {
+        log("nvn/vk: submit took over 10 s; waiting one more interval before aborting");
+        r = p_vkWaitForFences(vk_device(), n, fences, VK_TRUE, kFenceTimeout);
+    }
+    if (r == VK_TIMEOUT) gpu_hung("a submit did not finish in 20 s");
     if (r == VK_ERROR_DEVICE_LOST) gpu_hung("vkWaitForFences");
     if (r != VK_SUCCESS) log("nvn/vk: vkWaitForFences failed (%d)", int(r));
     g_times.fence_ns += plat::monotonic_ns() - t0;
@@ -654,10 +661,54 @@ void frame_log(uint64_t frames) {
 }
 
 Upload frame_upload_alloc(uint64_t size, uint64_t align) {
+    auto try_spill = [&](uint64_t sz, uint64_t al) -> Upload {
+        uint64_t s_at = (g_spill_at + al - 1) & ~(al - 1);
+        if (!g_spill_buf || s_at + sz > g_spill_cap) {
+            uint64_t chunk = std::max<uint64_t>(16ull << 20, (sz + al + 0xFFFFFull) & ~0xFFFFFull);
+            VkDevice d = vk_device();
+            VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+            bi.size = chunk;
+            bi.usage = kUploadUsage;
+            VkBuffer buf = VK_NULL_HANDLE;
+            if (p_vkCreateBuffer(d, &bi, nullptr, &buf) != VK_SUCCESS) return {};
+            VkMemoryRequirements req{};
+            p_vkGetBufferMemoryRequirements(d, buf, &req);
+            VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+            ai.allocationSize = req.size;
+            ai.memoryTypeIndex =
+                memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+            VkDeviceMemory mem = VK_NULL_HANDLE;
+            void* p = nullptr;
+            if (p_vkAllocateMemory(d, &ai, nullptr, &mem) != VK_SUCCESS || p_vkBindBufferMemory(d, buf, mem, 0) ||
+                p_vkMapMemory(d, mem, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) {
+                p_vkDestroyBuffer(d, buf, nullptr);
+                if (mem) p_vkFreeMemory(d, mem, nullptr);
+                return {};
+            }
+            {
+                std::lock_guard lk(g_grave_lock);
+                g_staging.push_back({g_submitted + 1, buf, mem});
+            }
+            g_spill_buf = buf;
+            g_spill_ptr = static_cast<uint8_t*>(p);
+            g_spill_cap = chunk;
+            g_spill_at = 0;
+            s_at = 0;
+            g_staging_count++, g_staging_bytes += chunk;
+        }
+        g_spill_at = s_at + sz;
+        return {g_spill_buf, s_at, g_spill_ptr + s_at};
+    };
+
+    if (size > g_ring_size / 2) {
+        if (Upload u = try_spill(size, align); u.ptr) return u;
+    }
+
     uint64_t at = (g_head + align - 1) & ~(align - 1);
     if (at % g_ring_size + size > g_ring_size) at += g_ring_size - at % g_ring_size;  // never split: the next lap
     while (at + size > g_tail + g_ring_size)  // the oldest submits' data is still read: wait for them
         if (!retire_oldest()) {
+            if (Upload u = try_spill(size, align); u.ptr) return u;
             // The submit's parts queued so far may still read its data: wait for them first.
             if (g_current && g_current->waited < g_current->part) {
                 VkFence fences[kMaxParts];
@@ -665,7 +716,7 @@ Upload frame_upload_alloc(uint64_t size, uint64_t align) {
                 g_current->waited = g_current->part;
             }
             log("nvn/vk: upload buffer full (%llu bytes in this submit)", (unsigned long long)(at + size - g_begin));
-            g_tail = at + size - g_ring_size;  // this submit wraps over its own first data, as the synchronous path
+            g_tail = at;  // reclaim the whole ring instead of creeping byte-by-byte
             replay::dedup_reset();
             break;
         }
@@ -759,7 +810,14 @@ void free_retired_images(uint64_t completed) {
         std::lock_guard lk(g_grave_lock);
         auto done = std::stable_partition(g_staging.begin(), g_staging.end(),
                                           [&](const auto& e) { return std::get<0>(e) > completed; });
-        for (auto it = done; it != g_staging.end(); ++it) staging.push_back({std::get<1>(*it), std::get<2>(*it)});
+        for (auto it = done; it != g_staging.end(); ++it) {
+            if (std::get<1>(*it) == g_spill_buf) {
+                g_spill_buf = VK_NULL_HANDLE;
+                g_spill_ptr = nullptr;
+                g_spill_at = g_spill_cap = 0;
+            }
+            staging.push_back({std::get<1>(*it), std::get<2>(*it)});
+        }
         g_staging.erase(done, g_staging.end());
     }
     for (auto& [b, m] : staging) p_vkDestroyBuffer(vk_device(), b, nullptr), p_vkFreeMemory(vk_device(), m, nullptr);

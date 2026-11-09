@@ -72,7 +72,7 @@ struct Latch {
     uint64_t button, until_ns;
 };
 std::vector<Latch> g_latched;
-constexpr uint64_t kMinHoldNs = 150'000'000;
+constexpr uint64_t kMinHoldNs = 25'000'000;  // 25 ms (~1.5 frames at 60 fps) so rapid taps never coalesce into a hold
 
 void release_touch(const Touch& t, uint64_t now) {
     if (t.button && now < t.down_ns + kMinHoldNs) g_latched.push_back({t.button, t.down_ns + kMinHoldNs});
@@ -221,7 +221,11 @@ int32_t on_input(android_app*, AInputEvent* e) {
         g_h = float(ANativeWindow_getHeight(w));
     }
     if (kind == AMOTION_EVENT_ACTION_DOWN || kind == AMOTION_EVENT_ACTION_POINTER_DOWN) {
+        if (kind == AMOTION_EVENT_ACTION_DOWN) g_touches.clear();  // primary touch start guarantees no prior fingers remain
         float x = AMotionEvent_getX(e, index), y = AMotionEvent_getY(e, index);
+        int32_t id = AMotionEvent_getPointerId(e, index);
+        g_touches.erase(std::remove_if(g_touches.begin(), g_touches.end(), [&](const Touch& t) { return t.id == id; }),
+                        g_touches.end());
         g_gamepad = false;
         size_t drawn = 0;
         touch_buttons(drawn);
@@ -229,10 +233,10 @@ int32_t on_input(android_app*, AInputEvent* e) {
             uint64_t b = touch_hit(x / g_w, y / g_h, g_w / g_h);
             bool left = !b && touch_stick_side(x / g_w);
             Stick stick = b ? kNoStick : left ? kLeftStick : touch_right_stick() ? kRightStick : kNoStick;
-            if (b || stick) g_touches.push_back({AMotionEvent_getPointerId(e, index), x, y, x, y, stick, b, now});
+            if (b || stick) g_touches.push_back({id, x, y, x, y, stick, b, now});
         } else {
             bool left = x < g_w * 0.5f;
-            g_touches.push_back({AMotionEvent_getPointerId(e, index), x, y, x, y, left ? kLeftStick : kNoStick,
+            g_touches.push_back({id, x, y, x, y, left ? kLeftStick : kNoStick,
                                  left ? 0 : touch_button(x, y), now});
         }
     } else if (kind == AMOTION_EVENT_ACTION_UP || kind == AMOTION_EVENT_ACTION_POINTER_UP ||
@@ -247,12 +251,26 @@ int32_t on_input(android_app*, AInputEvent* e) {
                                        }),
                         g_touches.end());
     } else if (kind == AMOTION_EVENT_ACTION_MOVE) {
-        for (size_t k = 0; k < AMotionEvent_getPointerCount(e); k++) {
+        size_t drawn = 0;
+        touch_buttons(drawn);
+        size_t count = AMotionEvent_getPointerCount(e);
+        // Prune any touch whose pointer id is no longer reported by Android (prevents stuck ZR/buttons).
+        g_touches.erase(std::remove_if(g_touches.begin(), g_touches.end(),
+                                       [&](const Touch& t) {
+                                           for (size_t k = 0; k < count; k++)
+                                               if (AMotionEvent_getPointerId(e, k) == t.id) return false;
+                                           return true;
+                                       }),
+                        g_touches.end());
+        for (size_t k = 0; k < count; k++) {
             int32_t id = AMotionEvent_getPointerId(e, k);
             for (auto& t : g_touches)
                 if (t.id == id) {
                     t.x = AMotionEvent_getX(e, k);
                     t.y = AMotionEvent_getY(e, k);
+                    if (t.stick == kNoStick) {
+                        t.button = drawn ? touch_hit(t.x / g_w, t.y / g_h, g_w / g_h) : touch_button(t.x, t.y);
+                    }
                 }
         }
     }

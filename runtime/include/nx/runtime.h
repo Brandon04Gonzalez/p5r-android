@@ -21,39 +21,39 @@ extern bool g_trace;  // verbose tracing (NX_TRACE=1)
 
 constexpr uint64_t kAddressSpaceBase = 0x0008000000ull;
 constexpr uint64_t kAddressSpaceSize = 0x7FF8000000ull;  // 39-bit, like an application on Horizon
-constexpr uint64_t kModuleBase = NX_BASE;  // main; sdk at +0x10000000 (NX_BASE, nx/cpu.h)
 constexpr uint64_t kHeapMax = 0x180000000ull;  // 6 GiB
 constexpr uint64_t kStackSize = 0x100000000ull;
 constexpr uint64_t kKernelSize = 0x100000000ull;
 constexpr uint64_t kThunkSize = 0x100000ull;
 #if defined(__APPLE__)
 // macOS: only 0x3_0000_0000..0xF_FFFF_FFFF is free below 0x70_0000_0000 (see NX_BASE).
+constexpr uint64_t kModuleBase = NX_BASE;  // main; sdk at +0x10000000 (NX_BASE, nx/cpu.h)
 constexpr uint64_t kHeapBase = 0x400000000ull;
 constexpr uint64_t kAliasBase = 0x600000000ull;
 constexpr uint64_t kAliasSize = 0x400000000ull;
 constexpr uint64_t kStackBase = 0xA00000000ull;
 constexpr uint64_t kKernelBase = 0xB00000000ull;
 constexpr uint64_t kThunkBase = 0xE00000000ull;
-#else
-constexpr uint64_t kHeapBase = 0x5000000000ull;
-#if defined(__ANDROID__)
-// Android maps the zygote's executable (app_process64, position independent) at a random address from about
-// 0x55_5555_0000 to 0x65_5555_0000 at every boot, inside 0x58..0x68: a Galaxy S23 refused the alias reservation
-// ("the range is in use", app_process64 at 0x5f_0972_b000). Below the modules nothing is mapped (ART keeps to the
-// low 4 GiB), so the alias region goes there. The guest learns it from svcGetInfo, like every region but the modules.
-constexpr uint64_t kAliasBase = 0x2000000000ull;
-// 0x6F_0000_0000 collides with system libraries and the dynamic linker on many 39-bit Android devices
-// (Xiaomi HyperOS / POCO F6, Poco F7, Redmi Note 14, Realme GT Neo 3T). 0x44_0000_0000 sits safely between modules
-// and heap, and memory_init() can fall back to another free range if needed.
+#elif defined(__ANDROID__)
+// Android maps the zygote's executable (app_process64, position independent), Scudo arenas, and linker mappings at
+// random addresses across the 39-bit space at boot. Every region is inline (modifiable by memory_init() before boot)
+// so if any default address range is occupied on a particular Android version/OEM kernel, memory_init() can relocate
+// it to a free 39-bit range instead of aborting startup.
+inline uint64_t kModuleBase = NX_BASE;
+inline uint64_t kHeapBase = 0x5000000000ull;
+inline uint64_t kAliasBase = 0x2000000000ull;
+inline uint64_t kAliasSize = 0x1000000000ull;
+inline uint64_t kStackBase = 0x6800000000ull;
+inline uint64_t kKernelBase = 0x6A00000000ull;
 inline uint64_t kThunkBase = 0x4400000000ull;
 #else
+constexpr uint64_t kModuleBase = NX_BASE;  // main; sdk at +0x10000000 (NX_BASE, nx/cpu.h)
+constexpr uint64_t kHeapBase = 0x5000000000ull;
 constexpr uint64_t kAliasBase = 0x5800000000ull;
-constexpr uint64_t kThunkBase = 0x6F00000000ull;
-#endif
 constexpr uint64_t kAliasSize = 0x1000000000ull;
 constexpr uint64_t kStackBase = 0x6800000000ull;
-// Kept below 0x70_0000_0000: Android (39-bit address space) maps the process's own libraries and heap up there.
 constexpr uint64_t kKernelBase = 0x6A00000000ull;
+constexpr uint64_t kThunkBase = 0x6F00000000ull;
 #endif
 // kKernelBase: TLS pages, main thread stack (memory we hand out). kThunkBase: HLE function addresses (never mapped).
 

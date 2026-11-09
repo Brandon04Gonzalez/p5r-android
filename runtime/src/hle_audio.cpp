@@ -233,7 +233,7 @@ uint64_t sdk_base() {
 // pointer hops of the handle.
 uint64_t find_renderer(uint64_t handle) {
     uint64_t vptr = sdk_base() + kRendererVtable + 0x10;
-    auto valid = [](uint64_t p) { return p >= kModuleBase && p < kKernelBase + kKernelSize && (p & 7) == 0; };
+    auto valid = [](uint64_t p) { return p >= kAddressSpaceBase && p < kAddressSpaceBase + kAddressSpaceSize && (p & 7) == 0; };
     for (uint64_t a = 0; a < 0x40; a += 8) {
         uint64_t p = ld<uint64_t>(handle + a);
         if (!valid(p)) continue;

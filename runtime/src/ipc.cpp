@@ -2,6 +2,7 @@
 #include "ipc.h"
 
 #include <mutex>
+#include <set>
 #include <unordered_map>
 
 namespace nx {
@@ -43,7 +44,9 @@ std::shared_ptr<Service> make_service(const std::string& name) {
 uint32_t Service::handle(IpcCtx& ctx) {
     auto it = cmds.find(ctx.cmd);
     if (it != cmds.end()) return it->second(ctx);
-    log("ipc: %s cmd %u not implemented (stub ok)", name.c_str(), ctx.cmd);
+    static std::set<std::pair<std::string, uint32_t>> logged;
+    if (logged.insert({name, ctx.cmd}).second)
+        log("ipc: %s cmd %u not implemented (stub ok)", name.c_str(), ctx.cmd);
     return 0;
 }
 

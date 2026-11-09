@@ -267,7 +267,8 @@ void upload_texture(VkCommandBuffer cb, const Texture& t, GpuImage& img, uint64_
         uint32_t tb = bc_decoded_bytes(t.format), slices = img.view_type == VK_IMAGE_VIEW_TYPE_3D ? layers : img.layers;
         uint64_t total = 0;
         for (const auto& l : levels) total += uint64_t(l.width) * l.height * slices * tb;
-        Upload u = upload_alloc(total, 16);
+        Upload u = texture_stage(total);
+        if (!u.ptr) return;
         uint64_t at = 0;
         for (uint32_t k = 0; k < levels.size(); k++) {
             bc_decode(t.format, linear.data() + levels[k].offset, levels[k].width, levels[k].height, slices, u.ptr + at);
