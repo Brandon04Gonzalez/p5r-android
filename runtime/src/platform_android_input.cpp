@@ -115,30 +115,49 @@ float camera_sens() {
 uint64_t key_to_button(int32_t k) {
     if (gamepad_swap_abxy()) {
         switch (k) {
-            case AKEYCODE_BUTTON_A: return kA;
-            case AKEYCODE_BUTTON_B: return kB;
-            case AKEYCODE_BUTTON_X: return kX;
-            case AKEYCODE_BUTTON_Y: return kY;
+            case AKEYCODE_BUTTON_A:
+            case AKEYCODE_BUTTON_3: return kA;  // bottom face button (Cross / A)
+            case AKEYCODE_BUTTON_B:
+            case AKEYCODE_BUTTON_2: return kB;  // right face button (Circle / B)
+            case AKEYCODE_BUTTON_X:
+            case AKEYCODE_BUTTON_4: return kX;  // left face button (Square / X)
+            case AKEYCODE_BUTTON_Y:
+            case AKEYCODE_BUTTON_1: return kY;  // top face button (Triangle / Y)
             default: break;
         }
     } else {
         switch (k) {
-            case AKEYCODE_BUTTON_A: return kB;  // bottom face button = Nintendo B
-            case AKEYCODE_BUTTON_B: return kA;  // right face button = Nintendo A
-            case AKEYCODE_BUTTON_X: return kY;
-            case AKEYCODE_BUTTON_Y: return kX;
+            case AKEYCODE_BUTTON_A:
+            case AKEYCODE_BUTTON_3: return kB;  // bottom face button = Nintendo B
+            case AKEYCODE_BUTTON_B:
+            case AKEYCODE_BUTTON_2: return kA;  // right face button = Nintendo A
+            case AKEYCODE_BUTTON_X:
+            case AKEYCODE_BUTTON_4: return kY;  // left face button = Nintendo Y
+            case AKEYCODE_BUTTON_Y:
+            case AKEYCODE_BUTTON_1: return kX;  // top face button = Nintendo X
             default: break;
         }
     }
     switch (k) {
-        case AKEYCODE_BUTTON_L1: return kL;
-        case AKEYCODE_BUTTON_R1: return kR;
-        case AKEYCODE_BUTTON_L2: return kZL;
-        case AKEYCODE_BUTTON_R2: return kZR;
-        case AKEYCODE_BUTTON_START: return kPlus;
-        case AKEYCODE_BUTTON_SELECT: return kMinus;
-        case AKEYCODE_BUTTON_THUMBL: return kStickL;
-        case AKEYCODE_BUTTON_THUMBR: return kStickR;
+        case AKEYCODE_BUTTON_L1:
+        case AKEYCODE_BUTTON_7: return kL;
+        case AKEYCODE_BUTTON_R1:
+        case AKEYCODE_BUTTON_8: return kR;
+        case AKEYCODE_BUTTON_L2:
+        case AKEYCODE_BUTTON_5:
+        case AKEYCODE_BUTTON_C: return kZL;
+        case AKEYCODE_BUTTON_R2:
+        case AKEYCODE_BUTTON_6:
+        case AKEYCODE_BUTTON_Z: return kZR;
+        case AKEYCODE_BUTTON_START:
+        case AKEYCODE_BUTTON_10:
+        case AKEYCODE_BUTTON_MODE: return kPlus;
+        case AKEYCODE_BUTTON_SELECT:
+        case AKEYCODE_BUTTON_9: return kMinus;
+        case AKEYCODE_BUTTON_THUMBL:
+        case AKEYCODE_BUTTON_11: return kStickL;
+        case AKEYCODE_BUTTON_THUMBR:
+        case AKEYCODE_BUTTON_12: return kStickR;
         case AKEYCODE_DPAD_LEFT: return kLeft;
         case AKEYCODE_DPAD_UP: return kUp;
         case AKEYCODE_DPAD_RIGHT: return kRight;
