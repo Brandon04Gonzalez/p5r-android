@@ -69,16 +69,18 @@ std::atomic<uint32_t> g_delay_frames{0};
 std::atomic<uint64_t> g_occ_min{~uint64_t(0)}, g_occ_max{0};
 std::atomic<uint64_t> g_truncations{0}, g_pending_max{0};
 std::atomic<uint64_t> g_latency_ok{0}, g_latency_early{0};
+std::atomic<uint64_t> g_underruns{0}, g_silent_frames{0}, g_callback_max_lock_ns{0};
 AudioDone g_done = nullptr;
 AAudioStream* g_stream = nullptr;
 // Per ~2 s, logged from the callback: how the device pulls (callbacks, frames per call) and how often the game's
 // buffers ran out (underruns: silence played, and the game's buffers come back late, its clock stalls).
 struct CbStats {
     uint64_t from_ns = 0, calls = 0, frames = 0, underruns = 0, silent_frames = 0, max_gap_ns = 0, last_ns = 0;
+    uint64_t max_lock_ns = 0;
     int32_t min_frames = 1 << 30, max_frames = 0;
 } g_cb;
 
-void cb_stats(int32_t frames, size_t missing_bytes) {
+void cb_stats(int32_t frames, size_t missing_bytes, uint64_t lock_ns) {
     CbStats& s = g_cb;
     const uint64_t now = monotonic_ns();
     if (!s.from_ns) s.from_ns = now;
@@ -86,12 +88,20 @@ void cb_stats(int32_t frames, size_t missing_bytes) {
     s.last_ns = now;
     s.calls++, s.frames += uint64_t(frames);
     s.min_frames = std::min(s.min_frames, frames), s.max_frames = std::max(s.max_frames, frames);
-    if (missing_bytes) s.underruns++, s.silent_frames += missing_bytes / 4;
+    s.max_lock_ns = std::max(s.max_lock_ns, lock_ns);
+    if (lock_ns > g_callback_max_lock_ns.load(std::memory_order_relaxed))
+        g_callback_max_lock_ns.store(lock_ns, std::memory_order_relaxed);
+    if (missing_bytes) {
+        s.underruns++, s.silent_frames += missing_bytes / 4;
+        g_underruns.fetch_add(1, std::memory_order_relaxed);
+        g_silent_frames.fetch_add(missing_bytes / 4, std::memory_order_relaxed);
+    }
     if (now - s.from_ns < 2'000'000'000ull) return;
     if (s.underruns || std::getenv("NX_AUDIO_STATS"))
-        nx::log("audio: device pulled %llu times in %.1f s (%d..%d frames, longest %.1f ms apart); %llu underruns, "
-                "%.0f ms of silence", (unsigned long long)s.calls, double(now - s.from_ns) / 1e9, s.min_frames,
-                s.max_frames, double(s.max_gap_ns) / 1e6, (unsigned long long)s.underruns,
+        nx::log("audio: device pulled %llu times in %.1f s (%d..%d frames, longest %.1f ms apart, lock wait up to "
+                "%.0f us); %llu underruns, %.0f ms of silence",
+                (unsigned long long)s.calls, double(now - s.from_ns) / 1e9, s.min_frames, s.max_frames,
+                double(s.max_gap_ns) / 1e6, double(s.max_lock_ns) / 1e3, (unsigned long long)s.underruns,
                 double(s.silent_frames) / 48.0);
     s = {};
     s.from_ns = s.last_ns = now;
@@ -100,26 +110,32 @@ void cb_stats(int32_t frames, size_t missing_bytes) {
 aaudio_data_callback_result_t audio_cb(AAudioStream*, void*, void* out, int32_t frames) {
     auto* dst = static_cast<uint32_t*>(out);
     size_t missing = 0;
-    std::vector<void*> finished;
+    void* finished[32];
+    size_t nfinished = 0;
+    const uint64_t lock_from = monotonic_ns();
     {
         std::lock_guard lk(g_audio);
         const uint64_t occupancy = g_written - g_read;
         g_occ_min.store(std::min(g_occ_min.load(std::memory_order_relaxed), occupancy), std::memory_order_relaxed);
         g_occ_max.store(std::max(g_occ_max.load(std::memory_order_relaxed), occupancy), std::memory_order_relaxed);
         const uint64_t n = std::min<uint64_t>(uint64_t(frames), occupancy);
-        for (uint64_t k = 0; k < n; k++) dst[k] = g_ring[(g_read + k) % kRingFrames];
+        const uint64_t idx = g_read % kRingFrames;
+        const uint64_t first = std::min<uint64_t>(n, kRingFrames - idx);
+        if (first) std::memcpy(dst, &g_ring[size_t(idx)], size_t(first) * 4);
+        if (n > first) std::memcpy(dst + first, &g_ring[0], size_t(n - first) * 4);
         g_read += n;
         g_device += uint64_t(frames);
         missing = size_t(frames) - size_t(n);
         if (missing) std::memset(dst + n, 0, missing * 4);  // underrun: silence
         const uint64_t due = g_read + g_delay_frames.load(std::memory_order_relaxed);
-        while (!g_pending.empty() && g_pending.front().end <= due) {
-            finished.push_back(g_pending.front().ctx);
+        while (!g_pending.empty() && g_pending.front().end <= due && nfinished < 32) {
+            finished[nfinished++] = g_pending.front().ctx;
             g_pending.pop_front();
         }
     }
-    cb_stats(frames, missing * 4);
-    for (void* c : finished) g_done(c);
+    const uint64_t lock_ns = monotonic_ns() - lock_from;
+    cb_stats(frames, missing * 4, lock_ns);
+    for (size_t k = 0; k < nfinished; k++) g_done(finished[k]);
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 }  // namespace
@@ -185,7 +201,10 @@ bool audio_submit(const void* data, size_t bytes, void* ctx) {
         const uint64_t n = std::min<uint64_t>(want, kRingFrames - (g_written - g_read));  // never more than a full ring
         if (n < want) g_truncations.fetch_add(1, std::memory_order_relaxed);
         const auto* src = static_cast<const uint8_t*>(data);
-        for (uint64_t k = 0; k < n; k++) std::memcpy(&g_ring[(g_written + k) % kRingFrames], src + 4 * k, 4);
+        const uint64_t idx = g_written % kRingFrames;
+        const uint64_t first = std::min<uint64_t>(n, kRingFrames - idx);
+        if (first) std::memcpy(&g_ring[size_t(idx)], src, size_t(first) * 4);
+        if (n > first) std::memcpy(&g_ring[0], src + first * 4, size_t(n - first) * 4);
         g_written += n;
         g_pending.push_back({g_written, ctx});
         g_pending_max.store(std::max(g_pending_max.load(std::memory_order_relaxed), uint64_t(g_pending.size())),
@@ -204,7 +223,10 @@ AudioDiagnostics audio_diagnostics() {
             g_truncations.load(std::memory_order_relaxed),
             g_pending_max.load(std::memory_order_relaxed),
             g_latency_ok.load(std::memory_order_relaxed),
-            g_latency_early.load(std::memory_order_relaxed)};
+            g_latency_early.load(std::memory_order_relaxed),
+            g_underruns.load(std::memory_order_relaxed),
+            g_silent_frames.load(std::memory_order_relaxed),
+            g_callback_max_lock_ns.load(std::memory_order_relaxed)};
 }
 
 void audio_set_delay_ms(uint32_t ms) { g_delay_frames.store(std::min<uint32_t>(ms, 500) * 48, std::memory_order_relaxed); }

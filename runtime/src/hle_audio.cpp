@@ -33,7 +33,7 @@ struct Out {
     std::shared_ptr<EventState> event = std::make_shared<EventState>();
     bool started = false;
     // statistics since the last log (every 1000 buffers)
-    uint64_t buffers = 0, silent = 0;
+    uint64_t buffers = 0, silent = 0, last_append_ns = 0, max_gap_ns = 0;
     int peak = 0;
 };
 Out g_out;
@@ -44,12 +44,24 @@ void out_stats(uint64_t buf) {
     uint64_t n = ld<uint64_t>(buf + 16) / 2;
     int peak = 0;
     for (uint64_t k = 0; pcm && k < n; k++) peak = std::max(peak, std::abs(int(pcm[k])));
+    const uint64_t now = plat::monotonic_ns();
+    if (g_out.last_append_ns) g_out.max_gap_ns = std::max(g_out.max_gap_ns, now - g_out.last_append_ns);
+    g_out.last_append_ns = now;
     if (g_out.buffers == 0) log("audio: first AudioOut buffer, %llu bytes", (unsigned long long)(n * 2));
     g_out.peak = std::max(g_out.peak, peak);
     g_out.silent += peak == 0;
     if (++g_out.buffers % 1000 == 0) {
-        log("audio: AudioOut: peak %d, %llu of 1000 buffers silent", g_out.peak, (unsigned long long)g_out.silent);
-        g_out.peak = 0, g_out.silent = 0;
+#if defined(__ANDROID__)
+        const auto a = plat::audio_diagnostics();
+        log("audio: AudioOut: peak %d, %llu of 1000 buffers silent, longest append gap %.1f ms; device %llu "
+            "underruns, %.0f ms of silence, callback lock wait %.0f us",
+            g_out.peak, (unsigned long long)g_out.silent, double(g_out.max_gap_ns) / 1e6,
+            (unsigned long long)a.underruns, double(a.silent_frames) / 48.0, double(a.callback_max_lock_ns) / 1e3);
+#else
+        log("audio: AudioOut: peak %d, %llu of 1000 buffers silent, longest append gap %.1f ms", g_out.peak,
+            (unsigned long long)g_out.silent, double(g_out.max_gap_ns) / 1e6);
+#endif
+        g_out.peak = 0, g_out.silent = 0, g_out.max_gap_ns = 0;
     }
 }
 

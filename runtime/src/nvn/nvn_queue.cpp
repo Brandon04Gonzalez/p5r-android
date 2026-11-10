@@ -124,17 +124,22 @@ void av_sync(uint64_t now) {
         if (measured)
             log("av sync: frame period %.1f ms; picture %.0f ms after the logic, sound %.0f ms after the mix (%.0f of it "
                 "the delay): sound delayed %u ms; %.1f fps, state measured; audio ring %llu..%llu frames, %llu "
-                "truncations, %llu pending max, latency %llu ok/%llu early", period, picture, sound, double(applied),
+                "truncations, %llu pending max, latency %llu ok/%llu early; %llu underruns, %.0f ms of silence, "
+                "callback lock wait %.0f us", period, picture, sound, double(applied),
                 applied, 1000.0 / period, (unsigned long long)a.ring_min, (unsigned long long)a.ring_max,
                 (unsigned long long)a.truncations, (unsigned long long)a.max_pending,
-                (unsigned long long)a.latency_ok, (unsigned long long)a.latency_early);
+                (unsigned long long)a.latency_ok, (unsigned long long)a.latency_early,
+                (unsigned long long)a.underruns, double(a.silent_frames) / 48.0,
+                double(a.callback_max_lock_ns) / 1e3);
         else
             log("av sync: frame period %.1f ms, sound delayed %u ms (estimated%s%s); %.1f fps, state fallback; audio "
-                "ring %llu..%llu frames, %llu truncations, %llu pending max, latency %llu ok/%llu early", period, applied,
+                "ring %llu..%llu frames, %llu truncations, %llu pending max, latency %llu ok/%llu early; %llu "
+                "underruns, %.0f ms of silence, callback lock wait %.0f us", period, applied,
                 picture > 0 ? "" : ", no display timing", sound > 0 ? "" : ", no audio timestamps", 1000.0 / period,
                 (unsigned long long)a.ring_min, (unsigned long long)a.ring_max, (unsigned long long)a.truncations,
                 (unsigned long long)a.max_pending, (unsigned long long)a.latency_ok,
-                (unsigned long long)a.latency_early);
+                (unsigned long long)a.latency_early, (unsigned long long)a.underruns,
+                double(a.silent_frames) / 48.0, double(a.callback_max_lock_ns) / 1e3);
 #else
         if (measured)
             log("av sync: frame period %.1f ms; picture %.0f ms after the logic, sound %.0f ms after the mix (%.0f of it "

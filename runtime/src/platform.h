@@ -138,6 +138,7 @@ struct AudioDiagnostics {
     uint64_t ring_min = 0, ring_max = 0;
     uint64_t truncations = 0, max_pending = 0;
     uint64_t latency_ok = 0, latency_early = 0;
+    uint64_t underruns = 0, silent_frames = 0, callback_max_lock_ns = 0;
 };
 AudioDiagnostics audio_diagnostics();
 
