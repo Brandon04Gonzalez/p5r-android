@@ -116,7 +116,7 @@ int affinity_mode() {
     static const int m = [] {
         const char* e = std::getenv("NX_AFFINITY");
         if (e) return std::atoi(e);
-        return 2;  // Default on Android: run on all fast cores (cl > 0, avoiding little/efficiency cluster)
+        return 0;  // Default: the scheduler balances gameplay threads across every available core
     }();
     return m;
 }
