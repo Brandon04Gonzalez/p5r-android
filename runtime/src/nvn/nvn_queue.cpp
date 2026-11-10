@@ -498,6 +498,7 @@ void frame_time_probe(CPU& c) {
     const LoadedModule* m = module_at(c.x[30]);
     if (!m || c.x[30] - m->base != 0xe16ac || !c.x[19]) return;
     plat::perf_hint_thread();  // the game's main thread makes the frame too (ADPF, PLAN.md R2)
+    plat::perf_diag_thread(plat::kPerfRoleMain);
     plat::frame_thread_tick(1);
     {
         static thread_local bool marked = false;
@@ -579,6 +580,7 @@ void frame_time_probe(CPU& c) {
             faults[1] - faults_prev[1], switches[0] - switches_prev[0], switches[1] - switches_prev[1],
             double(plat::memguard_overlap_ns(now > span ? now - span : 0, now)) / 1e6);
     }
+    plat::perf_diag_main_frame(uint64_t(ms * 1e6), cpu_prev ? cpu - cpu_prev : 0);
     cpu_prev = cpu;
     for (int k = 0; k < 2; k++) faults_prev[k] = faults[k], switches_prev[k] = switches[k];
     for (WaitSite& w : g_wait_sites) w.frame_ns = 0;
@@ -626,7 +628,11 @@ void QueuePresentTexture(CPU& c) {
     const uint64_t origin = g_frame_origin.exchange(0);  // set by the game for this frame (frame_origin_ns), or 0
     // The frame's work, from the end of the last present's pacing to now (perf_hint.cpp: ADPF on Android).
     static uint64_t work_from = 0;
+    static uint64_t last_in = 0;
     uint64_t t_in = plat::monotonic_ns();
+    const uint64_t interval_ns = last_in ? t_in - last_in : 0;
+    last_in = t_in;
+    plat::perf_diag_thread(plat::kPerfRolePresent);
     tl("present>");
     {
         static thread_local bool marked = false;
@@ -635,7 +641,9 @@ void QueuePresentTexture(CPU& c) {
         if (++n % 600 == 0) svc_profile_report(600, 2);
     }
     plat::perf_hint_thread();
-    if (work_from) plat::perf_hint_frame(int64_t(t_in - work_from));
+    const int64_t work_ns = work_from ? int64_t(t_in - work_from) : 0;
+    if (work_from) plat::perf_hint_frame(work_ns, int64_t(interval_ns));
+    uint64_t pacing_ns = 0;
     if (auto* w = get<Window>(c.x[1])) {
         // At most two presents queued: the game runs at most two frames ahead of the replay.
         static uint64_t queued[2] = {};
@@ -647,8 +655,11 @@ void QueuePresentTexture(CPU& c) {
             queued[next_slot] = worker_run([texture, crop, origin] { gpu_present(texture, crop.data(), origin); });
             next_slot ^= 1;
         }
+        const uint64_t pace_from = plat::monotonic_ns();
         pace_present(w->interval);
+        pacing_ns = plat::monotonic_ns() - pace_from;
     }
+    const uint64_t call_ns = plat::monotonic_ns() - t_in;
     work_from = plat::monotonic_ns();
     uint64_t n = ++g_presents;
     video_cadence(work_from);
@@ -662,6 +673,7 @@ void QueuePresentTexture(CPU& c) {
             log("timeline: %9.3f ms  t%lld  %s %llu", double(g_tl[k].ns - t0) / 1e6, (long long)g_tl[k].tid, g_tl[k].what,
                 (unsigned long long)g_tl[k].arg);
     }
+    plat::perf_diag_present(interval_ns, work_ns, pacing_ns, call_ns);
     if (n == 1 || (n & (n - 1)) == 0) log("nvn: present #%llu (texture %d)", (unsigned long long)n, int(c.x[2]));
     g_frame++;
 }

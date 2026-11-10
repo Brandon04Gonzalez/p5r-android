@@ -42,7 +42,9 @@ struct KThread : KObject {
 };
 
 struct EventState {
+    enum class Kind : uint8_t { generic, vsync };
     bool signaled = false;
+    Kind kind = Kind::generic;
 };
 
 struct KEvent : KObject {

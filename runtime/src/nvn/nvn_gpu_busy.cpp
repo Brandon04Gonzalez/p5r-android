@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
+#include <vector>
 
 #include "nvn_vk.h"
 
@@ -22,6 +23,7 @@ VkQueryPool g_pools[kSlots] = {};
 double g_period_ns = 1.0;
 double g_busy_ns = 0, g_span_ns = 0, g_present_ns = 0;  // present: the parts of submits that replay nothing
 uint64_t g_parts = 0, g_not_ready = 0;
+bool g_checked = false, g_usable = false;
 
 uint64_t read_sysfs(const char* path) {
     FILE* f = std::fopen(path, "r");
@@ -30,6 +32,19 @@ uint64_t read_sysfs(const char* path) {
     if (std::fscanf(f, "%llu", &v) != 1) v = 0;
     std::fclose(f);
     return v;
+}
+
+uint64_t gpu_clock_hz() {
+    // Adreno (KGSL), then the usual Mali/devfreq nodes. 0: the kernel does not expose it to apps.
+    static const char* paths[] = {
+        "/sys/class/kgsl/kgsl-3d0/gpuclk",
+        "/sys/class/misc/mali0/device/cur_freq",
+        "/sys/class/devfreq/gpufreq/cur_freq",
+        "/sys/class/devfreq/13000000.mali/cur_freq",
+    };
+    for (const char* p : paths)
+        if (uint64_t v = read_sysfs(p)) return v;
+    return 0;
 }
 
 }  // namespace
@@ -44,31 +59,43 @@ bool gpu_busy_on() {
 
 void gpu_busy_part_begin(uint32_t slot, uint32_t part, VkCommandBuffer cb) {
     if (!gpu_busy_on() || slot >= kSlots || part >= kParts) return;
+    if (!g_checked) {
+        g_checked = true;
+        VkPhysicalDeviceProperties props{};
+        p_vkGetPhysicalDeviceProperties(vk_physical(), &props);
+        uint32_t families = 0;
+        p_vkGetPhysicalDeviceQueueFamilyProperties(vk_physical(), &families, nullptr);
+        std::vector<VkQueueFamilyProperties> queue_props(families);
+        if (families) p_vkGetPhysicalDeviceQueueFamilyProperties(vk_physical(), &families, queue_props.data());
+        const uint32_t family = vk_queue_family();
+        const uint32_t valid_bits = family < families ? queue_props[family].timestampValidBits : 0;
+        g_period_ns = props.limits.timestampPeriod > 0 ? props.limits.timestampPeriod : 1.0;
+        g_usable = props.limits.timestampComputeAndGraphics && valid_bits > 0;
+        if (!g_usable)
+            log("gpu busy: timestamps unsupported (compute+graphics %d, family %u valid bits %u)",
+                int(props.limits.timestampComputeAndGraphics), family, valid_bits);
+        else
+            log("gpu busy: timestamps on (NX_GPU_PROFILE=3), period %.2f ns, %u valid bits", g_period_ns,
+                valid_bits);
+    }
+    if (!g_usable) return;
     if (!g_pools[slot]) {
         VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
         qi.queryType = VK_QUERY_TYPE_TIMESTAMP;
         qi.queryCount = 2 * kParts;
         p_vkCreateQueryPool(vk_device(), &qi, nullptr, &g_pools[slot]);
-        static bool once = false;
-        if (!once) {
-            once = true;
-            VkPhysicalDeviceProperties props{};
-            p_vkGetPhysicalDeviceProperties(vk_physical(), &props);
-            g_period_ns = props.limits.timestampPeriod;
-            log("gpu busy: timestamps on (NX_GPU_PROFILE=3), period %.2f ns", g_period_ns);
-        }
     }
     p_vkCmdResetQueryPool(cb, g_pools[slot], 2 * part, 2);
     p_vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, g_pools[slot], 2 * part);
 }
 
 void gpu_busy_part_end(uint32_t slot, uint32_t part, VkCommandBuffer cb) {
-    if (!gpu_busy_on() || slot >= kSlots || part >= kParts || !g_pools[slot]) return;
+    if (!gpu_busy_on() || !g_usable || slot >= kSlots || part >= kParts || !g_pools[slot]) return;
     p_vkCmdWriteTimestamp(cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_pools[slot], 2 * part + 1);
 }
 
 void gpu_busy_retired(uint32_t slot, uint32_t queued, bool replay) {
-    if (!gpu_busy_on() || slot >= kSlots || !g_pools[slot] || !queued) return;
+    if (!gpu_busy_on() || !g_usable || slot >= kSlots || !g_pools[slot] || !queued) return;
     uint64_t first = UINT64_MAX, last = 0;
     for (uint32_t p = 0; p < kParts; p++) {
         if (!(queued >> p & 1)) continue;
@@ -88,13 +115,19 @@ void gpu_busy_retired(uint32_t slot, uint32_t queued, bool replay) {
 
 void gpu_busy_log(uint64_t frames) {
     if (!gpu_busy_on() || !frames) return;
-    uint64_t clk = read_sysfs("/sys/class/kgsl/kgsl-3d0/gpuclk");
+    uint64_t clk = gpu_clock_hz();
     uint64_t busy_pct = read_sysfs("/sys/class/kgsl/kgsl-3d0/gpu_busy_percentage");
-    log("gpu busy: %.2f ms/frame (%.1f parts/frame, presents %.2f ms), span %.2f ms/frame, %llu not ready; clock %llu "
-        "MHz, busy %llu%%",
-        g_busy_ns / 1e6 / double(frames), double(g_parts) / double(frames), g_present_ns / 1e6 / double(frames),
-        g_span_ns / 1e6 / double(frames),
-        (unsigned long long)g_not_ready, (unsigned long long)(clk / 1000000), (unsigned long long)busy_pct);
+    if (clk)
+        log("gpu busy: %.2f ms/frame (%.1f parts/frame, presents %.2f ms), span %.2f ms/frame, %llu not ready; clock "
+            "%llu MHz, busy %llu%%",
+            g_busy_ns / 1e6 / double(frames), double(g_parts) / double(frames), g_present_ns / 1e6 / double(frames),
+            g_span_ns / 1e6 / double(frames), (unsigned long long)g_not_ready, (unsigned long long)(clk / 1000000),
+            (unsigned long long)busy_pct);
+    else
+        log("gpu busy: %.2f ms/frame (%.1f parts/frame, presents %.2f ms), span %.2f ms/frame, %llu not ready; clock "
+            "not readable",
+            g_busy_ns / 1e6 / double(frames), double(g_parts) / double(frames), g_present_ns / 1e6 / double(frames),
+            g_span_ns / 1e6 / double(frames), (unsigned long long)g_not_ready);
     g_busy_ns = g_span_ns = g_present_ns = 0, g_parts = g_not_ready = 0;
 }
 

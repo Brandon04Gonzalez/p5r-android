@@ -639,7 +639,11 @@ void log_timing(uint64_t frames) {
 // gpu_present's time, whatever way it returns.
 struct PresentTimer {
     uint64_t t0 = plat::monotonic_ns();
-    ~PresentTimer() { g_timing.present_ns += plat::monotonic_ns() - t0; }
+    ~PresentTimer() {
+        const uint64_t ns = plat::monotonic_ns() - t0;
+        g_timing.present_ns += ns;
+        plat::perf_diag_gpu_present(ns);
+    }
 };
 
 }  // namespace

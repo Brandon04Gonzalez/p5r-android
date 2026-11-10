@@ -338,6 +338,20 @@ static uint32_t svc_wait_synchronization(CPU& c, uint64_t handles, int32_t count
         if (!o) return 0xE401;  // invalid handle
         objs.push_back(o);
     }
+    bool waits_vsync = false;
+    if (plat::perf_diag_enabled())
+        for (const auto& o : objs)
+            if (auto e = std::dynamic_pointer_cast<KEvent>(o); e && e->state->kind == EventState::Kind::vsync)
+                waits_vsync = true;
+    struct WaitDiag {
+        uint64_t t0;
+        bool blocked = false, vsync = false;
+        explicit WaitDiag(bool on) : t0(on ? plat::monotonic_ns() : 0) {}
+        ~WaitDiag() {
+            if (t0 && blocked) plat::perf_diag_wait(plat::monotonic_ns() - t0, vsync);
+        }
+    } wait_diag(plat::perf_diag_enabled());
+    wait_diag.vsync = waits_vsync;
     auto ready = [&]() -> int {
         for (int i = 0; i < count; i++)
             if (objs[i]->signaled()) return i;
@@ -366,6 +380,7 @@ static uint32_t svc_wait_synchronization(CPU& c, uint64_t handles, int32_t count
             return 0;
         }
         if (timeout == 0) return 0xEA01;
+        wait_diag.blocked = true;
         if (timeout < 0)
             self->cv.wait(lk);
         else if (self->cv.wait_until(lk, until) == std::cv_status::timeout && ready() < 0)

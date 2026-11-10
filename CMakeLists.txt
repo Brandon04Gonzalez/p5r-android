@@ -134,6 +134,7 @@ set(NX_RUNTIME_SOURCES
     runtime/src/touch_layout.cpp
     runtime/src/perf_hint.cpp
     runtime/src/frame_stats.cpp
+    runtime/src/perf_diag.cpp
     runtime/src/write_watch.cpp
     runtime/src/nvn/nvn_caps.cpp
     runtime/src/nvn/nvn_renderpass.cpp

@@ -10,8 +10,8 @@ namespace nx::plat {
 
 // NX_RELEASE (CMake option, the public build): no nx.log file in the data folder and none of the diagnostics a file
 // there turns on (press, input_record.txt, live_flags, trace_draws, trace_tasks, dump_hud, dump_frames, dump_threads,
-// profile, p5r_fps, watch/peek): a player's folder only holds the game data, the saves and config.txt. The log still
-// goes to the system log (Android logcat).
+// profile, p5r_fps, watch/peek, perf_diag.txt): a player's folder only holds the game data, the saves and config.txt.
+// The log still goes to the system log (Android logcat).
 #if defined(NX_RELEASE)
 constexpr bool kDiagnostics = false;
 #else
@@ -90,8 +90,21 @@ size_t touch_overlay(OverlayShape* out, size_t max);
 // Performance hints (perf_hint.cpp; Android ADPF, nothing elsewhere): the calling thread takes part in making frames;
 // a frame's work took `ns`.
 void perf_hint_thread();
-void perf_hint_frame(int64_t ns);
+// work_ns: the frame's work as measured since the previous present's pacing (perf_hint.cpp).
+// interval_ns: present-to-present time, which includes pacing; NX_ADPF_REPORT=interval (the default) uses it.
+void perf_hint_frame(int64_t ns, int64_t interval_ns = 0);
 void gpu_turbo();  // NX_GPU_TURBO=1: the Adreno GPU at its highest clock (perf_hint.cpp; Android)
+// Performance diagnostics (perf_diag.cpp): NX_PERF_DIAGNOSTICS=1 or <data>/perf_diag.txt. Produces one
+// [P5R_PERF] line per 2 s (or 120 presents) with present intervals, active work, pacing, GPU present time,
+// ADPF reporting and per-frame thread waits. Roles: 0 replay/present, 1 game main, 2 movie.
+enum { kPerfRolePresent = 0, kPerfRoleMain = 1, kPerfRoleMovie = 2 };
+bool perf_diag_enabled();
+void perf_diag_thread(int role);
+void perf_diag_wait(uint64_t ns, bool vsync);
+void perf_diag_present(uint64_t interval_ns, int64_t work_ns, uint64_t pacing_ns, uint64_t call_ns);
+void perf_diag_main_frame(uint64_t frame_ns, uint64_t cpu_ns);
+void perf_diag_gpu_present(uint64_t ns);
+void perf_diag_adpf(int64_t target_ns, int64_t reported_ns, size_t threads, bool session);
 // Frame threads and present intervals (frame_stats.cpp): the cores they run on, their CPU time, NX_AFFINITY.
 // role 0: the thread that replays and presents (frame_presented ticks it); 1: the game's main thread.
 void frame_thread_tick(int role);

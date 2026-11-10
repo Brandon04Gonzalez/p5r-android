@@ -58,6 +58,7 @@ import java.util.Map;
  *               own. (A lower render resolution needs the engine's target sizes: games/p5r/PROGRESO.md.)
  *   frame rate  30 (NX_FPS_CAP=30, default) or 60 (NX_FPS_CAP=60: games/p5r/game.cpp patches the engine's interval)
  *   FPS counter off (default) or on (NX_SHOW_FPS)
+ *   performance diagnostics off (default) or on (NX_PERF_DIAGNOSTICS=1): [P5R_PERF] summaries in nx.log
  *   shadows     off (NX_SHADOWS=0, default: the shadow maps are not drawn, ~9% of the GPU on the 3D title) or on
  *   on-screen controls on (default) or off (NX_TOUCH_SHOW), their size (NX_TOUCH_SIZE) and opacity (NX_TOUCH_OPACITY),
  *               and where they are (NX_TOUCH_LAYOUT, written by ControlsEditor)
@@ -328,6 +329,10 @@ public class Launcher extends Activity {
                 new String[] {"Desactivadas", "Activadas"}, new String[] {"Off", "On"}, 0));
         options.add(new Option("NX_SHOW_FPS", "Contador de FPS", "FPS counter", new String[] {"0", "1"},
                 new String[] {"Desactivado", "Activado"}, new String[] {"Off", "On"}, 0));
+        options.add(new Option("NX_PERF_DIAGNOSTICS", "Diagnósticos de rendimiento", "Performance diagnostics",
+                new String[] {"0", "1"},
+                new String[] {"Desactivados", "Activados (reiniciar)"},
+                new String[] {"Off", "On (restart)"}, 0));
         options.add(new Option("NX_TOUCH_SHOW", "Controles táctiles", "On-screen controls", new String[] {"1", "0"},
                 new String[] {"Activados", "Desactivados"}, new String[] {"On", "Off"}, 0));
         options.add(new Option("NX_TOUCH_SIZE", "Tamaño de los botones", "Button size",

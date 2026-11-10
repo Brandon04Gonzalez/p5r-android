@@ -55,7 +55,11 @@ void nv_noop(CPU&) {}
 
 // The display's vsync: a kernel event a host thread signals every 1/60 s. The game gets it as an nn::os
 // SystemEvent (AttachSystemEvent with our read/write handles, auto clear: each wait consumes one vsync).
-std::shared_ptr<EventState> g_vsync = std::make_shared<EventState>();
+std::shared_ptr<EventState> g_vsync = [] {
+    auto e = std::make_shared<EventState>();
+    e->kind = EventState::Kind::vsync;
+    return e;
+}();
 
 void vsync_thread() {
     plat::set_thread_name("vsync");

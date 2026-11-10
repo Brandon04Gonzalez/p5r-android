@@ -65,6 +65,7 @@ bool is_adreno_8xx();
 bool gpu_require_subgroup32();  // compute pipelines pin the subgroup size to 32 (nvn_pipeline.cpp)
 bool gpu_is_integrated();  // the device in use is an integrated GPU (set when the device is made)
 VkPhysicalDevice vk_physical();
+uint32_t vk_queue_family();  // the graphics/present family (nvn_gpu_busy.cpp uses its timestampValidBits)
 // nvn_gpu_pick.cpp: logs every device and returns the one NX_GPU asks for (default: the first discrete GPU).
 VkPhysicalDevice pick_physical_device(const std::vector<VkPhysicalDevice>& devices);
 uint32_t memory_type(uint32_t bits, VkMemoryPropertyFlags want);
