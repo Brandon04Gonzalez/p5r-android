@@ -38,6 +38,7 @@
 #include <nx/runtime.h>
 
 #include "diagnostics.h"
+#include "media_image.h"
 #include "platform.h"
 
 namespace nx {
@@ -295,18 +296,20 @@ void read_codec_format(Decoder& d) {
     d.has_planes = false;
     void* img_data = nullptr;
     size_t img_size = 0;
-    if (AMediaFormat_getBuffer(f, "image-data", &img_data, &img_size) && img_data && img_size >= 80) {
-        const auto* u = static_cast<const uint32_t*>(img_data);
-        if (u[0] == 1 && u[1] >= 3) {  // MediaImage2::TYPE_YUV (1), 3 planes (Y, U, V)
-            for (int p = 0; p < 3; p++) {
-                d.plane_off[p] = u[8 + p * 4 + 0];
-                d.plane_col[p] = u[8 + p * 4 + 1];
-                d.plane_row[p] = u[8 + p * 4 + 2];
-            }
-            d.has_planes = true;
-            d.is_planar = (d.plane_col[1] == 1);
-            if (d.plane_row[0] > 0) d.codec_stride = int32_t(d.plane_row[0]);
+    media::Planes planes;
+    if (AMediaFormat_getBuffer(f, "image-data", &img_data, &img_size) &&
+        media::parse_image_data(img_data, img_size, planes)) {
+        for (int p = 0; p < 3; p++) {
+            d.plane_off[p] = planes.off[p];
+            d.plane_col[p] = planes.col[p];
+            d.plane_row[p] = planes.row[p];
         }
+        d.has_planes = true;
+        d.is_planar = (d.plane_col[1] == 1);
+        if (d.plane_row[0] > 0) d.codec_stride = int32_t(d.plane_row[0]);
+        log("movie: image-data planes: Y %u/%u/%u, U %u/%u/%u, V %u/%u/%u (offset/column/row)", d.plane_off[0],
+            d.plane_col[0], d.plane_row[0], d.plane_off[1], d.plane_col[1], d.plane_row[1], d.plane_off[2],
+            d.plane_col[2], d.plane_row[2]);
     }
 
     if (!d.has_planes) {
