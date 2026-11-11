@@ -262,6 +262,7 @@ GpuImage* image_of(uint64_t guest) {
 
 void transition(VkCommandBuffer cb, GpuImage& img, VkImageLayout to) {
     if (img.layout == to) return;
+    pass_end_for_transfer(cb);  // nvn_draw.cpp: not inside a render pass instance
     VkImageMemoryBarrier b{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
     b.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
     b.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;

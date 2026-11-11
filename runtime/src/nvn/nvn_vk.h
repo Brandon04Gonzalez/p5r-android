@@ -273,6 +273,7 @@ void begin_render_pass(VkCommandBuffer cb, uint32_t count, const VkFormat* forma
 void forget_framebuffers(VkImageView view);
 void render_pass_log();
 void pass_end_only(VkCommandBuffer cb, int reason);  // draw_end_rendering without the pending clears
+void pass_end_for_transfer(VkCommandBuffer cb);  // ends a pass open in `cb` before a layout change is recorded
 bool pass_open_on(const Targets& t);
 VkExtent2D pass_extent();
 void pass_begin(VkCommandBuffer cb, const Targets& t);
