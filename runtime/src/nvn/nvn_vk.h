@@ -62,6 +62,7 @@ bool is_xclipse();
 bool is_mali();
 bool is_adreno();
 bool is_adreno_8xx();
+bool is_powervr();
 bool gpu_require_subgroup32();  // compute pipelines pin the subgroup size to 32 (nvn_pipeline.cpp)
 bool gpu_is_integrated();  // the device in use is an integrated GPU (set when the device is made)
 VkPhysicalDevice vk_physical();
