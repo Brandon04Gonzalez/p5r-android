@@ -469,6 +469,10 @@ int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface
 
 // ---- crash handler and entry ----------------------------------------------------------------------------------
 
+namespace nx::nvn {
+void log_recent_passes();  // nvn_renderpass.cpp: the last render passes begun
+}
+
 namespace {
 
 struct sigaction g_previous[32];  // the handlers before ours (debuggerd's)
@@ -499,6 +503,7 @@ void crash(int sig, siginfo_t* info, void* uc) {
                     (unsigned long long)c.x[k + 1], (unsigned long long)c.x[k + 2], (unsigned long long)c.x[k + 3]);
         nx::backtrace(c);
         nx::log_recent_files();
+        nx::nvn::log_recent_passes();
     }
     // Hand the signal to the previous handler, Android's debuggerd: it logs the host backtrace (a tombstone).
     const struct sigaction& prev = g_previous[sig];
