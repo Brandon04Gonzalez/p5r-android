@@ -123,6 +123,17 @@ VkShaderModule module_of(const ShaderInfo* s, const uint8_t* kinds = nullptr, ui
                 std::remove(in.c_str()), std::remove(out.c_str());
             }
         }
+        // NX_TRACE_PIPELINES: the module as the driver gets it, after every patch, to rebuild a failing pipeline
+        // outside the game (<data>/pipeline_spirv/<hash>_<unwritten>.spv).
+        static const bool dump = std::getenv("NX_TRACE_PIPELINES") != nullptr;
+        if (dump) {
+            const std::string dir = plat::data_root() + "/pipeline_spirv/";
+            plat::make_dirs(dir);
+            if (FILE* f = plat::fopen_utf8(dir + s->hash + "_" + std::to_string(unwritten) + ".spv", "wb")) {
+                std::fwrite(code.data(), 4, code.size(), f);
+                std::fclose(f);
+            }
+        }
         VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         ci.codeSize = code.size() * 4;
         ci.pCode = code.data();
@@ -298,10 +309,15 @@ const ProgramLayout& program_layout(const std::vector<const ShaderInfo*>& stages
             if (n < 64 && dynamic >> n & 1) b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         pl.dynamic = dynamic;
     }
+    static const bool trace = std::getenv("NX_TRACE_PIPELINES") != nullptr;
     for (int k = 0; k < 4; k++) {
         std::vector<VkDescriptorSetLayoutBinding> v;
         for (auto& [n, b] : sets[k]) v.push_back(b);
         pl.sets[k] = set_layout(v);
+        if (trace)
+            for (const VkDescriptorSetLayoutBinding& b : v)
+                log("nvn/vk: layout set %d binding %u: type %d count %u stages %#x", k, b.binding, int(b.descriptorType),
+                    b.descriptorCount, unsigned(b.stageFlags));
     }
     VkPipelineLayoutCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO};
     ci.setLayoutCount = 4;
@@ -920,8 +936,19 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
     VkGraphicsPipelineCreateInfo& ci = B.ci;
     ci = {VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO};
     ci.pNext = &ri;
-    if (render_pass_objects())  // nvn_renderpass.cpp: compatible with every pass of these formats
+    if (render_pass_objects()) {  // nvn_renderpass.cpp: compatible with every pass of these formats
         ci.pNext = nullptr, ci.renderPass = compatible_render_pass(key.color_count, key.color_formats, key.depth_format);
+        // PowerVR (BXM-8-256 on the moto g54): vkCreateGraphicsPipelines with a pipeline cache crashes inside the
+        // driver when the subpass has an unused colour slot (VK_ATTACHMENT_UNUSED); the same pipeline compiles with no
+        // cache, or with every slot used. Those pipelines skip the cache there, the others keep it.
+        bool unused_slot = false;
+        for (uint32_t k = 0; k < key.color_count && k < 8; k++) unused_slot |= key.color_formats[k] == VK_FORMAT_UNDEFINED;
+        if (unused_slot && B.cache && is_powervr()) {
+            B.cache = VK_NULL_HANDLE;
+            static bool logged = false;
+            if (!logged) logged = true, log("nvn/vk: PowerVR: pipelines with an unused colour slot are made without the cache");
+        }
+    }
     ci.stageCount = nstages;
     ci.pStages = stages;
     ci.pVertexInputState = &vi;
@@ -933,6 +960,24 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
     ci.pColorBlendState = &cb;
     ci.pDynamicState = &dy;
     ci.layout = layout.layout;
+    if (trace) {  // the fixed-function state too, to tell a driver's failing pipeline from the ones it compiles
+        log("nvn/vk:   state: topology %d restart %d, %zu bindings %zu attribs, polygon %d cull %#x front %d, clamp %d "
+            "bias %d, a2c %d, clip control %d, render pass %d, uw %d",
+            int(ia.topology), int(ia.primitiveRestartEnable), binds.size(), attrs.size(), int(rs.polygonMode),
+            unsigned(rs.cullMode), int(rs.frontFace), int(rs.depthClampEnable), int(rs.depthBiasEnable),
+            int(ms.alphaToCoverageEnable), int(vp.pNext != nullptr), int(ci.renderPass != VK_NULL_HANDLE),
+            int(key.uw_x > 0));
+        log("nvn/vk:   depth: format %d test %d write %d op %d, stencil %d (front %d/%d/%d/%d back %d/%d/%d/%d)",
+            int(key.depth_format), int(ds.depthTestEnable), int(ds.depthWriteEnable), int(ds.depthCompareOp),
+            int(ds.stencilTestEnable), int(ds.front.failOp), int(ds.front.passOp), int(ds.front.depthFailOp),
+            int(ds.front.compareOp), int(ds.back.failOp), int(ds.back.passOp), int(ds.back.depthFailOp),
+            int(ds.back.compareOp));
+        for (uint32_t k = 0; k < key.color_count; k++)
+            log("nvn/vk:   color %u: format %d blend %d rgb %d*%d op %d alpha %d*%d op %d mask %#x", k,
+                int(B.color_formats[k]), int(att[k].blendEnable), int(att[k].srcColorBlendFactor),
+                int(att[k].dstColorBlendFactor), int(att[k].colorBlendOp), int(att[k].srcAlphaBlendFactor),
+                int(att[k].dstAlphaBlendFactor), int(att[k].alphaBlendOp), unsigned(att[k].colorWriteMask));
+    }
     return build;
 }
 
