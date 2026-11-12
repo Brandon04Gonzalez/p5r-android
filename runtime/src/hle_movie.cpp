@@ -222,7 +222,17 @@ constexpr int32_t kColorI420 = 19, kColorNV12 = 21, kColorFlexible = 0x7F420888,
 void to_nv12(const Decoder& d, const uint8_t* src, size_t size, std::vector<uint8_t>& out) {
     const int32_t w = d.width, h = d.height;
     int32_t stride = d.codec_stride > 0 ? d.codec_stride : w, rows = d.codec_rows > 0 ? d.codec_rows : h;
-    if (d.color == kColorQcom32m && d.codec_stride <= 0) stride = (w + 127) & ~127, rows = (h + 31) & ~31;
+    // Qualcomm (kColorQcom32m or c2.qti.*/OMX.qcom.*): stride aligns to 128, rows to 32. Apply each
+    // alignment independently — the codec may report stride but omit slice-height, leaving rows wrong.
+    {
+        const bool is_qcom = d.color == kColorQcom32m ||
+                             (!d.has_planes && (d.codec_name.find(".qti.") != std::string::npos ||
+                                               d.codec_name.find(".qcom.") != std::string::npos));
+        if (is_qcom) {
+            if (d.codec_stride <= 0) stride = (w + 127) & ~127;
+            if (d.codec_rows <= 0) rows = (h + 31) & ~31;
+        }
+    }
     out.resize(size_t(w) * h * 3 / 2);
     diag::movie_frame_alloc(out.size(), out.capacity());
     if (d.has_planes && d.plane_row[0] > 0 && d.plane_row[1] > 0 && d.plane_row[2] > 0) {

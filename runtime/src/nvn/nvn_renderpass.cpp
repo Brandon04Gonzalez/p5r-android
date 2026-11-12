@@ -35,6 +35,21 @@ struct FramebufferKey {
 std::map<FramebufferKey, VkFramebuffer> g_framebuffers;
 uint64_t g_framebuffers_made = 0;
 
+// The last passes begun, for the crash report (log_recent_passes): a driver crash inside vkCmdEndRenderPass names no
+// pass. Written without a lock (one recording thread at a time; a torn entry in a crash report is acceptable).
+struct RecentPass {
+    uint64_t seq;
+    VkRenderPass rp;
+    VkFramebuffer fb;
+    VkImageView view0, view1;
+    uint32_t count, n, w, h;
+    int32_t fmt[4], depth;
+    uint32_t loads[10];
+};
+constexpr uint32_t kRecentPasses = 16;
+RecentPass g_recent_passes[kRecentPasses];
+uint64_t g_recent_pass_seq = 0;
+
 bool has_stencil(VkFormat f) {
     return f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_S8_UINT ||
            f == VK_FORMAT_D16_UNORM_S8_UINT;
@@ -84,6 +99,10 @@ VkRenderPass make_pass(const PassKey& k, uint32_t count) {
     ci.pSubpasses = &sp;
     VkRenderPass rp = VK_NULL_HANDLE;
     if (p_vkCreateRenderPass(vk_device(), &ci, nullptr, &rp) != VK_SUCCESS) log("nvn/vk: vkCreateRenderPass failed");
+    static const bool trace = std::getenv("NX_TRACE_PIPELINES") != nullptr;
+    if (trace)
+        log("nvn/vk: render pass %u colour slots (%d %d %d %d), %u attachments, depth %d%s", count, int(k[0]),
+            int(k[1]), int(k[2]), int(k[3]), n, int(k[8]), k[10] || k[18] ? " (load variant)" : "");
     return rp;
 }
 
@@ -167,6 +186,12 @@ void begin_render_pass(VkCommandBuffer cb, uint32_t count, const VkFormat* forma
         }
         g_framebuffers_made++;
     }
+    {
+        RecentPass& r = g_recent_passes[g_recent_pass_seq % kRecentPasses];
+        r = {++g_recent_pass_seq, rp, fb, fk.views[0], fk.views[1], count, n, extent.width, extent.height, {}, int32_t(depth_format), {}};
+        for (uint32_t c = 0; c < 4; c++) r.fmt[c] = c < count ? int32_t(fmt[c]) : 0;
+        std::memcpy(r.loads, loads, sizeof r.loads);
+    }
     VkRenderPassBeginInfo bi{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
     bi.renderPass = rp;
     bi.framebuffer = fb;
@@ -188,6 +213,18 @@ void forget_framebuffers(VkImageView view) {
         }
         if (it->second) p_vkDestroyFramebuffer(vk_device(), it->second, nullptr);
         it = g_framebuffers.erase(it);
+    }
+}
+
+void log_recent_passes() {
+    if (!render_pass_objects() || !g_recent_pass_seq) return;
+    log("  last render passes begun (newest last; loads: colour 0..1, depth, stencil, 0 = LOAD variant):");
+    for (uint64_t k = 0; k < kRecentPasses; k++) {
+        const RecentPass& r = g_recent_passes[(g_recent_pass_seq + k) % kRecentPasses];
+        if (!r.seq) continue;
+        log("    #%llu rp %p fb %p views %p %p: %u slots (%d %d %d %d), %u attachments, depth %d, %ux%u, loads %u %u %u %u",
+            (unsigned long long)r.seq, (void*)r.rp, (void*)r.fb, (void*)r.view0, (void*)r.view1, r.count, r.fmt[0],
+            r.fmt[1], r.fmt[2], r.fmt[3], r.n, r.depth, r.w, r.h, r.loads[0], r.loads[1], r.loads[8], r.loads[9]);
     }
 }
 

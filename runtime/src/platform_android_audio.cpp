@@ -132,12 +132,13 @@ aaudio_data_callback_result_t audio_cb(AAudioStream*, void*, void* out, int32_t 
 #endif
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
-}  // namespace
+void audio_error_cb(AAudioStream*, void*, aaudio_result_t error) {
+    if (error == AAUDIO_ERROR_DISCONNECTED) {
+        nx::log("audio: AAudio stream disconnected (error %d)", int(error));
+    }
+}
 
-bool audio_open(AudioDone done) {
-    g_done = done;
-    // NX_MUTE=1 (and headless test runs): no device, the callers pace themselves with a timer (as on Windows and macOS).
-    if (headless() || std::getenv("NX_MUTE")) return false;
+bool audio_stream_create() {
     AAudioStreamBuilder* b = nullptr;
     if (AAudio_createStreamBuilder(&b) != AAUDIO_OK) return false;
     AAudioStreamBuilder_setFormat(b, AAUDIO_FORMAT_PCM_I16);
@@ -145,6 +146,7 @@ bool audio_open(AudioDone done) {
     AAudioStreamBuilder_setSampleRate(b, 48000);
     AAudioStreamBuilder_setPerformanceMode(b, AAUDIO_PERFORMANCE_MODE_LOW_LATENCY);
     AAudioStreamBuilder_setDataCallback(b, audio_cb, nullptr);
+    AAudioStreamBuilder_setErrorCallback(b, audio_error_cb, nullptr);
     bool ok = AAudioStreamBuilder_openStream(b, &g_stream) == AAUDIO_OK && AAudioStream_requestStart(g_stream) == AAUDIO_OK;
     AAudioStreamBuilder_delete(b);
     if (ok)
@@ -154,12 +156,37 @@ bool audio_open(AudioDone done) {
     return ok;
 }
 
+void audio_reopen_if_disconnected() {
+    if (!g_stream || AAudioStream_getState(g_stream) == AAUDIO_STREAM_STATE_DISCONNECTED) {
+        if (g_stream) {
+            AAudioStream_close(g_stream);
+            g_stream = nullptr;
+        }
+        audio_stream_create();
+    }
+}
+}  // namespace
+
+bool audio_open(AudioDone done) {
+    g_done = done;
+    // NX_MUTE=1 (and headless test runs): no device, the callers pace themselves with a timer (as on Windows and macOS).
+    if (headless() || std::getenv("NX_MUTE")) return false;
+    return audio_stream_create();
+}
+
 void audio_pause(bool paused) {
     if (!g_stream) return;
-    if (paused)
+    if (paused) {
         AAudioStream_requestPause(g_stream);
-    else
-        AAudioStream_requestStart(g_stream);
+    } else {
+        audio_reopen_if_disconnected();
+        if (g_stream) {
+            aaudio_result_t res = AAudioStream_requestStart(g_stream);
+            if (res == AAUDIO_ERROR_DISCONNECTED) {
+                audio_reopen_if_disconnected();
+            }
+        }
+    }
 }
 
 // When the buffer starting at ring position `start` reaches the speaker: AAudio's last timestamp (a frame the device
@@ -169,7 +196,7 @@ static void measure_latency(uint64_t start, uint64_t read, uint64_t device) {
     static uint32_t n = 0;
     if (n++ % 8) return;
     int64_t pos = 0, at = 0;
-    if (AAudioStream_getTimestamp(g_stream, CLOCK_MONOTONIC, &pos, &at) != AAUDIO_OK || at <= 0) {
+    if (!g_stream || AAudioStream_getTimestamp(g_stream, CLOCK_MONOTONIC, &pos, &at) != AAUDIO_OK || at <= 0) {
         g_latency_early.fetch_add(1, std::memory_order_relaxed);
         return;
     }
@@ -186,6 +213,7 @@ static void measure_latency(uint64_t start, uint64_t read, uint64_t device) {
 }
 
 bool audio_submit(const void* data, size_t bytes, void* ctx) {
+    audio_reopen_if_disconnected();
     if (!g_stream) return false;
     uint64_t start, read, device;
 #if NX_DIAGNOSTICS_ON
