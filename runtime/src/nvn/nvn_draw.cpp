@@ -1050,6 +1050,7 @@ void pass_end_only(VkCommandBuffer cb, int reason) {
     else
         p_vkCmdEndRendering(cb);
     g_rendering = false;
+    g_bound = Bound{};  // each render pass instance requires pipelines and dynamic state to be bound
     // What the pass wrote is read by what follows (sampled, copied, loaded by the next pass), and what it sampled may
     // be rendered over next. The images stay GENERAL, so transition() records no barrier. Metal (MoltenVK) and the
     // Intel driver ordered passes anyway; NVIDIA overlaps them, and later passes read half-written tiles: the course
@@ -1093,7 +1094,7 @@ void pass_end_for_transfer(VkCommandBuffer cb) {
     if (!g_rendering || cb != g_pass_cb) return;
     static uint64_t n = 0;
     if (n++ < 8) log("nvn/vk: a layout change inside a pass (%llu so far): the pass ends first", (unsigned long long)n);
-    pass_end_only(cb, 5);
+    draw_end_rendering(cb, 5);
 }
 bool pass_open_on(const Targets& t) { return g_rendering && targets_same(g_pass, t); }
 VkExtent2D pass_extent() { return g_pass_extent; }
