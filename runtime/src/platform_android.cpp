@@ -7,6 +7,7 @@
 //   <files>/user/...                  saves
 //   <files>/config.txt                optional: resolution=WxH
 #include <aaudio/AAudio.h>
+#include <android/api-level.h>
 #include <android/log.h>
 #include <android/native_window.h>
 #include <android/window.h>
@@ -25,7 +26,9 @@
 #include <algorithm>
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <deque>
 #include <filesystem>
@@ -643,6 +646,296 @@ extern "C" JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, vo
     if (g_ui_pipe[0] < 0 && pipe2(g_ui_pipe, O_NONBLOCK | O_CLOEXEC) == 0)
         ALooper_addFd(ALooper_forThread(), g_ui_pipe[0], ALOOPER_POLL_CALLBACK, ALOOPER_EVENT_INPUT, on_ui_request, nullptr);
     glue_ANativeActivity_onCreate(activity, saved, size);
+}
+
+// ---- vibration (plat::rumble) ---------------------------------------------------------------------------------
+// The game sends its motors' strength as often as it likes; it holds until the game sends another, as on a Switch. A
+// thread of our own turns it into Vibrator calls: a 200 ms one-shot at that strength, renewed every 100 ms while it
+// holds or as soon as it changes, cancelled when it drops to 0 or the app goes to the background. The thread sleeps
+// until the strength changes while the motor is off. The motor: the controller the player last pressed a button on
+// when it is an external one with motors of its own (Android 12+, InputDevice.getVibratorManager), else the device's
+// own (a handheld's, or the phone's). Android is told it is a game's vibration (media vibration), not touch feedback,
+// which players often turn off. Strength in percent: NX_VIBRATION=<0..100> in config.txt (default 100; 0: off). The
+// game's amplitudes (HD rumble, mostly 0.1..0.6) are taken as their square root, as a Switch controller's resonant
+// motor feels stronger than a phone's at the same value.
+
+namespace {
+
+std::mutex g_rumble_m;
+std::condition_variable g_rumble_cv;
+float g_rumble = 0.0f;         // the strength the game sent last (under g_rumble_m)
+bool g_rumble_changed = false;  // since the thread last looked (under g_rumble_m)
+std::atomic<int32_t> g_controller{-1};  // the input device of the last gamepad input
+
+int rumble_percent() {
+    static const int pct = [] {
+        const char* e = std::getenv("NX_VIBRATION");
+        return e ? std::clamp(std::atoi(e), 0, 100) : 100;
+    }();
+    return pct;
+}
+
+// The Java side of the motors. Classes and methods that the device's Android version lacks stay null.
+struct Vibration {
+    JNIEnv* env = nullptr;
+    int sdk = 0;
+    jobject system = nullptr;     // Vibrator, the device's own (global ref)
+    bool system_amplitude = false;
+    jobject attributes = nullptr;  // VibrationAttributes USAGE_MEDIA (Android 11+, global ref)
+    jobject audio_attributes = nullptr;  // AudioAttributes USAGE_GAME (before Android 13, global ref)
+    jclass effect_class = nullptr, combined_class = nullptr;
+    jmethodID one_shot = nullptr, parallel = nullptr;
+    jmethodID vibrate_attrs = nullptr, vibrate_audio = nullptr, cancel = nullptr;  // Vibrator
+    jmethodID manager_vibrate = nullptr, manager_cancel = nullptr;                 // VibratorManager
+    // The controller's motors: its VibratorManager (global ref), null when the device's own are used.
+    jobject controller = nullptr;
+    int32_t controller_id = -1;
+    bool controller_amplitude = false;
+
+    bool failed() {
+        if (!env->ExceptionCheck()) return false;
+        env->ExceptionClear();
+        return true;
+    }
+    jclass find(const char* name) {
+        jclass c = env->FindClass(name);
+        if (failed() || !c) return nullptr;
+        jclass g = static_cast<jclass>(env->NewGlobalRef(c));
+        env->DeleteLocalRef(c);
+        return g;
+    }
+    jmethodID method(jclass c, const char* name, const char* sig) {
+        jmethodID m = c ? env->GetMethodID(c, name, sig) : nullptr;
+        return failed() ? nullptr : m;
+    }
+    jobject global(jobject o) {
+        jobject g = o ? env->NewGlobalRef(o) : nullptr;
+        if (o) env->DeleteLocalRef(o);
+        return g;
+    }
+
+    bool init() {
+        sdk = android_get_device_api_level();
+        jobject act = g_activity->clazz;
+        jclass act_class = env->GetObjectClass(act);
+        jmethodID get_service = method(act_class, "getSystemService", "(Ljava/lang/String;)Ljava/lang/Object;");
+        env->DeleteLocalRef(act_class);
+        jstring name = env->NewStringUTF("vibrator");
+        jobject vib = get_service ? env->CallObjectMethod(act, get_service, name) : nullptr;
+        env->DeleteLocalRef(name);
+        if (failed()) vib = nullptr;
+        system = global(vib);
+        jclass vc = find("android/os/Vibrator");
+        effect_class = find("android/os/VibrationEffect");
+        one_shot = effect_class ? env->GetStaticMethodID(effect_class, "createOneShot", "(JI)Landroid/os/VibrationEffect;")
+                                : nullptr;
+        if (failed()) one_shot = nullptr;
+        cancel = method(vc, "cancel", "()V");
+        if (sdk >= 30) {  // VibrationAttributes.Builder().setUsage(USAGE_MEDIA).build()
+            jclass bc = find("android/os/VibrationAttributes$Builder");
+            jmethodID ctor = method(bc, "<init>", "()V");
+            jmethodID set_usage = method(bc, "setUsage", "(I)Landroid/os/VibrationAttributes$Builder;");
+            jmethodID build = method(bc, "build", "()Landroid/os/VibrationAttributes;");
+            if (ctor && set_usage && build) {
+                jobject b = env->NewObject(bc, ctor);
+                jobject b2 = b && !failed() ? env->CallObjectMethod(b, set_usage, jint(19)) : nullptr;  // USAGE_MEDIA
+                jobject a = b2 && !failed() ? env->CallObjectMethod(b2, build) : nullptr;
+                if (failed()) a = nullptr;
+                attributes = global(a);
+                if (b2) env->DeleteLocalRef(b2);
+                if (b) env->DeleteLocalRef(b);
+            }
+            if (bc) env->DeleteGlobalRef(bc);
+        }
+        if (sdk >= 33 && attributes)
+            vibrate_attrs = method(vc, "vibrate", "(Landroid/os/VibrationEffect;Landroid/os/VibrationAttributes;)V");
+        if (!vibrate_attrs) {  // AudioAttributes.Builder().setUsage(USAGE_GAME).build()
+            jclass bc = find("android/media/AudioAttributes$Builder");
+            jmethodID ctor = method(bc, "<init>", "()V");
+            jmethodID set_usage = method(bc, "setUsage", "(I)Landroid/media/AudioAttributes$Builder;");
+            jmethodID build = method(bc, "build", "()Landroid/media/AudioAttributes;");
+            if (ctor && set_usage && build) {
+                jobject b = env->NewObject(bc, ctor);
+                jobject b2 = b && !failed() ? env->CallObjectMethod(b, set_usage, jint(14)) : nullptr;  // USAGE_GAME
+                jobject a = b2 && !failed() ? env->CallObjectMethod(b2, build) : nullptr;
+                if (failed()) a = nullptr;
+                audio_attributes = global(a);
+                if (b2) env->DeleteLocalRef(b2);
+                if (b) env->DeleteLocalRef(b);
+            }
+            if (bc) env->DeleteGlobalRef(bc);
+            vibrate_audio = method(vc, "vibrate", "(Landroid/os/VibrationEffect;Landroid/media/AudioAttributes;)V");
+        }
+        if (system && vc) {
+            jmethodID has = method(vc, "hasVibrator", "()Z");
+            if (!has || !env->CallBooleanMethod(system, has) || failed()) {
+                env->DeleteGlobalRef(system);
+                system = nullptr;
+            }
+        }
+        if (system) system_amplitude = amplitude_control(system);
+        if (sdk >= 31 && attributes) {
+            combined_class = find("android/os/CombinedVibration");
+            parallel = combined_class ? env->GetStaticMethodID(combined_class, "createParallel",
+                                                               "(Landroid/os/VibrationEffect;)Landroid/os/CombinedVibration;")
+                                      : nullptr;
+            if (failed()) parallel = nullptr;
+            jclass mc = find("android/os/VibratorManager");
+            manager_vibrate = method(mc, "vibrate", "(Landroid/os/CombinedVibration;Landroid/os/VibrationAttributes;)V");
+            manager_cancel = method(mc, "cancel", "()V");
+            if (mc) env->DeleteGlobalRef(mc);
+        }
+        if (vc) env->DeleteGlobalRef(vc);
+        const bool can_system = system && cancel && (vibrate_attrs || (vibrate_audio && audio_attributes));
+        if (!can_system) {
+            if (system) env->DeleteGlobalRef(system);
+            system = nullptr;
+        }
+        nx::log("vibration: %s, strength %d%%%s",
+                system ? (system_amplitude ? "the device's vibrator (amplitude control)" : "the device's vibrator (on/off only)")
+                       : "no vibrator on this device",
+                rumble_percent(), manager_vibrate && parallel ? "; external controllers' own motors when they have some" : "");
+        return one_shot && (system || (manager_vibrate && parallel));
+    }
+
+    bool amplitude_control(jobject vibrator) {
+        jclass c = env->GetObjectClass(vibrator);
+        jmethodID m = method(c, "hasAmplitudeControl", "()Z");
+        env->DeleteLocalRef(c);
+        const bool on = m && env->CallBooleanMethod(vibrator, m);
+        return !failed() && on;
+    }
+
+    // The controller `id`'s VibratorManager, when it is an external controller with motors (Android 12+).
+    void pick_controller(int32_t id) {
+        if (id == controller_id) return;
+        stop();
+        if (controller) env->DeleteGlobalRef(controller), controller = nullptr;
+        controller_id = id;
+        if (id < 0 || !manager_vibrate || !manager_cancel || !parallel) return;
+        jclass ic = env->FindClass("android/view/InputDevice");
+        if (failed() || !ic) return;
+        jmethodID get_device = env->GetStaticMethodID(ic, "getDevice", "(I)Landroid/view/InputDevice;");
+        jmethodID is_external = failed() ? nullptr : env->GetMethodID(ic, "isExternal", "()Z");
+        jmethodID get_manager = failed() ? nullptr : env->GetMethodID(ic, "getVibratorManager", "()Landroid/os/VibratorManager;");
+        jmethodID get_name = failed() ? nullptr : env->GetMethodID(ic, "getName", "()Ljava/lang/String;");
+        if (failed() || !get_device || !is_external || !get_manager || !get_name) {
+            env->DeleteLocalRef(ic);
+            return;
+        }
+        jobject dev = env->CallStaticObjectMethod(ic, get_device, jint(id));
+        if (failed()) dev = nullptr;
+        jobject mgr = dev && env->CallBooleanMethod(dev, is_external) && !failed() ? env->CallObjectMethod(dev, get_manager)
+                                                                                 : nullptr;
+        if (failed()) mgr = nullptr;
+        if (mgr) {
+            jclass mc = env->GetObjectClass(mgr);
+            jmethodID ids = method(mc, "getVibratorIds", "()[I");
+            jmethodID def = method(mc, "getDefaultVibrator", "()Landroid/os/Vibrator;");
+            env->DeleteLocalRef(mc);
+            jintArray arr = ids ? static_cast<jintArray>(env->CallObjectMethod(mgr, ids)) : nullptr;
+            if (failed()) arr = nullptr;
+            const jsize motors = arr ? env->GetArrayLength(arr) : 0;
+            if (arr) env->DeleteLocalRef(arr);
+            if (motors > 0) {
+                jobject v = def ? env->CallObjectMethod(mgr, def) : nullptr;
+                if (failed()) v = nullptr;
+                controller_amplitude = v && amplitude_control(v);
+                if (v) env->DeleteLocalRef(v);
+                controller = global(mgr), mgr = nullptr;
+                jstring n = static_cast<jstring>(env->CallObjectMethod(dev, get_name));
+                const char* name = n && !failed() ? env->GetStringUTFChars(n, nullptr) : nullptr;
+                nx::log("vibration: controller \"%s\", %d motor%s, %s", name ? name : "?", int(motors), motors == 1 ? "" : "s",
+                        controller_amplitude ? "amplitude control" : "on/off only");
+                if (name) env->ReleaseStringUTFChars(n, name);
+                if (n) env->DeleteLocalRef(n);
+            }
+            if (mgr) env->DeleteLocalRef(mgr);
+        }
+        if (dev) env->DeleteLocalRef(dev);
+        env->DeleteLocalRef(ic);
+    }
+
+    bool amplitude() const { return controller ? controller_amplitude : system_amplitude; }
+
+    void vibrate(int amp) {  // amp 1..255, or -1 (VibrationEffect.DEFAULT_AMPLITUDE)
+        jobject effect = env->CallStaticObjectMethod(effect_class, one_shot, jlong(200), jint(amp));
+        if (failed() || !effect) return;
+        if (controller) {
+            jobject combined = env->CallStaticObjectMethod(combined_class, parallel, effect);
+            if (!failed() && combined) env->CallVoidMethod(controller, manager_vibrate, combined, attributes), failed();
+            if (combined) env->DeleteLocalRef(combined);
+        } else if (system) {
+            if (vibrate_attrs)
+                env->CallVoidMethod(system, vibrate_attrs, effect, attributes);
+            else
+                env->CallVoidMethod(system, vibrate_audio, effect, audio_attributes);
+            failed();
+        }
+        env->DeleteLocalRef(effect);
+    }
+
+    void stop() {
+        if (controller)
+            env->CallVoidMethod(controller, manager_cancel), failed();
+        else if (system)
+            env->CallVoidMethod(system, cancel), failed();
+    }
+};
+
+void rumble_thread(void*) {
+    nx::plat::set_thread_name("rumble");
+    Vibration v;
+    if (!g_activity || g_activity->vm->AttachCurrentThread(&v.env, nullptr) != JNI_OK) return;
+    if (!v.init()) {
+        g_activity->vm->DetachCurrentThread();
+        return;
+    }
+    int last = 0;
+    uint64_t renew = 0;
+    std::unique_lock lk(g_rumble_m);
+    for (;;) {
+        if (last == 0)
+            g_rumble_cv.wait(lk, [] { return g_rumble_changed; });
+        else
+            g_rumble_cv.wait_for(lk, std::chrono::milliseconds(100), [] { return g_rumble_changed; });
+        g_rumble_changed = false;
+        float s = g_rumble;
+        lk.unlock();
+        const uint64_t now = nx::plat::monotonic_ns();
+        if (nx::plat::window_minimized()) s = 0.0f;
+        const int32_t id = g_controller.load();
+        if (id != v.controller_id) v.pick_controller(id), last = 0;  // pick_controller stopped the old motors
+        int amp = 0;
+        if (s >= 0.02f)
+            amp = v.amplitude() ? std::clamp(int(std::lround(std::sqrt(s) * float(rumble_percent()) * 2.55f)), 1, 255)
+                                : -1;  // VibrationEffect.DEFAULT_AMPLITUDE
+        if (amp == 0) {
+            if (last) v.stop();
+            last = 0;
+        } else if ((amp != last && (std::abs(amp - last) >= 16 || last == 0)) || now >= renew) {
+            v.vibrate(amp);
+            last = amp, renew = now + 100'000'000ull;
+        }
+        lk.lock();
+    }
+}
+
+}  // namespace
+
+void nx::plat::note_controller(int32_t device_id) { g_controller.store(device_id, std::memory_order_relaxed); }
+
+void nx::plat::rumble(float strength) {
+    if (rumble_percent() == 0) return;
+    {
+        std::lock_guard lk(g_rumble_m);
+        if (strength == g_rumble) return;
+        g_rumble = strength;
+        g_rumble_changed = true;
+    }
+    g_rumble_cv.notify_one();
+    static std::once_flag started;
+    if (strength > 0.0f) std::call_once(started, [] { nx::plat::start_thread(rumble_thread, nullptr, 256u << 10); });
 }
 
 // All-files access (Android 11+): needed to read Internal storage/<game title>. Asks for it by opening the system page.

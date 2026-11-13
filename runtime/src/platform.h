@@ -79,6 +79,10 @@ struct PadState {
     int32_t lx = 0, ly = 0, rx = 0, ry = 0;
 };
 void read_pad(PadState& p);  // player 1
+// Player 1's vibration, 0 (off) .. 1 (strongest), whenever the game changes it; it holds until the next call.
+// Android: an external controller's motors, else the device's own; nothing elsewhere.
+// NX_VIBRATION=<0..100>: the strength in percent, 0 off.
+void rumble(float strength);
 // Touch controls to draw over the picture (touch_layout.cpp, platform_android_input.cpp): circles at x, y (0..1
 // across the landscape screen), radius r (a fraction of its height), opacity alpha, and a label drawn in the middle
 // (touch_label(): up to two glyphs of kFont in nvn/nvn_present.cpp; 0 none). 0 where nothing is drawn.

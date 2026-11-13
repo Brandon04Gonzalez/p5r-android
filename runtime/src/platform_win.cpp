@@ -239,6 +239,8 @@ bool headless() {  // NX_HEADLESS (platform.h)
     return on;
 }
 
+void rumble(float) {}  // no vibration here
+
 void read_pad(PadState& p) {
     XINPUT_STATE xs{};
     if (XInputGetState(0, &xs) == ERROR_SUCCESS) {
