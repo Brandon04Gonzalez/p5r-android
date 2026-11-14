@@ -91,9 +91,9 @@ bool raster_command(const Cmd& c) {
             uint8_t* v = c.op == Cmd::SetStencilRef    ? s.stencil_ref
                          : c.op == Cmd::SetStencilMask ? s.stencil_write_mask
                                                        : s.stencil_compare_mask;
-            // Apply to both faces when front-only or back-only is set, because negative-height viewport flips face
-            // orientation relative to NVN when front_face is not explicitly re-specified.
-            if (c.mask & 3) v[0] = v[1] = uint8_t(c.n);
+            // With inverted viewport height on Vulkan, 2D UI quads have flipped primitive
+            // winding in framebuffer space. Always update both front and back slots uniformly.
+            v[0] = v[1] = uint8_t(c.n);
             return true;
         }
         case Cmd::SetPolygonOffsetClamp:

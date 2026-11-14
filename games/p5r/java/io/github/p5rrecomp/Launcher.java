@@ -332,6 +332,8 @@ public class Launcher extends Activity {
                 new String[] {"Desactivado", "Activado"}, new String[] {"Off", "On"}, 0));
         options.add(new Option("NX_TOUCH_SHOW", "Controles táctiles", "On-screen controls", new String[] {"1", "0"},
                 new String[] {"Activados", "Desactivados"}, new String[] {"On", "Off"}, 0));
+        options.add(new Option("NX_TOUCH_HIDE", "Ocultar controles", "Hide controls", new String[] {"0", "1"},
+                new String[] {"No (visibles)", "Sí (invisibles)"}, new String[] {"No (visible)", "Yes (invisible)"}, 0));
         options.add(new Option("NX_TOUCH_SIZE", "Tamaño de los botones", "Button size",
                 new String[] {"80", "100", "125"}, new String[] {"Pequeño", "Normal", "Grande"},
                 new String[] {"Small", "Normal", "Large"}, 1));

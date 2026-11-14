@@ -162,6 +162,7 @@ void boot() {
     // read in place (game_image.h), else from the data folder's exefs/.
     nce::init();
     static std::vector<std::unique_ptr<nce::NsoModule>> nso;
+    nso.clear();
     const std::string exefs = plat::data_root() + "/exefs";
     const nxi::GameImage* image = game_image();
 

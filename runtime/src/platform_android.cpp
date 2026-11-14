@@ -647,9 +647,11 @@ extern "C" JNIEXPORT void ANativeActivity_onCreate(ANativeActivity* activity, vo
 
 // All-files access (Android 11+): needed to read Internal storage/<game title>. Asks for it by opening the system page.
 static bool has_all_files_access(android_app* app) {
+    if (!app || !app->activity || !app->activity->vm) return true;
     JNIEnv* env = nullptr;
-    app->activity->vm->AttachCurrentThread(&env, nullptr);
+    if (app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return true;
     jclass envc = env->FindClass("android/os/Environment");
+    if (!envc) { if (env->ExceptionCheck()) env->ExceptionClear(); return true; }
     jmethodID m = env->GetStaticMethodID(envc, "isExternalStorageManager", "()Z");
     bool ok = m && env->CallStaticBooleanMethod(envc, m);
     if (env->ExceptionCheck()) env->ExceptionClear();
@@ -657,18 +659,23 @@ static bool has_all_files_access(android_app* app) {
 }
 
 static void request_all_files_access(android_app* app) {
+    if (!app || !app->activity || !app->activity->vm) return;
     JNIEnv* env = nullptr;
-    app->activity->vm->AttachCurrentThread(&env, nullptr);
+    if (app->activity->vm->AttachCurrentThread(&env, nullptr) != JNI_OK || !env) return;
     // The installed package (a test build may be renamed: android/build_apk.ps1 -TestPackage).
     jclass actc = env->GetObjectClass(app->activity->clazz);
-    auto pkg = static_cast<jstring>(env->CallObjectMethod(app->activity->clazz, env->GetMethodID(actc, "getPackageName", "()Ljava/lang/String;")));
+    if (!actc) { if (env->ExceptionCheck()) env->ExceptionClear(); return; }
+    jmethodID get_pkg = env->GetMethodID(actc, "getPackageName", "()Ljava/lang/String;");
+    auto pkg = get_pkg ? static_cast<jstring>(env->CallObjectMethod(app->activity->clazz, get_pkg)) : nullptr;
     const char* pkg_chars = pkg ? env->GetStringUTFChars(pkg, nullptr) : nullptr;
     const std::string name = pkg_chars ? pkg_chars : nx::game::kInfo.android_package;
     if (pkg_chars) env->ReleaseStringUTFChars(pkg, pkg_chars);
     jclass uric = env->FindClass("android/net/Uri");
+    if (!uric) { if (env->ExceptionCheck()) env->ExceptionClear(); return; }
     jobject uri = env->CallStaticObjectMethod(uric, env->GetStaticMethodID(uric, "parse", "(Ljava/lang/String;)Landroid/net/Uri;"),
                                               env->NewStringUTF(("package:" + name).c_str()));
     jclass intentc = env->FindClass("android/content/Intent");
+    if (!intentc) { if (env->ExceptionCheck()) env->ExceptionClear(); return; }
     jobject intent = env->NewObject(intentc, env->GetMethodID(intentc, "<init>", "(Ljava/lang/String;Landroid/net/Uri;)V"),
                                     env->NewStringUTF("android.settings.MANAGE_APP_ALL_FILES_ACCESS_PERMISSION"), uri);
     env->CallVoidMethod(app->activity->clazz, env->GetMethodID(actc, "startActivity", "(Landroid/content/Intent;)V"), intent);
@@ -689,14 +696,16 @@ extern "C" void android_main(android_app* app) {
     // external files folder (adb push).
     // The folder picked on the home screen (games/<game>/java Home.java writes <files>/data_root.txt) comes first.
     std::string chosen;
-    if (app->activity->internalDataPath) {
+    if (app && app->activity && app->activity->internalDataPath) {
         std::ifstream f(std::string(app->activity->internalDataPath) + "/data_root.txt");
         std::getline(f, chosen);
         while (!chosen.empty() && (chosen.back() == '\r' || chosen.back() == '\n' || chosen.back() == ' ')) chosen.pop_back();
     }
     const std::string shared = !chosen.empty() ? chosen : std::string("/storage/emulated/0/") + nx::game::kInfo.title;
-    const std::string own = app->activity->externalDataPath ? app->activity->externalDataPath : shared;
-    if (!has_data(own) && !has_all_files_access(app)) {
+    const std::string own = (app && app->activity && app->activity->externalDataPath) ? app->activity->externalDataPath : shared;
+    const bool has_image = (std::getenv("NX_GAME_FD") && *std::getenv("NX_GAME_FD")) ||
+                           (std::getenv("NX_GAME_NSP") && *std::getenv("NX_GAME_NSP"));
+    if (!has_image && !has_data(own) && !has_all_files_access(app)) {
         request_all_files_access(app);
         while (!has_all_files_access(app)) {  // keep the app responsive until the switch is turned on
             int events;
@@ -748,7 +757,8 @@ extern "C" void android_main(android_app* app) {
     uint32_t flags = AWINDOW_FLAG_KEEP_SCREEN_ON | AWINDOW_FLAG_FULLSCREEN;
     if (const char* e = getenv("NX_SHOW_WHEN_LOCKED"); e && e[0] == '1')
         flags |= AWINDOW_FLAG_SHOW_WHEN_LOCKED | AWINDOW_FLAG_TURN_SCREEN_ON;
-    ANativeActivity_setWindowFlags(app->activity, flags, 0);
+    if (app && app->activity)
+        ANativeActivity_setWindowFlags(app->activity, flags, 0);
 
     struct sigaction sa{};
     sa.sa_sigaction = crash;

@@ -528,10 +528,11 @@ VkCommandBuffer frame_chunk(VkCommandBuffer cb, uint64_t draws, bool pass_open) 
     if (!g_chunking || !s || cb != s->cbs[s->part] || s->part + 2 >= kMaxParts) return cb;
     if (g_chunk_from == UINT64_MAX) g_chunk_from = draws;
     uint64_t since = draws - g_chunk_from;
-    // A pass is cut after twice the parts' draws. On a tiler a cut pass is stored and loaded again (P5R's 3D passes,
-    // 250+ draws, on the Adreno 610: 65 ms of GPU per frame against 62), but the earlier start wins: 13.6 fps against
-    // 13.0 cutting only between passes, 11.7 without parts. NX_CHUNK_IN_PASS=0: never inside a pass.
-    static const bool in_pass = !std::getenv("NX_CHUNK_IN_PASS") || env_int("NX_CHUNK_IN_PASS") > 0;
+    // On mobile TBDR GPUs (Mali, Adreno), forcibly breaking an active VkRenderPass
+    // mid-pass flushes the entire tile buffer to RAM and can trigger GPU hangs or driver crashes.
+    // Default to only splitting at natural render pass boundaries unless
+    // NX_CHUNK_IN_PASS=1 is explicitly set.
+    static const bool in_pass = std::getenv("NX_CHUNK_IN_PASS") && env_int("NX_CHUNK_IN_PASS") > 0;
     if (since < g_chunk_draws || (pass_open && (!in_pass || since < 2 * g_chunk_draws))) return cb;
     g_stats.chunks++;
     return next_part(*s);

@@ -20,6 +20,8 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <chrono>
+#include <condition_variable>
 #include <cstdlib>
 #include <cstring>
 #include <deque>
@@ -224,14 +226,30 @@ void to_nv12(const Decoder& d, const uint8_t* src, size_t size, std::vector<uint
     int32_t stride = d.codec_stride > 0 ? d.codec_stride : w, rows = d.codec_rows > 0 ? d.codec_rows : h;
     // Qualcomm (kColorQcom32m or c2.qti.*/OMX.qcom.*): stride aligns to 128, rows to 32. Apply each
     // alignment independently — the codec may report stride but omit slice-height, leaving rows wrong.
+    // However, only apply 32-row alignment if the buffer size actually accommodates it; otherwise standard rows=h.
     {
         const bool is_qcom = d.color == kColorQcom32m ||
                              (!d.has_planes && (d.codec_name.find(".qti.") != std::string::npos ||
                                                d.codec_name.find(".qcom.") != std::string::npos));
         if (is_qcom) {
-            if (d.codec_stride <= 0) stride = (w + 127) & ~127;
-            if (d.codec_rows <= 0) rows = (h + 31) & ~31;
+            if (d.codec_stride <= 0) {
+                const int32_t aligned_stride = (w + 127) & ~127;
+                if (size_t(aligned_stride) * h * 3 / 2 <= size) stride = aligned_stride;
+                else stride = w;
+            }
+            if (d.codec_rows <= 0) {
+                const int32_t aligned_rows = (h + 31) & ~31;
+                if (size_t(stride) * aligned_rows + size_t(stride) * (h / 2) <= size) {
+                    rows = aligned_rows;
+                } else {
+                    rows = h;
+                }
+            }
         }
+    }
+    // Safety check: if stride * rows + stride * (h / 2) > size, rows must be clamped down to h
+    if (size_t(stride) * rows + size_t(stride) * (h / 2) > size && rows > h) {
+        rows = h;
     }
     out.resize(size_t(w) * h * 3 / 2);
     diag::movie_frame_alloc(out.size(), out.capacity());
@@ -476,6 +494,7 @@ void ev_trace(const char* what, int index, int extra = -1) {
 }
 
 std::mutex g_lock;
+std::condition_variable g_pump_cv;
 std::unordered_map<uint64_t, std::unique_ptr<Decoder>> g_decoders;
 uint64_t g_next_id = 1;
 
@@ -570,11 +589,29 @@ void DecoderGetOutputFormat(CPU& c) {
 void movie_pump_thread(CPU& c) {
     log("movie: pump thread running");
     for (;;) {
-        plat::sleep_ns(2'000'000);
         std::vector<uint64_t> events;
         bool dump = false;
         {
-            std::lock_guard lk(g_lock);
+            std::unique_lock lk(g_lock);
+            g_pump_cv.wait_for(lk, std::chrono::milliseconds(16), [] {
+                for (const auto& [id, d] : g_decoders)
+                    if (d->started && !d->codec_eos) return true;
+                return false;
+            });
+            bool any_active = false;
+            for (const auto& [id, d] : g_decoders)
+                if (d->started && !d->codec_eos) { any_active = true; break; }
+            if (!any_active) {
+                g_pump_cv.wait(lk, [] {
+                    for (const auto& [id, d] : g_decoders)
+                        if (d->started && !d->codec_eos) return true;
+                    return false;
+                });
+            } else {
+                lk.unlock();
+                plat::sleep_ns(2'000'000);
+                lk.lock();
+            }
             const uint64_t now = plat::monotonic_ns();
             for (auto& [id, d] : g_decoders) {
                 if (d->started && d->codec && pump(*d, 0)) events.push_back(d->events[kOutputAvailable]);
@@ -657,6 +694,7 @@ void DecoderStart(CPU& c) {
                 d->codec = nullptr;
             }
 #endif
+            g_pump_cv.notify_all();
         }
     }
 #if defined(__ANDROID__)
@@ -676,6 +714,7 @@ void DecoderStop(CPU& c) {
 #endif
         d->started = false;
         d->reset_queues();
+        g_pump_cv.notify_all();
     }
     c.x[0] = 0;
 }
@@ -754,6 +793,7 @@ void DecoderSendInputBufferForDecode(CPU& c) {
             diag::movie_send_wait(t1 - t0, t1);
             d->win.sent++;
             d->last_sent_ns = plat::monotonic_ns(), d->starve_logged = false, d->last_sent_pts = pts;
+            g_pump_cv.notify_all();
         } else
 #endif
             d->emit(pts, flags & kEndOfStream);

@@ -136,7 +136,8 @@ int run(int nsp_fd, const std::string& nsp_name, const std::string& keys, const 
     if (!harness || !g_harness_progress) return fail("the shader translator is incomplete");
     const std::string out_new = data_dir + "/spirv.new";
     remove_tree(out_new);
-    std::string jobs_s = std::to_string(jobs > 0 ? jobs : 4);
+    int num_jobs = std::clamp(jobs > 0 ? jobs : 4, 1, 4);
+    std::string jobs_s = std::to_string(num_jobs);
     const char* args[] = {"--batch", extracted.c_str(), "--out", out_new.c_str(), "--jobs", jobs_s.c_str(), "--no-val"};
     int rc = harness(int(sizeof args / sizeof args[0]), args);
     if (rc != 0) return fail("the shader translation failed (code " + std::to_string(rc) + ")");

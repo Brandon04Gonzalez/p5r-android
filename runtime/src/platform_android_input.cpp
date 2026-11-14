@@ -346,7 +346,7 @@ size_t touch_overlay(OverlayShape* out, size_t max) {
     const TouchButton* b = touch_buttons(n);
     if (!n) return 0;
     std::lock_guard lk(g_in);
-    if (g_gamepad || !touch_enabled()) return 0;
+    if (g_gamepad || !touch_enabled() || touch_hidden()) return 0;
     // Dimmed to a third while nobody touches the screen (cutscenes, videos), back at once on the next touch.
     const bool idle = g_touches.empty() && monotonic_ns() - g_last_touch_ns > kTouchIdleNs;
     const float shade = touch_opacity_scale() * (idle ? 0.35f : 1.0f);

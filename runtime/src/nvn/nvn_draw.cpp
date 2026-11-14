@@ -680,9 +680,13 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     // (live flag ui_rgb, PROGRESO 70). Only textured draws (the art): the untextured shapes with the same blending
     // build alpha that a later DST_ALPHA fill reads, as in the voice-language notice, whose black panel came out
     // grey when they kept it too (PROGRESO 71). NX_HUD_KEEP_ALPHA=all: untextured ones too; 0: as the game asks.
+    // Only draws that write all four channels: one the game masks to alpha alone builds alpha on purpose. The IM
+    // chat's selected choice draws its text again with mask 8 (alpha only) into the alpha the red cursor cleared,
+    // then a DST_ALPHA / ONE_MINUS_DST_ALPHA white fill turns that alpha into the white text; masked to 0 here, the
+    // cursor came out as a plain red box.
     static const char* keep_env = std::getenv("NX_HUD_KEEP_ALPHA");
     static const int keep_hud_alpha = !keep_env ? 0 : keep_env[0] == '1' ? 1 : keep_env[0] == 'a' ? 2 : 0;
-    if (keep_hud_alpha && key.color.blend_enable[0] && live_ui_draw(t) &&
+    if (keep_hud_alpha && key.color.blend_enable[0] && (key.mask.mask[0] & 0xF) == 0xF && live_ui_draw(t) &&
         (keep_hud_alpha == 2 || !g_textures.bindings.empty())) {
         const BlendTarget& b = key.blend[0];
         if (b.src_rgb == 5 && b.dst_rgb == 6 && b.src_a == 5 && b.dst_a == 6 && b.eq_rgb <= 1 && b.eq_a <= 1)

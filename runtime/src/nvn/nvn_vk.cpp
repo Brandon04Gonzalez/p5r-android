@@ -493,10 +493,12 @@ bool is_powervr() {
     return std::strstr(g_device_props.deviceName, "PowerVR") != nullptr || g_device_props.vendorID == 0x1010;
 }
 bool is_adreno_8xx() {
-    const char* p = std::strstr(g_device_props.deviceName, "Adreno");
-    if (!p) return false;
-    while (*p && !(*p >= '0' && *p <= '9')) p++;
-    return *p == '8';
+    std::string name = g_device_props.deviceName;
+    for (char& c : name) c = std::tolower(static_cast<unsigned char>(c));
+    size_t pos = name.find("adreno");
+    if (pos == std::string::npos) return false;
+    while (pos < name.size() && !std::isdigit(static_cast<unsigned char>(name[pos]))) pos++;
+    return pos < name.size() && name[pos] == '8';
 }
 bool gpu_is_integrated() { return g_integrated; }
 bool gpu_require_subgroup32() { return g_require_sg32; }

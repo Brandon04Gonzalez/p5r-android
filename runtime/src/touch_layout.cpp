@@ -149,6 +149,20 @@ bool touch_enabled() {
     return on;
 }
 
+// NX_TOUCH_HIDE=1: on-screen controls are invisible (not drawn), but touch inputs continue to register.
+bool touch_hidden() {
+    static const bool h = [] {
+        const char* e_hide = std::getenv("NX_TOUCH_HIDE");
+        if (e_hide && e_hide[0] == '1') return true;
+        const char* e_show = std::getenv("NX_TOUCH_SHOW");
+        if (e_show && (e_show[0] == '2' || std::strcmp(e_show, "hide") == 0 || std::strcmp(e_show, "hidden") == 0)) return true;
+        const char* e_op = std::getenv("NX_TOUCH_OPACITY");
+        if (e_op && std::strcmp(e_op, "0") == 0) return true;
+        return false;
+    }();
+    return h;
+}
+
 // NX_TOUCH_MIRROR=1 (left-handed): the stick takes the right half of the screen instead of the left.
 bool touch_mirrored() {
     static const bool on = [] {
