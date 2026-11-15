@@ -129,7 +129,7 @@ void perf_hint_frame(int64_t ns) {
     if (!a.ok || ns <= 0) return;
     std::lock_guard lk(g_lock);
     const char* cap = std::getenv("NX_FPS_CAP");
-    int64_t target = cap && std::atoi(cap) > 0 && std::atoi(cap) <= 30 ? 33'333'333 : 16'666'667;
+    int64_t target = cap && std::atoi(cap) > 0 && std::atoi(cap) <= 30 ? 28'000'000 : 16'666'667;
     if (g_dirty && !g_tids.empty()) {  // a new thread made part of the frame: a session with all of them
         if (g_session) a.close(g_session);
         g_session = a.create(a.get_manager(), g_tids.data(), g_tids.size(), target);

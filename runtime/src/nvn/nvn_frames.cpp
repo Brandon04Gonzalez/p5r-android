@@ -59,7 +59,7 @@ std::recursive_mutex& gpu_lock();  // nvn_vk.cpp
 
 namespace {
 
-constexpr uint32_t kMaxSlots = 12;
+constexpr uint32_t kMaxSlots = 16;
 constexpr uint32_t kMaxParts = 8;  // command buffers per submit: chunks, the split, the last part
 constexpr uint64_t kFenceTimeout = 10'000'000'000ull;  // heavy scene/shader transitions on mobile GPUs can take >2 s
 
@@ -440,11 +440,11 @@ uint64_t frame_recording_serial() { return g_submitted + 1; }  // the serial the
 
 void frame_init(VkCommandPool pool, uint32_t family, VkBuffer ring, uint8_t* ring_ptr, uint64_t ring_size) {
     // NX_ASYNC_GPU=1 (or 2): two frames in flight; 3 or 4: that many. A frame is a submit and a present, a slot each.
-    // NX_PIPELINED likewise (at most that many submits in flight; default 4 when unset so multi-submit frames don't stall on themselves).
+    // NX_PIPELINED likewise (at most that many submits in flight; default 6 when unset (~2 frames at 3 submits/frame) so GPU spikes don't stall CPU mid-frame).
     const char* mode_env = pipelined() ? "NX_PIPELINED" : "NX_ASYNC_GPU";
     const char* raw_env = std::getenv(mode_env);
-    const int requested = (raw_env && raw_env[0]) ? env_int(mode_env) : (pipelined() ? 4 : 2);
-    uint32_t frames = uint32_t(std::clamp(requested, 2, 6));
+    const int requested = (raw_env && raw_env[0]) ? env_int(mode_env) : (pipelined() ? 6 : 2);
+    uint32_t frames = uint32_t(std::clamp(requested, 2, 8));
     g_max_replays = frames;
     g_slot_count = std::min(kMaxSlots, pipelined() ? (frames * 2 + 2) : (frames * 2));
     VkDevice d = vk_device();

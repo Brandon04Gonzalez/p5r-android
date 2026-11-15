@@ -627,9 +627,8 @@ void pace_present(int interval) {
 void QueuePresentTexture(CPU& c) {
     dropouts_present();
     const uint64_t origin = g_frame_origin.exchange(0);  // set by the game for this frame (frame_origin_ns), or 0
-    // The frame's work, from the end of the last present's pacing to now (perf_hint.cpp: ADPF on Android).
+    // The frame's work, from the end of the last present's pacing to just before the next pace sleep (perf_hint.cpp: ADPF on Android).
     static uint64_t work_from = 0;
-    uint64_t t_in = plat::monotonic_ns();
     tl("present>");
     {
         static thread_local bool marked = false;
@@ -638,7 +637,6 @@ void QueuePresentTexture(CPU& c) {
         if (++n % 600 == 0) svc_profile_report(600, 2);
     }
     plat::perf_hint_thread();
-    if (work_from) plat::perf_hint_frame(int64_t(t_in - work_from));
     if (auto* w = get<Window>(c.x[1])) {
         // At most two presents queued: the game runs at most two frames ahead of the replay.
         static uint64_t queued[2] = {};
@@ -650,6 +648,7 @@ void QueuePresentTexture(CPU& c) {
             queued[next_slot] = worker_run([texture, crop, origin] { gpu_present(texture, crop.data(), origin); });
             next_slot ^= 1;
         }
+        if (work_from) plat::perf_hint_frame(int64_t(plat::monotonic_ns() - work_from));
         pace_present(w->interval);
     }
     work_from = plat::monotonic_ns();
