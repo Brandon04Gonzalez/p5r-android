@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 
 #include "nvn_pipeline.h"
@@ -29,6 +30,9 @@ uint64_t g_alias = 0, g_modules = 0, g_module_ns = 0, g_astc = 0, g_astc_ns = 0;
 std::atomic<uint64_t> g_pipelines{0}, g_pipeline_ns{0}, g_worker_pipelines{0}, g_worker_ns{0};  // also counted from the compile worker threads
 uint64_t g_waited = 0, g_waited_ns = 0, g_skipped = 0, g_prewarmed = 0;
 std::mutex g_warm_lock;
+std::mutex g_disk_lock;
+std::atomic<bool> g_cache_dirty{false};
+std::atomic<bool> g_save_in_flight{false};
 std::unordered_set<uint64_t> g_known;  // hashes of the records in the .keys file or already queued to it
 std::vector<WarmRec> g_new_recs;
 constexpr uint32_t kKeysMagic = 0x314b5750;  // "PWK1"
@@ -110,6 +114,7 @@ VkPipelineCache pipeline_cache() {
 void pipeline_cache_save() {
     if (!g_cache) return;
     warm_save();
+    std::lock_guard dlk(g_disk_lock);
     size_t n = 0;
     if (p_vkGetPipelineCacheData(vk_device(), g_cache, &n, nullptr) != VK_SUCCESS || n <= g_saved_size) return;
     std::vector<uint8_t> data(n);
@@ -125,6 +130,7 @@ void pipeline_cache_save() {
 
 void note_pipeline_created(uint64_t ns, bool worker) {
     (worker ? g_worker_pipelines : g_pipelines)++, (worker ? g_worker_ns : g_pipeline_ns) += ns;
+    g_cache_dirty.store(true, std::memory_order_release);
 }
 void note_pipeline_waited(uint64_t ns) { g_waited++, g_waited_ns += ns; }
 void note_pipeline_skipped() { g_skipped++; }
@@ -189,7 +195,10 @@ void warm_record(const PipelineKey& k) {
     r.key = k;
     r.key.vs = nullptr, r.key.fs = nullptr;
     std::lock_guard lk(g_warm_lock);
-    if (g_known.size() < 16384 && g_known.insert(rec_hash(r)).second) g_new_recs.push_back(r);  // ~700 bytes each
+    if (g_known.size() < 16384 && g_known.insert(rec_hash(r)).second) {
+        g_new_recs.push_back(r);  // ~700 bytes each
+        g_cache_dirty.store(true, std::memory_order_release);
+    }
 }
 
 namespace {
@@ -200,6 +209,7 @@ void warm_save() {
         if (g_new_recs.empty() || !g_cache) return;
         recs.swap(g_new_recs);
     }
+    std::lock_guard dlk(g_disk_lock);
     std::string path = keys_path();
     bool fresh = true;
     if (FILE* t = plat::fopen_utf8(path, "rb")) {
@@ -236,17 +246,23 @@ void creation_log(uint64_t frames) {
             (unsigned long long)frames, (unsigned long long)g_prewarmed, (unsigned long long)g_worker_pipelines.load(),
             double(g_worker_ns.load()) / 1e6, (unsigned long long)g_waited, double(g_waited_ns) / 1e6,
             (unsigned long long)g_skipped);
-    const bool had_new_pipelines = g_pipelines.load() > 0 || g_worker_pipelines.load() > 0;
     g_worker_pipelines = 0, g_worker_ns = 0;
     g_prewarmed = g_waited = g_waited_ns = g_skipped = 0;
     g_pipelines = 0, g_pipeline_ns = 0, g_astc = g_astc_ns = 0;
-    static uint64_t windows = 0;
     static uint64_t last_save_ns = 0;
-    uint64_t now_ns = plat::monotonic_ns();
-    if (++windows % 10 == 0 || (had_new_pipelines && now_ns - last_save_ns >= 15ULL * 1'000'000'000ULL) ||
-        (now_ns - last_save_ns >= 120ULL * 1'000'000'000ULL)) {
+    const uint64_t now_ns = plat::monotonic_ns();
+    if (g_cache && g_cache_dirty.load(std::memory_order_acquire) && !pipeline_workers_busy() &&
+        now_ns - last_save_ns >= 20ULL * 1'000'000'000ULL &&
+        !g_save_in_flight.exchange(true, std::memory_order_acq_rel)) {
         last_save_ns = now_ns;
-        pipeline_cache_save();
+        g_cache_dirty.store(false, std::memory_order_release);
+        std::thread([] {
+            plat::set_thread_name("cache-writer");
+            plat::reset_current_thread_affinity("cache-writer");
+            plat::set_thread_priority(10);
+            pipeline_cache_save();
+            g_save_in_flight.store(false, std::memory_order_release);
+        }).detach();
     }
 }
 

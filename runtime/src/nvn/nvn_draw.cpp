@@ -83,6 +83,7 @@ struct Bound {
     VkPipeline pipeline = VK_NULL_HANDLE;
     uint32_t vertex_set = 0;  // bit s: binding s holds vertex[s]
     Upload vertex[16];
+    uint32_t vertex_stride[16] = {};
     bool has_index = false, has_dynamic = false;
     Upload index;
     VkIndexType index_type = VK_INDEX_TYPE_UINT16;
@@ -91,6 +92,23 @@ struct Bound {
     float blend[4] = {};
     uint32_t stencil[6] = {};  // stencil reference and masks per face
     uint32_t bias[4] = {};     // depth bias factor/units/clamp + equal_slack flag
+
+    VkCullModeFlags cull_mode = VK_CULL_MODE_FLAG_BITS_MAX_ENUM;
+    VkFrontFace front_face = VK_FRONT_FACE_MAX_ENUM;
+    VkPrimitiveTopology topology = VK_PRIMITIVE_TOPOLOGY_MAX_ENUM;
+    VkBool32 depth_test = VK_FALSE, depth_write = VK_FALSE, stencil_test = VK_FALSE;
+    VkCompareOp depth_compare = VK_COMPARE_OP_MAX_ENUM;
+    VkStencilOpState stencil_ops[2]{};
+    VkBool32 depth_bias_enable = VK_FALSE;
+    VkBool32 primitive_restart = VK_FALSE;
+    VkBool32 rasterizer_discard = VK_TRUE;
+    VkPolygonMode polygon_mode = VK_POLYGON_MODE_MAX_ENUM;
+    VkBool32 depth_clamp_enable = VK_FALSE;
+    VkBool32 alpha_to_coverage_enable = VK_FALSE;
+    uint32_t blend_enable_count = 0, blend_eq_count = 0, write_mask_count = 0;
+    VkBool32 blend_enable[8]{};
+    VkColorBlendEquationEXT blend_eq[8]{};
+    VkColorComponentFlags write_mask[8]{};
 } g_bound;
 uint64_t g_state_set = 0, g_state_kept = 0;  // state commands recorded and left out, for the log
 VkPipeline g_last_compute_pipeline = VK_NULL_HANDLE;
@@ -112,14 +130,21 @@ void bind_vertex(VkCommandBuffer cb, uint32_t binding, const Upload& u) {
 
 // Binds active vertex streams (plus binding 15 zero_stream) in contiguous batches.
 void bind_vertex_streams(VkCommandBuffer cb, uint32_t used_mask, const Upload* streams) {
+    const DynamicStateCaps& dc = vk_dynamic_caps();
+    const bool dyn_stride = dc.vertex_stride;
     uint32_t active_mask = (used_mask & 0xFFFFu) | (1u << 15);
     uint32_t need_mask = 0;
     const Upload zero = zero_stream();
+    auto stream_stride = [&](uint32_t s) -> uint32_t {
+        return (s < 15 && s < g_state.streams.size()) ? g_state.streams[s].stride : 0u;
+    };
     for (uint32_t m = active_mask; m; m &= m - 1) {
         const uint32_t s = uint32_t(__builtin_ctz(m));
         const Upload& u = (s == 15) ? zero : streams[s];
         const Upload& now = g_bound.vertex[s];
-        if ((g_bound.vertex_set >> s & 1) && now.buffer == u.buffer && now.offset == u.offset) {
+        const uint32_t stride = stream_stride(s);
+        if ((g_bound.vertex_set >> s & 1) && now.buffer == u.buffer && now.offset == u.offset &&
+            (!dyn_stride || g_bound.vertex_stride[s] == stride)) {
             g_state_kept++;
         } else {
             need_mask |= 1u << s;
@@ -133,43 +158,24 @@ void bind_vertex_streams(VkCommandBuffer cb, uint32_t used_mask, const Upload* s
         while (s + n < 16 && (need_mask >> (s + n) & 1)) n++;
         VkBuffer bufs[16];
         VkDeviceSize offs[16];
+        VkDeviceSize strides[16];
         for (uint32_t i = 0; i < n; i++) {
             const Upload& u = (s + i == 15) ? zero : streams[s + i];
+            const uint32_t stride = stream_stride(s + i);
             bufs[i] = u.buffer;
             offs[i] = u.offset;
+            strides[i] = stride;
             g_bound.vertex[s + i] = u;
+            g_bound.vertex_stride[s + i] = stride;
             g_bound.vertex_set |= 1u << (s + i);
             g_state_set++;
         }
-        p_vkCmdBindVertexBuffers(cb, s, n, bufs, offs);
+        if (dyn_stride)
+            dc.bind_vertex_buffers2(cb, s, n, bufs, offs, nullptr, strides);
+        else
+            p_vkCmdBindVertexBuffers(cb, s, n, bufs, offs);
         need_mask &= ~(((1u << n) - 1u) << s);
     }
-}
-
-// Viewport, scissor, blend constants and the rasterizer's dynamic state (every pipeline declares them dynamic).
-void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc) {
-    Bound& b = g_bound;
-    const State& s = g_state;
-    bool all = !b.has_dynamic;
-    b.has_dynamic = true;
-    auto differs = [&](bool d) { return (all || d) ? (g_state_set++, true) : (g_state_kept++, false); };
-    if (differs(!same_bytes(b.viewport, vp))) p_vkCmdSetViewport(cb, 0, 1, &vp), b.viewport = vp;
-    if (differs(!same_bytes(b.scissor, sc))) p_vkCmdSetScissor(cb, 0, 1, &sc), b.scissor = sc;
-    if (differs(std::memcmp(b.blend, s.blend_color, sizeof b.blend) != 0))
-        p_vkCmdSetBlendConstants(cb, s.blend_color), std::memcpy(b.blend, s.blend_color, sizeof b.blend);
-    uint32_t stencil[6] = {s.stencil_ref[0],          s.stencil_ref[1],
-                           s.stencil_compare_mask[0], s.stencil_compare_mask[1],
-                           s.stencil_write_mask[0],   s.stencil_write_mask[1]};
-    if (differs(std::memcmp(b.stencil, stencil, sizeof stencil) != 0))
-        stencil_dynamic(cb), std::memcpy(b.stencil, stencil, sizeof stencil);
-    uint32_t bias[4];
-    std::memcpy(bias + 0, &s.bias_factor, 4);
-    std::memcpy(bias + 1, &s.bias_units, 4);
-    std::memcpy(bias + 2, &s.bias_clamp, 4);
-    bool slack = s.depth.depth_test && equal_slack_pass(s.depth);
-    bias[3] = slack;
-    if (differs(std::memcmp(b.bias, bias, sizeof bias) != 0))
-        depth_bias_dynamic(cb, slack), std::memcpy(b.bias, bias, sizeof bias);  // (nvn_raster.cpp)
 }
 
 // No colour image behind any of the targets' colour slots: P5R binds its shadow maps with two empty colour slots.
@@ -733,6 +739,7 @@ static thread_local uint32_t s_cached_ufloat_colors = 0;
 static thread_local VkFormat s_cached_depth_format = VK_FORMAT_UNDEFINED;
 static thread_local Targets s_cached_format_targets{};
 static thread_local bool s_cached_formats_valid = false;
+static thread_local bool s_pass_fresh_bake = false;
 
 // MRU Pipeline Cache
 struct MruEntry {
@@ -748,6 +755,197 @@ static thread_local size_t s_mru_count = 0;
 bool live_ui_draw(const Targets& t) {
     const Texture* t0 = t.color_count && t.colors[0] ? get<Texture>(t.colors[0]) : nullptr;
     return t0 && t0->width >= 1280 && t0->format == 0x25 && t.depth && g_state.depth.depth_test;
+}
+
+inline bool effective_primitive_restart(uint32_t mode, bool indexed) {
+    const bool strip = mode == 3 || mode == 5 || mode == 6, list = mode == 0 || mode == 1 || mode == 4;
+    return s_prim_restart_on && indexed && g_state.restart && (strip || (list && vk_list_restart()));
+}
+
+inline void effective_draw_state_overrides(const Targets& t, bool tex_empty, BlendTarget (&out_blend)[8],
+                                           ChannelMaskInfo& out_mask, DepthStencilInfo& out_depth) {
+    std::copy_n(g_state.blend, 8, out_blend);
+    out_mask = g_state.mask;
+    for (uint32_t k = 0; k < 8; k++) out_mask.mask[k] &= 0xF;
+    out_depth = g_state.depth;
+    if (s_keep_hud_alpha && g_state.color.blend_enable[0] && (out_mask.mask[0] & 0xF) == 0xF && live_ui_draw(t) &&
+        (s_keep_hud_alpha == 2 || !tex_empty)) {
+        const BlendTarget& b = out_blend[0];
+        if (b.src_rgb == 5 && b.dst_rgb == 6 && b.src_a == 5 && b.dst_a == 6 && b.eq_rgb <= 1 && b.eq_a <= 1)
+            out_mask.mask[0] &= 7;
+    }
+    if (const uint32_t live = live_flags(); live && live_ui_draw(t)) {
+        if (live & kLiveUiAlways) out_depth.depth_func = 8;  // NVN ALWAYS
+        if (live & kLiveUiNoWrite) out_depth.depth_write = 0;
+        if (live & kLiveUiRgb) out_mask.mask[0] &= 7;
+        BlendTarget& b = out_blend[0];
+        if (g_state.color.blend_enable[0] && b.src_rgb == 5 && b.dst_rgb == 6 && b.src_a == 5 && b.dst_a == 6) {
+            if (live & kLiveUiAmax) b.eq_a = 5;  // NVN MAX
+            if (live & kLiveUiAone) b.src_a = 2;  // NVN ONE
+        }
+    }
+}
+
+void set_dynamic(VkCommandBuffer cb, const VkViewport& vp, const VkRect2D& sc, const Targets& t, uint32_t mode,
+                 bool indexed, bool tex_empty) {
+    Bound& b = g_bound;
+    const State& s = g_state;
+    const DynamicStateCaps& dc = vk_dynamic_caps();
+    bool all = !b.has_dynamic;
+    b.has_dynamic = true;
+    auto differs = [&](bool d) { return (all || d) ? (g_state_set++, true) : (g_state_kept++, false); };
+
+    if (differs(!same_bytes(b.viewport, vp))) p_vkCmdSetViewport(cb, 0, 1, &vp), b.viewport = vp;
+    if (differs(!same_bytes(b.scissor, sc))) p_vkCmdSetScissor(cb, 0, 1, &sc), b.scissor = sc;
+    if (differs(std::memcmp(b.blend, s.blend_color, sizeof b.blend) != 0))
+        p_vkCmdSetBlendConstants(cb, s.blend_color), std::memcpy(b.blend, s.blend_color, sizeof b.blend);
+    uint32_t stencil[6] = {s.stencil_ref[0],          s.stencil_ref[1],
+                           s.stencil_compare_mask[0], s.stencil_compare_mask[1],
+                           s.stencil_write_mask[0],   s.stencil_write_mask[1]};
+    if (differs(std::memcmp(b.stencil, stencil, sizeof stencil) != 0))
+        stencil_dynamic(cb), std::memcpy(b.stencil, stencil, sizeof stencil);
+
+    const DepthStencilInfo& ds = s.depth;
+    DepthStencilInfo eff_depth = ds;
+    BlendTarget eff_blend[8];
+    ChannelMaskInfo eff_mask;
+    const uint32_t cnt = std::min<uint32_t>(t.color_count, 8);
+    const bool need_blend_override = (cnt > 0 && (dc.color_blend_equation || dc.color_write_mask));
+    if (need_blend_override) {
+        effective_draw_state_overrides(t, tex_empty, eff_blend, eff_mask, eff_depth);
+    } else if (live_flags() && live_ui_draw(t)) {
+        if (live_flags() & kLiveUiAlways) eff_depth.depth_func = 8;
+        if (live_flags() & kLiveUiNoWrite) eff_depth.depth_write = 0;
+    }
+
+    uint32_t bias[4];
+    std::memcpy(bias + 0, &s.bias_factor, 4);
+    std::memcpy(bias + 1, &s.bias_units, 4);
+    std::memcpy(bias + 2, &s.bias_clamp, 4);
+    bool slack = eff_depth.depth_test && equal_slack_pass(eff_depth);
+    bias[3] = slack;
+    if (differs(std::memcmp(b.bias, bias, sizeof bias) != 0))
+        depth_bias_dynamic(cb, slack), std::memcpy(b.bias, bias, sizeof bias);  // (nvn_raster.cpp)
+
+    if (dc.cull_mode) {
+        const VkCullModeFlags cm = vk_cull(s.polygon.cull);
+        if (differs(b.cull_mode != cm)) dc.set_cull_mode(cb, cm), b.cull_mode = cm;
+    }
+    if (dc.front_face) {
+        const VkFrontFace ff = vk_front_face(s.polygon.front);
+        if (differs(b.front_face != ff)) dc.set_front_face(cb, ff), b.front_face = ff;
+    }
+    if (dc.primitive_topology) {
+        const VkPrimitiveTopology top = vk_topology(mode);
+        if (differs(b.topology != top)) dc.set_primitive_topology(cb, top), b.topology = top;
+    }
+    const bool has_depth = s_cached_depth_format != VK_FORMAT_UNDEFINED;
+    if (dc.depth_test_enable) {
+        const VkBool32 dt = (has_depth && eff_depth.depth_test) ? VK_TRUE : VK_FALSE;
+        if (differs(b.depth_test != dt)) dc.set_depth_test_enable(cb, dt), b.depth_test = dt;
+    }
+    if (dc.depth_write_enable) {
+        const VkBool32 dw = (has_depth && eff_depth.depth_write) ? VK_TRUE : VK_FALSE;
+        if (differs(b.depth_write != dw)) dc.set_depth_write_enable(cb, dw), b.depth_write = dw;
+    }
+    if (dc.depth_compare_op) {
+        const VkCompareOp op = effective_depth_compare_op(eff_depth);
+        if (differs(b.depth_compare != op)) dc.set_depth_compare_op(cb, op), b.depth_compare = op;
+    }
+    if (dc.stencil_test_enable) {
+        const VkBool32 st = (has_depth && eff_depth.stencil_test && !no_stencil_flag()) ? VK_TRUE : VK_FALSE;
+        if (differs(b.stencil_test != st)) dc.set_stencil_test_enable(cb, st), b.stencil_test = st;
+    }
+    if (dc.stencil_op) {
+        VkStencilOpState faces[2];
+        effective_stencil_ops(eff_depth, s.polygon.cull, faces);
+        auto same_op = [](const VkStencilOpState& x, const VkStencilOpState& y) {
+            return x.failOp == y.failOp && x.passOp == y.passOp && x.depthFailOp == y.depthFailOp &&
+                   x.compareOp == y.compareOp;
+        };
+        if (differs(!same_op(b.stencil_ops[0], faces[0]) || !same_op(b.stencil_ops[1], faces[1]))) {
+            if (same_op(faces[0], faces[1])) {
+                dc.set_stencil_op(cb, VK_STENCIL_FACE_FRONT_AND_BACK, faces[0].failOp, faces[0].passOp,
+                                  faces[0].depthFailOp, faces[0].compareOp);
+            } else {
+                dc.set_stencil_op(cb, VK_STENCIL_FACE_FRONT_BIT, faces[0].failOp, faces[0].passOp,
+                                  faces[0].depthFailOp, faces[0].compareOp);
+                dc.set_stencil_op(cb, VK_STENCIL_FACE_BACK_BIT, faces[1].failOp, faces[1].passOp,
+                                  faces[1].depthFailOp, faces[1].compareOp);
+            }
+            b.stencil_ops[0] = faces[0];
+            b.stencil_ops[1] = faces[1];
+        }
+    }
+    if (dc.depth_bias_enable) {
+        const VkBool32 dbe = effective_depth_bias_enable(s.polygon, eff_depth) ? VK_TRUE : VK_FALSE;
+        if (differs(b.depth_bias_enable != dbe)) dc.set_depth_bias_enable(cb, dbe), b.depth_bias_enable = dbe;
+    }
+    if (dc.primitive_restart_enable) {
+        const VkBool32 pre = effective_primitive_restart(mode, indexed) ? VK_TRUE : VK_FALSE;
+        if (differs(b.primitive_restart != pre)) dc.set_primitive_restart_enable(cb, pre), b.primitive_restart = pre;
+    }
+    if (dc.rasterizer_discard_enable) {
+        if (differs(b.rasterizer_discard != VK_FALSE))
+            dc.set_rasterizer_discard_enable(cb, VK_FALSE), b.rasterizer_discard = VK_FALSE;
+    }
+    if (dc.polygon_mode) {
+        const uint32_t pm_raw = (!vk_features().fillModeNonSolid && s.polygon.mode != 2) ? 2u : s.polygon.mode;
+        const VkPolygonMode pm = vk_polygon_mode(pm_raw);
+        if (differs(b.polygon_mode != pm)) dc.set_polygon_mode(cb, pm), b.polygon_mode = pm;
+    }
+    if (dc.depth_clamp_enable) {
+        const VkBool32 dclamp = (s.depth_clamp && vk_features().depthClamp) ? VK_TRUE : VK_FALSE;
+        if (differs(b.depth_clamp_enable != dclamp)) dc.set_depth_clamp_enable(cb, dclamp), b.depth_clamp_enable = dclamp;
+    }
+    if (dc.alpha_to_coverage_enable) {
+        const VkBool32 a2c = (s.alpha_to_coverage && !no_a2c_flag()) ? VK_TRUE : VK_FALSE;
+        if (differs(b.alpha_to_coverage_enable != a2c))
+            dc.set_alpha_to_coverage_enable(cb, a2c), b.alpha_to_coverage_enable = a2c;
+    }
+    if (cnt > 0) {
+        if (dc.color_blend_enable) {
+            VkBool32 en[8];
+            for (uint32_t k = 0; k < cnt; k++) en[k] = s.color.blend_enable[k] ? VK_TRUE : VK_FALSE;
+            if (differs(b.blend_enable_count != cnt || std::memcmp(b.blend_enable, en, cnt * sizeof(VkBool32)) != 0)) {
+                dc.set_color_blend_enable(cb, 0, cnt, en);
+                std::memcpy(b.blend_enable, en, cnt * sizeof(VkBool32));
+                b.blend_enable_count = cnt;
+            }
+        }
+        if (dc.color_blend_equation) {
+            VkColorBlendEquationEXT eq[8];
+            bool changed = (b.blend_eq_count != cnt);
+            for (uint32_t k = 0; k < cnt; k++) {
+                const bool ufloat = (s_cached_ufloat_colors >> k & 1) && !ufloat_raw();
+                eq[k] = vk_blend_equation(eff_blend[k], ufloat);
+                if (!changed) {
+                    const VkColorBlendEquationEXT& prev = b.blend_eq[k];
+                    changed = prev.srcColorBlendFactor != eq[k].srcColorBlendFactor ||
+                              prev.dstColorBlendFactor != eq[k].dstColorBlendFactor ||
+                              prev.colorBlendOp != eq[k].colorBlendOp ||
+                              prev.srcAlphaBlendFactor != eq[k].srcAlphaBlendFactor ||
+                              prev.dstAlphaBlendFactor != eq[k].dstAlphaBlendFactor ||
+                              prev.alphaBlendOp != eq[k].alphaBlendOp;
+                }
+            }
+            if (differs(changed)) {
+                dc.set_color_blend_equation(cb, 0, cnt, eq);
+                std::memcpy(b.blend_eq, eq, cnt * sizeof(VkColorBlendEquationEXT));
+                b.blend_eq_count = cnt;
+            }
+        }
+        if (dc.color_write_mask) {
+            VkColorComponentFlags masks[8];
+            for (uint32_t k = 0; k < cnt; k++) masks[k] = eff_mask.mask[k] & 0xF;
+            if (differs(b.write_mask_count != cnt ||
+                        std::memcmp(b.write_mask, masks, cnt * sizeof(VkColorComponentFlags)) != 0)) {
+                dc.set_color_write_mask(cb, 0, cnt, masks);
+                std::memcpy(b.write_mask, masks, cnt * sizeof(VkColorComponentFlags));
+                b.write_mask_count = cnt;
+            }
+        }
+    }
 }
 
 bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, const Cmd& c) {
@@ -964,6 +1162,8 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
     }
     check_vertex_ranges(vs, fs, indexed, c, in);  // NX_CHECK_VERTS (nvn_written.cpp)
     if (!g_rendering) {
+        GpuImage* c0_pre = tt.color_count && tt.colors[0] ? image_of(tt.colors[0]) : nullptr;
+        s_pass_fresh_bake = (c0_pre && !c0_pre->rendered && !tt.depth);
         if (gpu_profile_on()) {
             GpuImage* img = t.color_count && t.colors[0] ? image_of(t.colors[0]) : nullptr;
             char label[128];
@@ -974,7 +1174,24 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         begin_rendering(cb, tt);
     }
 
+    if (!s_cached_formats_valid || std::memcmp(&s_cached_format_targets, &tt, sizeof tt) != 0) {
+        uint32_t uf = 0;
+        const uint32_t n_col = std::min<uint32_t>(tt.color_count, 8);
+        for (uint32_t k = 0; k < n_col; k++) {
+            GpuImage* img = tt.colors[k] ? image_of(tt.colors[k]) : nullptr;
+            s_cached_color_formats[k] = img ? view_format(*img, tt.views.format[k]) : unused_slot_format();
+            if (img && (img->nvn_format == 0x3f || tt.views.format[k] == 0x3f)) uf |= 1u << k;  // G4
+        }
+        s_cached_ufloat_colors = uf;
+        GpuImage* dimg = tt.depth ? image_of(tt.depth) : nullptr;
+        s_cached_depth_format = dimg && dimg->aspect != VK_IMAGE_ASPECT_COLOR_BIT ? dimg->format : VK_FORMAT_UNDEFINED;
+        s_cached_format_targets = tt;
+        s_cached_formats_valid = true;
+    }
+
     VkPipeline pipeline = VK_NULL_HANDLE;
+    const DynamicStateCaps& dc = vk_dynamic_caps();
+    const uint32_t eff_mode = dc.primitive_topology ? canonical_topology_mode(mode) : mode;
 
     // 4-entry intra-pass MRU bypass: consecutive or alternating draws (e.g. character + outline, UI + text)
     // sharing shaders, topology, state version, layout, and render pass reuse the VkPipeline directly without
@@ -1003,11 +1220,11 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
             if (e.pipeline != VK_NULL_HANDLE &&
                 e.vs == vs &&
                 e.fs == fs &&
-                e.mode == mode &&
-                e.indexed == indexed &&
+                e.mode == eff_mode &&
+                (dc.primitive_restart_enable || e.indexed == indexed) &&
                 e.layout == layout.layout &&
                 e.state_version == replay::g_pipeline_state_version &&
-                e.textures_empty == tex_empty) {
+                (dc.color_write_mask || e.textures_empty == tex_empty)) {
                 pipeline = e.pipeline;
                 if (i > 0) {
                     PipeMru hit = e;
@@ -1028,63 +1245,16 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         std::copy_n(g_state.attribs.begin(), key.attrib_count, key.attribs);
         key.stream_count = uint32_t(std::min<size_t>(g_state.streams.size(), 16));
         std::copy_n(g_state.streams.begin(), key.stream_count, key.streams);
-        std::copy_n(g_state.blend, 8, key.blend);
-        key.color = g_state.color, key.mask = g_state.mask, key.depth = g_state.depth, key.polygon = g_state.polygon;
-        // NX_HUD_KEEP_ALPHA=1 (P5R by default, games/p5r/game.cpp): draws into the HUD/menu targets (RGBA8, 1280 wide or
-        // more, depth tested) with plain alpha blending leave the target's alpha alone. P5R builds alpha on purpose with
-        // its own states (alpha-only masks, MIN/MAX/REVERSE_SUBTRACT; the panels' drop shadows), sets it to 0 under the
-        // art, and a later pass darkens every pixel whose alpha is above 0 and below 1. Its art, drawn with SRC_ALPHA /
-        // ONE_MINUS_SRC_ALPHA on all four channels, left the BC3 alphas (246..254 inside the shapes) and the faces'
-        // translucent layers there: dark specks on the battle portraits. Kept alpha matches the clean picture
-        // (live flag ui_rgb, PROGRESO 70). Only textured draws (the art): the untextured shapes with the same blending
-        // build alpha that a later DST_ALPHA fill reads, as in the voice-language notice, whose black panel came out
-        // grey when they kept it too (PROGRESO 71). NX_HUD_KEEP_ALPHA=all: untextured ones too; 0: as the game asks.
-        if (s_keep_hud_alpha && key.color.blend_enable[0] && (key.mask.mask[0] & 0xF) == 0xF && live_ui_draw(t) &&
-            (s_keep_hud_alpha == 2 || !g_textures.bindings.empty())) {
-            const BlendTarget& b = key.blend[0];
-            if (b.src_rgb == 5 && b.dst_rgb == 6 && b.src_a == 5 && b.dst_a == 6 && b.eq_rgb <= 1 && b.eq_a <= 1)
-                key.mask.mask[0] &= 7;
-        }
-        if (const uint32_t live = live_flags(); live && live_ui_draw(t)) {
-            if (live & kLiveUiAlways) key.depth.depth_func = 8;  // NVN ALWAYS
-            if (live & kLiveUiNoWrite) key.depth.depth_write = 0;
-            BlendTarget& b = key.blend[0];
-            if (key.color.blend_enable[0] && b.src_rgb == 5 && b.dst_rgb == 6 && b.src_a == 5 && b.dst_a == 6) {
-                if (live & kLiveUiRgb) key.mask.mask[0] &= 7;
-                if (live & kLiveUiAmax) b.eq_a = 5;  // NVN MAX
-                if (live & kLiveUiAone) b.src_a = 2;  // NVN ONE
-            }
-        }
-        // SetPrimitiveRestart: Vulkan restarts strips and fans at the index type's largest value (NVN's index here is
-        // 0xFFFF, the same for 16-bit indices), and point, line and triangle lists where the device has
-        // VK_EXT_primitive_topology_list_restart (the Adreno 610 has it); NVN's 0xFFFF in 32-bit indices would need a
-        // rewrite (counted by restart_stats). NX_PRIM_RESTART=0: off, as before.
-        const bool strip = mode == 3 || mode == 5 || mode == 6, list = mode == 0 || mode == 1 || mode == 4;
-        key.restart = s_prim_restart_on && indexed && g_state.restart && (strip || (list && vk_list_restart())) ? 1 : 0;
+        key.color = g_state.color, key.polygon = g_state.polygon;
+        effective_draw_state_overrides(t, tex_empty, key.blend, key.mask, key.depth);
+        key.restart = effective_primitive_restart(mode, indexed) ? 1 : 0;
         if (indexed && g_state.restart) restart_stats(mode, c);
         frame_draws(vs, indexed ? uint64_t(c.i[0]) : uint64_t(c.i[1]));
-        key.color_count = t.color_count, key.depth_clamp = g_state.depth_clamp;
+        key.color_count = tt.color_count, key.depth_clamp = g_state.depth_clamp;
         key.alpha_to_coverage = g_state.alpha_to_coverage;
-        if (s_cached_formats_valid && std::memcmp(&s_cached_format_targets, &tt, sizeof tt) == 0) {
-            std::copy_n(s_cached_color_formats, t.color_count, key.color_formats);
-            key.ufloat_colors = s_cached_ufloat_colors;
-            key.depth_format = s_cached_depth_format;
-        } else {
-            uint32_t uf = 0;
-            for (uint32_t k = 0; k < t.color_count; k++) {
-                GpuImage* img = t.colors[k] ? image_of(t.colors[k]) : nullptr;
-                key.color_formats[k] = img ? view_format(*img, t.views.format[k]) : unused_slot_format();
-                if (img && (img->nvn_format == 0x3f || t.views.format[k] == 0x3f)) uf |= 1u << k;  // G4
-            }
-            key.ufloat_colors = uf;
-            GpuImage* dimg = tt.depth ? image_of(tt.depth) : nullptr;
-            key.depth_format = dimg && dimg->aspect != VK_IMAGE_ASPECT_COLOR_BIT ? dimg->format : VK_FORMAT_UNDEFINED;
-            std::copy_n(key.color_formats, t.color_count, s_cached_color_formats);
-            s_cached_ufloat_colors = uf;
-            s_cached_depth_format = key.depth_format;
-            s_cached_format_targets = tt;
-            s_cached_formats_valid = true;
-        }
+        std::copy_n(s_cached_color_formats, std::min<uint32_t>(tt.color_count, 8), key.color_formats);
+        key.ufloat_colors = s_cached_ufloat_colors;
+        key.depth_format = s_cached_depth_format;
         // NX_ULTRAWIDE. The world is widened by the camera aspect patch (nvn_ultrawide.cpp), so only the 16:9 UI is
         // squeezed by 1/k (centred safe area). The UI is drawn into small BGRA8 layer targets (430x180 for the HUD, never
         // widened) and composited into the scene target by a quad: the vertex shaders seen drawing into such layer targets
@@ -1148,7 +1318,20 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         if (found != VK_NULL_HANDLE) {
             pipeline = found;
         } else {
-            pipeline = graphics_pipeline(key, layout);
+            auto is_async_safe_draw = [&]() -> bool {
+                if (g_frame.load(std::memory_order_relaxed) < 90) return false;
+                if (!fs || depth_only(tt)) return false;
+                const uint32_t vcount = indexed ? uint32_t(c.i[0]) : uint32_t(c.i[1]);
+                if (!g_state.depth.depth_test && !g_state.depth.depth_write && vcount <= 6) return false;
+                if (tt.views.level[0] > 0) return false;
+                if (s_pass_fresh_bake) return false;
+                GpuImage* c0 = tt.color_count && tt.colors[0] ? image_of(tt.colors[0]) : nullptr;
+                if (c0 && (c0->view_type == VK_IMAGE_VIEW_TYPE_CUBE || c0->view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY))
+                    return false;
+                if (s_snap_fs.active || s_snap_fs_before.active || s_dump_fs.active || s_dump_target) return false;
+                return true;
+            };
+            pipeline = graphics_pipeline(key, layout, is_async_safe_draw());
             if (pipeline != VK_NULL_HANDLE) {
                 uint8_t insert_idx;
                 if (s_mru_count < kMruSize) {
@@ -1166,7 +1349,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         }
         if (pipeline != VK_NULL_HANDLE && !uw_on() && !live_flags()) {
             for (int j = 3; j > 0; j--) s_pipe_mru[j] = s_pipe_mru[j - 1];
-            s_pipe_mru[0] = {vs, fs, mode, replay::g_pipeline_state_version, layout.layout, indexed, tex_empty, pipeline};
+            s_pipe_mru[0] = {vs, fs, eff_mode, replay::g_pipeline_state_version, layout.layout, indexed, tex_empty, pipeline};
         }
     }
     if (!pipeline) {
@@ -1249,7 +1432,7 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         sc = {{sc.offset.x * 3 / 4, sc.offset.y * 3 / 4}, {sc.extent.width * 3 / 4, sc.extent.height * 3 / 4}};
     }
     vp.y += vp.height, vp.height = -vp.height;
-    set_dynamic(cb, vp, sc);
+    set_dynamic(cb, vp, sc, tt, mode, indexed, tex_empty);
 
     trace_skin(indexed, c, vs, fs);
     if (indexed) {
@@ -1473,6 +1656,7 @@ void pass_end_only(VkCommandBuffer cb, int reason) {
     else
         p_vkCmdEndRendering(cb);
     g_rendering = false;
+    s_pass_fresh_bake = false;
     g_bound = Bound{};  // each render pass instance requires pipelines and dynamic state to be bound
     // What the pass wrote is read by what follows (sampled, copied, loaded by the next pass), and what it sampled may
     // be rendered over next. The images stay GENERAL, so transition() records no barrier. Metal (MoltenVK) and the

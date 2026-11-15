@@ -251,13 +251,6 @@ VkImageView view_of(GpuImage& img, VkImageViewType type, const ViewInfo& view) {
     return v;
 }
 
-// R11G11B10F (0x3f) has no alpha, stored here as RGBA16F: sampling reads alpha 1 and blending takes destination
-// alpha as 1, as Maxwell does (G4, docs/nvn/DEBUG.md #50). NX_R11G11B10_RAW=1: the stored alpha (bisecting).
-bool ufloat_raw() {
-    static const bool raw = std::getenv("NX_R11G11B10_RAW") != nullptr;
-    return raw;
-}
-
 }  // namespace
 
 bool descriptor_layout_counts(VkDescriptorSetLayout layout, uint32_t (&out)[16]) {
@@ -374,13 +367,6 @@ using PKey = ByteKey<sizeof(PipelineKey)>;
 
 PipelineKey canonical_key(const PipelineKey& in);
 
-void dyn_init(VkDynamicState (&d)[7]) {
-    const VkDynamicState v[7] = {VK_DYNAMIC_STATE_VIEWPORT, VK_DYNAMIC_STATE_SCISSOR, VK_DYNAMIC_STATE_BLEND_CONSTANTS,
-                                 VK_DYNAMIC_STATE_STENCIL_REFERENCE, VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK,
-                                 VK_DYNAMIC_STATE_STENCIL_WRITE_MASK, VK_DYNAMIC_STATE_DEPTH_BIAS};
-    std::memcpy(d, v, sizeof v);
-}
-
 // Everything vkCreateGraphicsPipelines reads, owned (the create info points into this object), so that the compile
 // can run on another thread than the one that prepared it. Never moved after prepare_graphics_pipeline.
 struct PipeBuild {
@@ -399,7 +385,8 @@ struct PipeBuild {
     VkPipelineDepthStencilStateCreateInfo ds{};
     VkPipelineColorBlendAttachmentState att[8]{};
     VkPipelineColorBlendStateCreateInfo cb{};
-    VkDynamicState dyn[7]{};
+    VkDynamicState dyn[32]{};
+    uint32_t dyn_count = 0;
     VkPipelineDynamicStateCreateInfo dy{};
     VkFormat color_formats[8]{};
     VkPipelineRenderingCreateInfo ri{};
@@ -459,8 +446,11 @@ struct Pool {
     std::mutex m;
     std::condition_variable cv;
     std::deque<std::shared_ptr<PipeTask>> q;
+    std::atomic<unsigned> active{0};
     unsigned threads = 0;
 };
+
+std::atomic<bool> g_pool_ready{false};
 
 Pool& pool() {
     // Leaked on purpose: the workers are detached and may still sit in a driver call at exit.
@@ -468,13 +458,14 @@ Pool& pool() {
         auto* pl = new Pool;
         const char* e = std::getenv("NX_PIPE_THREADS");
         unsigned hw = std::thread::hardware_concurrency();
-        unsigned n = e ? unsigned(std::atoi(e)) : std::min(4u, hw > 2 ? hw - 2 : 1u);
+        unsigned n = e ? unsigned(std::atoi(e)) : std::min(4u, hw > 2 ? std::max(2u, hw / 2) : 1u);
         pl->threads = std::min(n, 8u);
         for (unsigned i = 0; i < pl->threads; i++)
             std::thread([pl] {
                 t_worker = true;
                 plat::set_thread_name("pipe-worker");
-                plat::pin_current_thread_to_little_cores("pipe-worker");
+                plat::reset_current_thread_affinity("pipe-worker");
+                plat::set_thread_priority(6);
                 for (;;) {
                     std::shared_ptr<PipeTask> t;
                     {
@@ -482,10 +473,13 @@ Pool& pool() {
                         pl->cv.wait(lk, [&] { return !pl->q.empty(); });
                         t = std::move(pl->q.front());
                         pl->q.pop_front();
+                        pl->active.fetch_add(1, std::memory_order_release);
                     }
                     t->run();
+                    pl->active.fetch_sub(1, std::memory_order_release);
                 }
             }).detach();
+        g_pool_ready.store(true, std::memory_order_release);
         return pl;
     }();
     return *p;
@@ -554,7 +548,7 @@ std::string serialize_build(const PipeBuild& b) {
     mark(17);
     add(&b.cb.attachmentCount, sizeof b.cb.attachmentCount);
     mark(18);
-    add(b.dyn, sizeof b.dyn);
+    add(b.dyn, b.dyn_count * sizeof b.dyn[0]);
     mark(19);
     add(&b.ri.colorAttachmentCount, sizeof b.ri.colorAttachmentCount);
     mark(20);
@@ -590,27 +584,45 @@ PKey bytes_of(const PipelineKey& k) {
     return out;
 }
 
-// NX_ASYNC_PIPELINES=1: a draw whose pipeline is not built yet is skipped (the pipeline compiles on a worker thread
-// and the next frames draw it) instead of stalling the replay. Changes the picture for those frames; off by default.
-bool async_skip() {
-    static const bool on = [] {
-        const char* e = std::getenv("NX_ASYNC_PIPELINES");
-        return e && e[0] == '1' && pool().threads > 0;
+// NX_ASYNC_PIPELINES=0|1|2:
+//   0: synchronous compilation (no skipped draws; stutters on unseen shaders).
+//   1: all graphics draws compile asynchronously (can blink fullscreen/shadow passes on first frame).
+//   2 (Android default): smart safe async — shadows, early boot, fullscreen quads, bloom mips, cubemaps,
+//      and unrendered offscreen bakes stay synchronous; world/character/battle VFX compile on workers.
+int async_pipelines_mode() {
+    static const int mode = [] {
+        if (const char* e = std::getenv("NX_ASYNC_PIPELINES")) {
+            if (e[0] == '0') return 0;
+            if (e[0] == '1') return 1;
+            if (e[0] == '2') return 2;
+        }
+#if defined(__ANDROID__)
+        return 2;
+#else
+        return 0;
+#endif
     }();
-    return on;
+    return mode;
 }
 
-// The pipeline for a canonical key: built, in flight (waited for, or null under async_skip), or compiled now.
-VkPipeline pipeline_for(const PipelineKey& canon, const ProgramLayout& layout, bool* pending) {
+bool should_async_compile(bool allow_async) {
+    const int mode = async_pipelines_mode();
+    if (mode == 0 || pool().threads == 0) return false;
+    return mode == 1 || (mode == 2 && allow_async);
+}
+
+// The pipeline for a canonical key: built, in flight (waited for, or null under async skip), or compiled now.
+VkPipeline pipeline_for(const PipelineKey& canon, const ProgramLayout& layout, bool allow_async, bool* pending) {
     PKey ck = bytes_of(canon);
     if (auto it = g_canon.find(ck); it != g_canon.end()) {
         note_pipeline_alias();
         return it->second;
     }
+    const bool use_async = should_async_compile(allow_async);
     if (auto it = g_inflight.find(ck); it != g_inflight.end()) {
         std::shared_ptr<PipeTask> t = it->second;
         if (t->state.load() != 2) {
-            if (async_skip()) return *pending = true, VK_NULL_HANDLE;
+            if (use_async) return *pending = true, VK_NULL_HANDLE;
             const uint64_t t0 = plat::monotonic_ns();
             t->wait();
             note_pipeline_waited(plat::monotonic_ns() - t0);
@@ -621,7 +633,7 @@ VkPipeline pipeline_for(const PipelineKey& canon, const ProgramLayout& layout, b
     }
     warm_record(canon);
     auto build = prepare_graphics_pipeline(canon, layout);
-    if (async_skip()) {
+    if (use_async) {
         auto t = std::make_shared<PipeTask>();
         t->build = std::move(build);
         g_inflight.emplace(ck, t);
@@ -635,7 +647,14 @@ VkPipeline pipeline_for(const PipelineKey& canon, const ProgramLayout& layout, b
 
 }  // namespace
 
-VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout) {
+bool pipeline_workers_busy() {
+    if (!g_pool_ready.load(std::memory_order_acquire)) return false;
+    Pool& pl = pool();
+    std::lock_guard lk(pl.m);
+    return !pl.q.empty() || pl.active.load(std::memory_order_acquire) > 0;
+}
+
+VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout, bool allow_async) {
     // By the key's bytes, as before, but hashed (nvn_pipeline.h) instead of a ~700-byte std::string built and
     // compared down a tree per draw; and the last entry first: consecutive draws mostly share their state.
     static std::unordered_map<PKey, VkPipeline, ByteKeyHash> cache;
@@ -645,7 +664,7 @@ VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout
     if (auto it = cache.find(k); it != cache.end()) return (last = &*it)->second;
 
     // A new raw key. The same Vulkan pipeline may already exist under another raw key that differs only in state
-    // Vulkan ignores (see canonical_key): look it up by its canonical key before compiling.
+    // Vulkan ignores or handles dynamically (see canonical_key): look it up by its canonical key before compiling.
     static const bool canon_off = std::getenv("NX_PIPE_CANON") && std::getenv("NX_PIPE_CANON")[0] == '0';  // A/B
     PipelineKey canon = canon_off ? key : canonical_key(key);
     static const bool verify = std::getenv("NX_PIPE_VERIFY") != nullptr;
@@ -667,7 +686,7 @@ VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout
         if (checked % 100 == 0 || a != b) log("nvn/vk: PIPE_VERIFY checked %llu raw keys, %llu differ", (unsigned long long)checked, (unsigned long long)bad);
     }
     bool pending = false;
-    VkPipeline p = pipeline_for(canon, layout, &pending);
+    VkPipeline p = pipeline_for(canon, layout, allow_async, &pending);
     if (pending) {
         note_pipeline_skipped();
         return VK_NULL_HANDLE;  // not remembered: asked again by the next draw
@@ -708,7 +727,8 @@ void pipeline_warm_step() {
             if (!hashes.empty()) {
                 std::thread([hashes = std::move(hashes)] {
                     plat::set_thread_name("shader-prewarm");
-                    plat::pin_current_thread_to_little_cores("shader-prewarm");
+                    plat::reset_current_thread_affinity("shader-prewarm");
+                    plat::set_thread_priority(8);
                     size_t loaded_cnt = 0;
                     for (const std::string& h : hashes) {
                         if (shader_for_prewarm(h)) loaded_cnt++;
@@ -768,9 +788,11 @@ namespace {
 // everything depth on a pass without a depth attachment...) share one pipeline. Output is unchanged: every field
 // zeroed here is one the pipeline creation never reads, or reads only where it has no effect.
 PipelineKey canonical_key(const PipelineKey& in) {
+    const DynamicStateCaps& dc = vk_dynamic_caps();
     PipelineKey k;
     std::memset(&k, 0, sizeof k);  // compared byte for byte
-    k.vs = in.vs, k.fs = in.fs, k.topology = in.topology;
+    k.vs = in.vs, k.fs = in.fs;
+    k.topology = dc.primitive_topology ? canonical_topology_mode(in.topology) : in.topology;
     uint32_t used_streams = 0, max_loc = 0;
     if (in.vs)
         for (const ShaderIo& io : in.vs->refl.inputs) {
@@ -785,55 +807,58 @@ PipelineKey canonical_key(const PipelineKey& in) {
         }
     k.attrib_count = max_loc;
     for (uint32_t s = 0; s < 15; s++)
-        if (used_streams >> s & 1) k.streams[s] = in.streams[s], k.stream_count = s + 1;
+        if (used_streams >> s & 1) {
+            k.streams[s] = in.streams[s];
+            if (dc.vertex_stride) k.streams[s].stride = 0;
+            k.stream_count = s + 1;
+        }
     const uint32_t n = std::min<uint32_t>(in.color_count, 8);
     k.color_count = in.color_count;
     for (uint32_t i = 0; i < n; i++) {
         k.color_formats[i] = in.color_formats[i];
-        k.mask.mask[i] = in.mask.mask[i] & 0xF;
-        if (in.color.blend_enable[i]) {
-            k.color.blend_enable[i] = 1;
+        if (!dc.color_write_mask) k.mask.mask[i] = in.mask.mask[i] & 0xF;
+        if (!dc.color_blend_enable) k.color.blend_enable[i] = in.color.blend_enable[i] ? 1 : 0;
+        if (!dc.color_blend_equation && (in.color.blend_enable[i] || dc.color_blend_enable)) {
             k.blend[i] = in.blend[i];
             k.blend[i].target = 0;
         }
     }
-    k.ufloat_colors = in.ufloat_colors & (n >= 32 ? ~0u : (1u << n) - 1);
+    k.ufloat_colors = dc.color_blend_equation ? 0u : (in.ufloat_colors & (n >= 32 ? ~0u : (1u << n) - 1));
     k.depth_format = in.depth_format;
     if (in.depth_format != VK_FORMAT_UNDEFINED) {
-        k.depth.depth_test = in.depth.depth_test ? 1 : 0, k.depth.depth_write = in.depth.depth_write ? 1 : 0;
-        if (in.depth.depth_test) k.depth.depth_func = in.depth.depth_func;
-        if (in.depth.stencil_test) {  // field by field: the struct has padding bytes the key compares
-            k.depth.stencil_test = 1;
+        const bool keep_depth_func = !dc.depth_compare_op && (in.depth.depth_test || dc.depth_test_enable);
+        const bool keep_equal_slack = !dc.depth_bias_enable && equal_slack_pass(in.depth);
+        if (!dc.depth_test_enable) k.depth.depth_test = in.depth.depth_test ? 1 : 0;
+        if (!dc.depth_write_enable || keep_depth_func || keep_equal_slack)
+            k.depth.depth_write = in.depth.depth_write ? 1 : 0;
+        if (keep_depth_func || keep_equal_slack) k.depth.depth_func = in.depth.depth_func;
+        if (!dc.stencil_test_enable) k.depth.stencil_test = in.depth.stencil_test ? 1 : 0;
+        if (!dc.stencil_op && (in.depth.stencil_test || dc.stencil_test_enable)) {
             for (int f = 0; f < 2; f++) {
-                k.depth.stencil_func[f] = in.depth.stencil_func[f], k.depth.stencil_fail[f] = in.depth.stencil_fail[f];
-                k.depth.depth_fail[f] = in.depth.depth_fail[f], k.depth.depth_pass[f] = in.depth.depth_pass[f];
+                k.depth.stencil_func[f] = in.depth.stencil_func[f];
+                k.depth.stencil_fail[f] = in.depth.stencil_fail[f];
+                k.depth.depth_fail[f] = in.depth.depth_fail[f];
+                k.depth.depth_pass[f] = in.depth.depth_pass[f];
             }
-            // With inverted viewport height (-vp.height), 2D UI quads have flipped primitive
-            // winding in framebuffer space (rasterized as back-facing).
-            // When culling is disabled or back-face stencil is unconfigured/defaulted, mirror front
-            // to back so both faces evaluate the identical stencil test and operations.
             if (in.polygon.cull == 0 || (k.depth.stencil_func[1] == 0 && k.depth.depth_pass[1] == 0) ||
                 (k.depth.depth_pass[1] <= 1 && k.depth.depth_pass[0] > 1)) {
-                static int s_mirror_count = 0;
-                if (s_mirror_count++ < 30) {
-                    log("nvn/vk: stencil front->back unified for pipeline vs %s fs %s (func=%u pass=%u cull=%u)",
-                        in.vs ? in.vs->hash.c_str() : "-", in.fs ? in.fs->hash.c_str() : "-",
-                        unsigned(k.depth.stencil_func[0]), unsigned(k.depth.depth_pass[0]), unsigned(in.polygon.cull));
-                }
                 k.depth.stencil_func[1] = k.depth.stencil_func[0];
                 k.depth.stencil_fail[1] = k.depth.stencil_fail[0];
-                k.depth.depth_fail[1]   = k.depth.depth_fail[0];
-                k.depth.depth_pass[1]   = k.depth.depth_pass[0];
+                k.depth.depth_fail[1] = k.depth.depth_fail[0];
+                k.depth.depth_pass[1] = k.depth.depth_pass[0];
             }
         }
     }
-    k.polygon.cull = in.polygon.cull;
-    k.polygon.front = in.polygon.front == 0 ? 0 : 1;
-    k.polygon.mode = in.polygon.mode <= 1 ? in.polygon.mode : 2;
-    uint32_t offset_bit = in.polygon.mode <= 2 ? 1u << in.polygon.mode : 4u;
-    k.polygon.offset_enables = in.polygon.offset_enables & offset_bit ? 7 : 0;
-    k.depth_clamp = in.depth_clamp && vk_features().depthClamp ? 1 : 0;
-    k.alpha_to_coverage = in.alpha_to_coverage ? 1 : 0;
+    if (!dc.cull_mode) k.polygon.cull = in.polygon.cull;
+    if (!dc.front_face) k.polygon.front = in.polygon.front == 0 ? 0 : 1;
+    if (!dc.polygon_mode) k.polygon.mode = in.polygon.mode <= 1 ? in.polygon.mode : 2;
+    if (!dc.depth_bias_enable) {
+        uint32_t offset_bit = in.polygon.mode <= 2 ? 1u << in.polygon.mode : 4u;
+        k.polygon.offset_enables = in.polygon.offset_enables & offset_bit ? 7 : 0;
+    }
+    k.depth_clamp = (!dc.depth_clamp_enable && in.depth_clamp && vk_features().depthClamp) ? 1 : 0;
+    k.alpha_to_coverage = (!dc.alpha_to_coverage_enable && in.alpha_to_coverage) ? 1 : 0;
+    k.restart = dc.primitive_restart_enable ? 0 : in.restart;
     k.uw_x = in.uw_x;
     return k;
 }
@@ -900,10 +925,12 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
             if (a.binding == 15) zero_used = true;
             attrs.push_back(a);
         }
+    const DynamicStateCaps& dc = vk_dynamic_caps();
     for (uint32_t s = 0; s < 15; s++)
         if (streams_used[s]) {
             const VertexStream& vs = key.streams[s];
-            binds.push_back({s, vs.stride, vs.divisor ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX});
+            binds.push_back({s, dc.vertex_stride ? 0u : vs.stride,
+                             vs.divisor ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX});
         }
     if (zero_used) binds.push_back({15, 0, VK_VERTEX_INPUT_RATE_INSTANCE});
     VkPipelineVertexInputStateCreateInfo& vi = B.vi;
@@ -915,8 +942,8 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
 
     VkPipelineInputAssemblyStateCreateInfo& ia = B.ia;
     ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
-    ia.topology = vk_topology(key.topology);
-    ia.primitiveRestartEnable = key.restart ? VK_TRUE : VK_FALSE;
+    ia.topology = vk_topology(dc.primitive_topology ? canonical_topology_mode(key.topology) : key.topology);
+    ia.primitiveRestartEnable = (!dc.primitive_restart_enable && key.restart) ? VK_TRUE : VK_FALSE;
 
     VkPipelineViewportDepthClipControlCreateInfoEXT& clip = B.clip;
     clip = {VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT};
@@ -928,94 +955,95 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
 
     VkPipelineRasterizationStateCreateInfo& rs = B.rs;
     rs = {VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO};
-    rs.polygonMode = key.polygon.mode == 0 ? VK_POLYGON_MODE_POINT : key.polygon.mode == 1 ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
-    rs.cullMode = vk_cull(key.polygon.cull);
+    rs.polygonMode = dc.polygon_mode ? VK_POLYGON_MODE_FILL : vk_polygon_mode(key.polygon.mode);
+    rs.cullMode = dc.cull_mode ? VK_CULL_MODE_NONE : vk_cull(key.polygon.cull);
     // NVNfrontFace CW 0 / CCW 1, taken as is: the draws use a negative-height viewport (nvn_draw.cpp) that gives NVN's
     // upper-left-origin mapping, so windings match NVN's.
-    rs.frontFace = key.polygon.front == 0 ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+    rs.frontFace = dc.front_face ? VK_FRONT_FACE_CLOCKWISE : vk_front_face(key.polygon.front);
     rs.lineWidth = 1.0f;
-    // SetDepthClamp: clamps instead of clipping at the near and far planes, like depthClampEnable (a device feature;
-    // nvn_vk.cpp enables every core feature the GPU has, and MoltenVK has it through Metal's depth clip mode).
-    rs.depthClampEnable = key.depth_clamp && vk_features().depthClamp ? VK_TRUE : VK_FALSE;
-    // Polygon offset: NVNpolygonOffsetEnable has a bit per polygon mode (POINT 1, LINE 2, FILL 4; modes are POINT 0,
-    // LINE 1, FILL 2), and the bit of the mode drawn with decides. Factor, units and clamp are dynamic (SetDepthBias
-    // at each draw, nvn_raster.cpp): the game sets them on the command buffer, not in the state object.
-    uint32_t offset_bit = key.polygon.mode <= 2 ? 1u << key.polygon.mode : 4u;
-    rs.depthBiasEnable = key.polygon.offset_enables & offset_bit || equal_slack_pass(key.depth) ? VK_TRUE : VK_FALSE;
+    // SetDepthClamp: clamps instead of clipping at the near and far planes, like depthClampEnable.
+    rs.depthClampEnable = (!dc.depth_clamp_enable && key.depth_clamp && vk_features().depthClamp) ? VK_TRUE : VK_FALSE;
+    rs.depthBiasEnable = (!dc.depth_bias_enable && effective_depth_bias_enable(key.polygon, key.depth)) ? VK_TRUE : VK_FALSE;
 
     VkPipelineMultisampleStateCreateInfo& ms = B.ms;
     ms = {VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO};
     ms.rasterizationSamples = VK_SAMPLE_COUNT_1_BIT;
-    // BindMultisampleState's alpha to coverage (G7; single-sampled targets: alpha under 0.5 drops the fragment),
-    // logged once per pipeline that has it. NX_NO_ALPHA_TO_COVERAGE=1: off, as when it was a stub.
-    static const bool no_a2c = std::getenv("NX_NO_ALPHA_TO_COVERAGE") != nullptr;
-    ms.alphaToCoverageEnable = key.alpha_to_coverage && !no_a2c ? VK_TRUE : VK_FALSE;
-    if (key.alpha_to_coverage)
-        log("nvn/vk: alpha to coverage%s: fs %s", no_a2c ? " (off)" : "", key.fs ? key.fs->hash.c_str() : "-");
+    ms.alphaToCoverageEnable = (!dc.alpha_to_coverage_enable && key.alpha_to_coverage && !no_a2c_flag()) ? VK_TRUE : VK_FALSE;
+    if (!dc.alpha_to_coverage_enable && key.alpha_to_coverage)
+        log("nvn/vk: alpha to coverage%s: fs %s", no_a2c_flag() ? " (off)" : "", key.fs ? key.fs->hash.c_str() : "-");
 
     VkPipelineDepthStencilStateCreateInfo& ds = B.ds;
     ds = {VK_STRUCTURE_TYPE_PIPELINE_DEPTH_STENCIL_STATE_CREATE_INFO};
     bool has_depth = key.depth_format != VK_FORMAT_UNDEFINED;
-    ds.depthTestEnable = has_depth && key.depth.depth_test;
-    ds.depthWriteEnable = has_depth && key.depth.depth_write;
-    ds.depthCompareOp = vk_compare(key.depth.depth_func);
-    // EQUAL after a depth pre-pass (the colour pass does not write depth) needs both passes to compute bit-identical
-    // depth; two translated shaders compiled separately by Metal do not, and Wonder's whole course colour pass was
-    // discarded (only the sky showed). LESS_OR_EQUAL keeps what EQUAL keeps for opaque geometry after a pre-pass.
-    if (key.depth.depth_func == 3 && !key.depth.depth_write) {
-        ds.depthCompareOp = VK_COMPARE_OP_LESS_OR_EQUAL;
-        static const bool always = std::getenv("NX_EQUAL_ALWAYS") != nullptr;  // diagnostic: EQUAL passes test nothing
-        if (always) ds.depthCompareOp = VK_COMPARE_OP_ALWAYS;
-    }
-    ds.stencilTestEnable = has_depth && key.depth.stencil_test && !std::getenv("NX_NO_STENCIL");
-    VkStencilOpState* faces[2] = {&ds.front, &ds.back};
-    for (int f = 0; f < 2; f++) {
-        // Negative viewport height flips triangle winding between NVN and Vulkan; when back-face stencil state is not
-        // explicitly configured (stencil_func[1] == 0), mirror the front-face stencil state to both faces so UI masks
-        // (dialogue boxes, options, Morgana tutorials) pass regardless of face winding.
-        int src = (key.depth.stencil_func[1] == 0) ? 0 : f;
-        faces[f]->failOp = vk_stencil_op(key.depth.stencil_fail[src]);
-        faces[f]->depthFailOp = vk_stencil_op(key.depth.depth_fail[src]);
-        faces[f]->passOp = vk_stencil_op(key.depth.depth_pass[src]);
-        faces[f]->compareOp = vk_compare(key.depth.stencil_func[src]);
-        faces[f]->compareMask = faces[f]->writeMask = 0xFF;  // dynamic: SetStencilValueMask / SetStencilMask
+    ds.depthTestEnable = (!dc.depth_test_enable && has_depth && key.depth.depth_test) ? VK_TRUE : VK_FALSE;
+    ds.depthWriteEnable = (!dc.depth_write_enable && has_depth && key.depth.depth_write) ? VK_TRUE : VK_FALSE;
+    ds.depthCompareOp = dc.depth_compare_op ? VK_COMPARE_OP_LESS : effective_depth_compare_op(key.depth);
+    ds.stencilTestEnable = (!dc.stencil_test_enable && has_depth && key.depth.stencil_test && !no_stencil_flag()) ? VK_TRUE : VK_FALSE;
+    if (!dc.stencil_op) {
+        VkStencilOpState faces[2];
+        effective_stencil_ops(key.depth, key.polygon.cull, faces);
+        ds.front = faces[0];
+        ds.back = faces[1];
+    } else {
+        ds.front.compareMask = ds.front.writeMask = 0xFF;
+        ds.back.compareMask = ds.back.writeMask = 0xFF;
     }
 
     VkPipelineColorBlendAttachmentState(&att)[8] = B.att;
     for (uint32_t k = 0; k < key.color_count; k++) {
-        const BlendTarget& b = key.blend[k];
-        // An R11G11B10F target's destination alpha is 1 on Maxwell; the RGBA16F image holds what the shader wrote.
-        bool ufloat = (key.ufloat_colors >> k & 1) && !ufloat_raw();
-        auto factor = [ufloat](uint32_t f) {
-            VkBlendFactor v = vk_blend_factor(f);
-            if (!ufloat) return v;
-            return v == VK_BLEND_FACTOR_DST_ALPHA             ? VK_BLEND_FACTOR_ONE
-                   : v == VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA ? VK_BLEND_FACTOR_ZERO
-                   : v == VK_BLEND_FACTOR_SRC_ALPHA_SATURATE  ? VK_BLEND_FACTOR_ZERO  // min(As, 1 - 1)
-                                                              : v;
-        };
-        att[k].blendEnable = key.color.blend_enable[k] ? VK_TRUE : VK_FALSE;
-        att[k].srcColorBlendFactor = factor(b.src_rgb);
-        att[k].dstColorBlendFactor = factor(b.dst_rgb);
-        att[k].colorBlendOp = vk_blend_op(b.eq_rgb);
-        att[k].srcAlphaBlendFactor = factor(b.src_a);
-        att[k].dstAlphaBlendFactor = factor(b.dst_a);
-        att[k].alphaBlendOp = vk_blend_op(b.eq_a);
-        att[k].colorWriteMask = key.mask.mask[k] & 0xF;
+        att[k].blendEnable = (!dc.color_blend_enable && key.color.blend_enable[k]) ? VK_TRUE : VK_FALSE;
+        if (!dc.color_blend_equation) {
+            const bool ufloat = (key.ufloat_colors >> k & 1) && !ufloat_raw();
+            const VkColorBlendEquationEXT eq = vk_blend_equation(key.blend[k], ufloat);
+            att[k].srcColorBlendFactor = eq.srcColorBlendFactor;
+            att[k].dstColorBlendFactor = eq.dstColorBlendFactor;
+            att[k].colorBlendOp = eq.colorBlendOp;
+            att[k].srcAlphaBlendFactor = eq.srcAlphaBlendFactor;
+            att[k].dstAlphaBlendFactor = eq.dstAlphaBlendFactor;
+            att[k].alphaBlendOp = eq.alphaBlendOp;
+        }
+        att[k].colorWriteMask = dc.color_write_mask ? 0xFu : (key.mask.mask[k] & 0xFu);
     }
     VkPipelineColorBlendStateCreateInfo& cb = B.cb;
     cb = {VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO};
     cb.attachmentCount = key.color_count;
     cb.pAttachments = att;
 
-    // Stencil reference and masks and depth bias values come from command-buffer calls (nvn_raster.cpp), so they are
-    // dynamic: one pipeline for every value the game uses.
-    VkDynamicState(&dyn)[7] = B.dyn;
-    dyn_init(dyn);
+    // Base 7 dynamic states plus any probed Core 1.3 / EDS1 / EDS2 / EDS3 dynamic states.
+    uint32_t dn = 0;
+    auto add_dyn = [&](VkDynamicState s) { B.dyn[dn++] = s; };
+    add_dyn(VK_DYNAMIC_STATE_VIEWPORT);
+    add_dyn(VK_DYNAMIC_STATE_SCISSOR);
+    add_dyn(VK_DYNAMIC_STATE_BLEND_CONSTANTS);
+    add_dyn(VK_DYNAMIC_STATE_STENCIL_REFERENCE);
+    add_dyn(VK_DYNAMIC_STATE_STENCIL_COMPARE_MASK);
+    add_dyn(VK_DYNAMIC_STATE_STENCIL_WRITE_MASK);
+    add_dyn(VK_DYNAMIC_STATE_DEPTH_BIAS);
+    if (dc.cull_mode) add_dyn(VK_DYNAMIC_STATE_CULL_MODE);
+    if (dc.front_face) add_dyn(VK_DYNAMIC_STATE_FRONT_FACE);
+    if (dc.primitive_topology) add_dyn(VK_DYNAMIC_STATE_PRIMITIVE_TOPOLOGY);
+    if (dc.depth_test_enable) add_dyn(VK_DYNAMIC_STATE_DEPTH_TEST_ENABLE);
+    if (dc.depth_write_enable) add_dyn(VK_DYNAMIC_STATE_DEPTH_WRITE_ENABLE);
+    if (dc.depth_compare_op) add_dyn(VK_DYNAMIC_STATE_DEPTH_COMPARE_OP);
+    if (dc.stencil_test_enable) add_dyn(VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE);
+    if (dc.stencil_op) add_dyn(VK_DYNAMIC_STATE_STENCIL_OP);
+    if (dc.vertex_stride) add_dyn(VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE);
+    if (dc.depth_bias_enable) add_dyn(VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE);
+    if (dc.primitive_restart_enable) add_dyn(VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE);
+    if (dc.rasterizer_discard_enable) add_dyn(VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE);
+    if (dc.polygon_mode) add_dyn(VK_DYNAMIC_STATE_POLYGON_MODE_EXT);
+    if (dc.depth_clamp_enable) add_dyn(VK_DYNAMIC_STATE_DEPTH_CLAMP_ENABLE_EXT);
+    if (dc.alpha_to_coverage_enable) add_dyn(VK_DYNAMIC_STATE_ALPHA_TO_COVERAGE_ENABLE_EXT);
+    if (key.color_count > 0) {
+        if (dc.color_blend_enable) add_dyn(VK_DYNAMIC_STATE_COLOR_BLEND_ENABLE_EXT);
+        if (dc.color_blend_equation) add_dyn(VK_DYNAMIC_STATE_COLOR_BLEND_EQUATION_EXT);
+        if (dc.color_write_mask) add_dyn(VK_DYNAMIC_STATE_COLOR_WRITE_MASK_EXT);
+    }
+    B.dyn_count = dn;
     VkPipelineDynamicStateCreateInfo& dy = B.dy;
     dy = {VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO};
-    dy.dynamicStateCount = uint32_t(sizeof dyn / sizeof dyn[0]);
-    dy.pDynamicStates = dyn;
+    dy.dynamicStateCount = dn;
+    dy.pDynamicStates = B.dyn;
 
     VkPipelineRenderingCreateInfo& ri = B.ri;
     ri = {VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO};

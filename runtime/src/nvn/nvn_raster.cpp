@@ -111,7 +111,7 @@ bool raster_command(const Cmd& c) {
         case Cmd::SetDepthClamp:
             if (s.depth_clamp != (c.n != 0)) {
                 s.depth_clamp = c.n != 0;
-                replay::g_pipeline_state_version++;
+                if (!vk_dynamic_caps().depth_clamp_enable) replay::g_pipeline_state_version++;
             }
             return true;
         default: return false;

@@ -67,6 +67,50 @@ bool vk_list_restart();  // VK_EXT_primitive_topology_list_restart enabled (nvn_
 bool vk_dynamic_rendering();  // core 1.3 dynamic rendering; without it, render pass objects (nvn_renderpass.cpp)
 // The core features the device was created with (all the GPU has): depthClamp, depthBiasClamp, depthBounds, ...
 const VkPhysicalDeviceFeatures& vk_features();
+struct DynamicStateCaps {
+    bool cull_mode = false;
+    bool front_face = false;
+    bool primitive_topology = false;
+    bool depth_test_enable = false;
+    bool depth_write_enable = false;
+    bool depth_compare_op = false;
+    bool stencil_test_enable = false;
+    bool stencil_op = false;
+    bool vertex_stride = false;
+
+    bool depth_bias_enable = false;
+    bool primitive_restart_enable = false;
+    bool rasterizer_discard_enable = false;
+
+    bool polygon_mode = false;
+    bool depth_clamp_enable = false;
+    bool alpha_to_coverage_enable = false;
+    bool color_blend_enable = false;
+    bool color_blend_equation = false;
+    bool color_write_mask = false;
+
+    PFN_vkCmdSetCullMode set_cull_mode = nullptr;
+    PFN_vkCmdSetFrontFace set_front_face = nullptr;
+    PFN_vkCmdSetPrimitiveTopology set_primitive_topology = nullptr;
+    PFN_vkCmdSetDepthTestEnable set_depth_test_enable = nullptr;
+    PFN_vkCmdSetDepthWriteEnable set_depth_write_enable = nullptr;
+    PFN_vkCmdSetDepthCompareOp set_depth_compare_op = nullptr;
+    PFN_vkCmdSetStencilTestEnable set_stencil_test_enable = nullptr;
+    PFN_vkCmdSetStencilOp set_stencil_op = nullptr;
+    PFN_vkCmdBindVertexBuffers2 bind_vertex_buffers2 = nullptr;
+
+    PFN_vkCmdSetDepthBiasEnable set_depth_bias_enable = nullptr;
+    PFN_vkCmdSetPrimitiveRestartEnable set_primitive_restart_enable = nullptr;
+    PFN_vkCmdSetRasterizerDiscardEnable set_rasterizer_discard_enable = nullptr;
+
+    PFN_vkCmdSetPolygonModeEXT set_polygon_mode = nullptr;
+    PFN_vkCmdSetDepthClampEnableEXT set_depth_clamp_enable = nullptr;
+    PFN_vkCmdSetAlphaToCoverageEnableEXT set_alpha_to_coverage_enable = nullptr;
+    PFN_vkCmdSetColorBlendEnableEXT set_color_blend_enable = nullptr;
+    PFN_vkCmdSetColorBlendEquationEXT set_color_blend_equation = nullptr;
+    PFN_vkCmdSetColorWriteMaskEXT set_color_write_mask = nullptr;
+};
+const DynamicStateCaps& vk_dynamic_caps();
 bool is_xclipse();
 bool is_mali();
 bool is_adreno();

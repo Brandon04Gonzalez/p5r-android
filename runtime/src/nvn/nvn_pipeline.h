@@ -4,6 +4,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdlib>
 #include <cstring>
 #include <vector>
 
@@ -81,7 +82,77 @@ struct PipelineKey {
     uint32_t restart = 0;  // primitive restart for a strip or fan (SetPrimitiveRestart; nvn_draw.cpp)
     float uw_x = 0;  // NX_ULTRAWIDE: gl_Position.x scale of the vertex stage (0: none, the module has no constant)
 };
-VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout);
+VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout, bool allow_async = true);
+bool pipeline_workers_busy();
+
+// Shared NVN -> Vulkan translation helpers used consistently by static pipeline creation,
+// canonical key deduplication, and dynamic command-buffer state emission.
+inline uint32_t canonical_topology_mode(uint32_t mode) {
+    return mode == 0 ? 0u : (mode == 1 || mode == 3) ? 1u : 4u;
+}
+inline VkPolygonMode vk_polygon_mode(uint32_t mode) {
+    return mode == 0 ? VK_POLYGON_MODE_POINT : mode == 1 ? VK_POLYGON_MODE_LINE : VK_POLYGON_MODE_FILL;
+}
+inline VkFrontFace vk_front_face(uint32_t front) {
+    return front == 0 ? VK_FRONT_FACE_CLOCKWISE : VK_FRONT_FACE_COUNTER_CLOCKWISE;
+}
+inline bool ufloat_raw() {
+    static const bool raw = std::getenv("NX_R11G11B10_RAW") != nullptr;
+    return raw;
+}
+inline bool no_a2c_flag() {
+    static const bool v = std::getenv("NX_NO_ALPHA_TO_COVERAGE") != nullptr;
+    return v;
+}
+inline bool no_stencil_flag() {
+    static const bool v = std::getenv("NX_NO_STENCIL") != nullptr;
+    return v;
+}
+inline bool equal_always_flag() {
+    static const bool v = std::getenv("NX_EQUAL_ALWAYS") != nullptr;
+    return v;
+}
+inline bool effective_depth_bias_enable(const PolygonInfo& poly, const DepthStencilInfo& depth) {
+    const uint32_t offset_bit = poly.mode <= 2 ? 1u << poly.mode : 4u;
+    return (poly.offset_enables & offset_bit) != 0 || equal_slack_pass(depth);
+}
+inline VkCompareOp effective_depth_compare_op(const DepthStencilInfo& depth) {
+    if (depth.depth_func == 3 && !depth.depth_write)
+        return equal_always_flag() ? VK_COMPARE_OP_ALWAYS : VK_COMPARE_OP_LESS_OR_EQUAL;
+    return vk_compare(depth.depth_func);
+}
+inline void effective_stencil_ops(const DepthStencilInfo& depth, uint32_t cull, VkStencilOpState out[2]) {
+    const bool mirror_front = (cull == 0) || (depth.stencil_func[1] == 0) ||
+                              (depth.depth_pass[1] <= 1 && depth.depth_pass[0] > 1);
+    for (int f = 0; f < 2; f++) {
+        const int src = mirror_front ? 0 : f;
+        out[f].failOp = vk_stencil_op(depth.stencil_fail[src]);
+        out[f].depthFailOp = vk_stencil_op(depth.depth_fail[src]);
+        out[f].passOp = vk_stencil_op(depth.depth_pass[src]);
+        out[f].compareOp = vk_compare(depth.stencil_func[src]);
+        out[f].compareMask = 0xFF;
+        out[f].writeMask = 0xFF;
+        out[f].reference = 0;
+    }
+}
+inline VkColorBlendEquationEXT vk_blend_equation(const BlendTarget& b, bool ufloat_target) {
+    auto factor = [ufloat_target](uint32_t f) {
+        const VkBlendFactor v = vk_blend_factor(f);
+        if (!ufloat_target) return v;
+        return v == VK_BLEND_FACTOR_DST_ALPHA             ? VK_BLEND_FACTOR_ONE
+               : v == VK_BLEND_FACTOR_ONE_MINUS_DST_ALPHA ? VK_BLEND_FACTOR_ZERO
+               : v == VK_BLEND_FACTOR_SRC_ALPHA_SATURATE  ? VK_BLEND_FACTOR_ZERO
+                                                          : v;
+    };
+    VkColorBlendEquationEXT eq{};
+    eq.srcColorBlendFactor = factor(b.src_rgb);
+    eq.dstColorBlendFactor = factor(b.dst_rgb);
+    eq.colorBlendOp = vk_blend_op(b.eq_rgb);
+    eq.srcAlphaBlendFactor = factor(b.src_a);
+    eq.dstAlphaBlendFactor = factor(b.dst_a);
+    eq.alphaBlendOp = vk_blend_op(b.eq_a);
+    return eq;
+}
 // The pipelines an earlier session built (<pipeline cache>.keys): a canonical key with its two shaders by hash
 // (nvn_pipeline_cache.cpp). pipeline_warm_step, once per submit, compiles them on worker threads as the game loads
 // their shaders, and collects finished compiles.

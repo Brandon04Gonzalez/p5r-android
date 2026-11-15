@@ -35,7 +35,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             uint32_t idx = uint32_t(c.a[0]);
             if (s.restart != rst || s.restart_index != idx) {
                 s.restart = rst, s.restart_index = idx;
-                g_pipeline_state_version++;
+                if (!vk_dynamic_caps().primitive_restart_enable) g_pipeline_state_version++;
             }
             break;
         }
@@ -135,8 +135,18 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             break;
         case Cmd::BindVertexStreams:
             if (auto* p = blob(c.n * sizeof(VertexStream))) {
-                s.streams.assign(reinterpret_cast<const VertexStream*>(p), reinterpret_cast<const VertexStream*>(p) + c.n);
-                g_pipeline_state_version++;
+                const auto* vs = reinterpret_cast<const VertexStream*>(p);
+                bool need_pipe_bump = !vk_dynamic_caps().vertex_stride || s.streams.size() != c.n;
+                if (!need_pipe_bump) {
+                    for (uint32_t i = 0; i < c.n; i++) {
+                        if (s.streams[i].divisor != vs[i].divisor) {
+                            need_pipe_bump = true;
+                            break;
+                        }
+                    }
+                }
+                s.streams.assign(vs, vs + c.n);
+                if (need_pipe_bump) g_pipeline_state_version++;
             }
             break;
         case Cmd::BindBlendState:
@@ -145,7 +155,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
                 std::memcpy(&b, p, sizeof b);
                 if (b.target < 8 && std::memcmp(&s.blend[b.target], &b, sizeof b) != 0) {
                     s.blend[b.target] = b;
-                    g_pipeline_state_version++;
+                    if (!vk_dynamic_caps().color_blend_equation) g_pipeline_state_version++;
                 }
             }
             break;
@@ -153,7 +163,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (auto* p = blob(sizeof(ColorStateInfo))) {
                 if (std::memcmp(&s.color, p, sizeof s.color) != 0) {
                     std::memcpy(&s.color, p, sizeof s.color);
-                    g_pipeline_state_version++;
+                    if (!vk_dynamic_caps().color_blend_enable) g_pipeline_state_version++;
                 }
             }
             break;
@@ -161,7 +171,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (auto* p = blob(sizeof(ChannelMaskInfo))) {
                 if (std::memcmp(&s.mask, p, sizeof s.mask) != 0) {
                     std::memcpy(&s.mask, p, sizeof s.mask);
-                    g_pipeline_state_version++;
+                    if (!vk_dynamic_caps().color_write_mask) g_pipeline_state_version++;
                 }
             }
             break;
@@ -169,7 +179,10 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (auto* p = blob(sizeof(DepthStencilInfo))) {
                 if (std::memcmp(&s.depth, p, sizeof s.depth) != 0) {
                     std::memcpy(&s.depth, p, sizeof s.depth);
-                    g_pipeline_state_version++;
+                    const DynamicStateCaps& dc = vk_dynamic_caps();
+                    if (!(dc.depth_test_enable && dc.depth_write_enable && dc.depth_compare_op &&
+                          dc.stencil_test_enable && dc.stencil_op && dc.depth_bias_enable))
+                        g_pipeline_state_version++;
                 }
             }
             break;
@@ -177,7 +190,9 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             if (auto* p = blob(sizeof(PolygonInfo))) {
                 if (std::memcmp(&s.polygon, p, sizeof s.polygon) != 0) {
                     std::memcpy(&s.polygon, p, sizeof s.polygon);
-                    g_pipeline_state_version++;
+                    const DynamicStateCaps& dc = vk_dynamic_caps();
+                    if (!(dc.cull_mode && dc.front_face && dc.polygon_mode && dc.depth_bias_enable && dc.stencil_op))
+                        g_pipeline_state_version++;
                 }
             }
             break;
@@ -185,7 +200,7 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
             bool a2c = c.n != 0;
             if (s.alpha_to_coverage != a2c) {
                 s.alpha_to_coverage = a2c;
-                g_pipeline_state_version++;
+                if (!vk_dynamic_caps().alpha_to_coverage_enable) g_pipeline_state_version++;
             }
             break;
         }

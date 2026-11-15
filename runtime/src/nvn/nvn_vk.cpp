@@ -67,6 +67,7 @@ bool g_integrated = false;
 bool g_require_sg32 = false;  // compute pipelines are made with a required subgroup size of 32 (Maxwell's warp)  // the chosen GPU is an integrated one (unified memory, the GPU is the long side)
 VkPhysicalDeviceProperties g_device_props{};
 VkPhysicalDeviceFeatures g_features{};  // the core features enabled (vk_features())
+DynamicStateCaps g_dyn_caps{};
 VkDescriptorPool g_descriptors = VK_NULL_HANDLE;
 
 // The per-submit upload buffer (nvn_vk.h): one host-visible buffer, bump-allocated, reset at every submit.
@@ -279,6 +280,64 @@ bool init() {
         has_extension(dext, "VK_EXT_depth_clip_control") ? 1u : 0u);
     log("nvn/vk: portability: format reinterpretation %u, format swizzle %u", fport.fields[2], fport.fields[3]);
     log_device_caps(g_physical, dext);  // nvn_caps.cpp
+
+    // Dynamic state probing: Vulkan 1.3 promotes EDS1 + EDS2 to core; on 1.1/1.2 fall back to extensions.
+    // EDS3 reduces blend/mask/polygonMode/depthClamp/alphaToCoverage pipeline variants further where supported.
+    const bool want_dyn = !(std::getenv("NX_DYNAMIC_STATE") && std::getenv("NX_DYNAMIC_STATE")[0] == '0');
+    const bool want_eds3 = want_dyn && !is_powervr() && !(std::getenv("NX_EDS3") && std::getenv("NX_EDS3")[0] == '0');
+    const bool has_eds1_ext = has_extension(dext, "VK_EXT_extended_dynamic_state");
+    const bool has_eds2_ext = has_extension(dext, "VK_EXT_extended_dynamic_state2");
+    const bool has_eds3_ext = has_extension(dext, "VK_EXT_extended_dynamic_state3");
+    VkPhysicalDeviceExtendedDynamicStateFeaturesEXT feds1{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT};
+    VkPhysicalDeviceExtendedDynamicState2FeaturesEXT feds2{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT};
+    VkPhysicalDeviceExtendedDynamicState3FeaturesEXT feds3{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+    bool use_eds1_ext = false, use_eds2_ext = false, use_eds3_ext = false;
+    if (want_dyn && ((!v13 && (has_eds1_ext || has_eds2_ext)) || (want_eds3 && has_eds3_ext))) {
+        VkPhysicalDeviceFeatures2 qdyn{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        void** qtail = &qdyn.pNext;
+        if (!v13 && has_eds1_ext) *qtail = &feds1, qtail = &feds1.pNext;
+        if (!v13 && has_eds2_ext) *qtail = &feds2, qtail = &feds2.pNext;
+        if (want_eds3 && has_eds3_ext) *qtail = &feds3, qtail = &feds3.pNext;
+        p_vkGetPhysicalDeviceFeatures2(g_physical, &qdyn);
+        if (!v13 && has_eds1_ext && feds1.extendedDynamicState) {
+            feds1.pNext = nullptr;
+            *tail = &feds1, tail = &feds1.pNext;
+            dexts.push_back("VK_EXT_extended_dynamic_state");
+            use_eds1_ext = true;
+        }
+        if (!v13 && has_eds2_ext && feds2.extendedDynamicState2) {
+            feds2.pNext = nullptr;
+            feds2.extendedDynamicState2LogicOp = VK_FALSE;
+            feds2.extendedDynamicState2PatchControlPoints = VK_FALSE;
+            *tail = &feds2, tail = &feds2.pNext;
+            dexts.push_back("VK_EXT_extended_dynamic_state2");
+            use_eds2_ext = true;
+        }
+        if (want_eds3 && has_eds3_ext) {
+            const VkBool32 pm = feds3.extendedDynamicState3PolygonMode;
+            const VkBool32 dc = feds3.extendedDynamicState3DepthClampEnable;
+            const VkBool32 a2c = feds3.extendedDynamicState3AlphaToCoverageEnable;
+            const VkBool32 cbe = feds3.extendedDynamicState3ColorBlendEnable;
+            const VkBool32 cbeq = feds3.extendedDynamicState3ColorBlendEquation;
+            const VkBool32 cwm = feds3.extendedDynamicState3ColorWriteMask;
+            if (pm || dc || a2c || cbe || cbeq || cwm) {
+                feds3 = {VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT};
+                feds3.extendedDynamicState3PolygonMode = pm;
+                feds3.extendedDynamicState3DepthClampEnable = dc;
+                feds3.extendedDynamicState3AlphaToCoverageEnable = a2c;
+                feds3.extendedDynamicState3ColorBlendEnable = cbe;
+                feds3.extendedDynamicState3ColorBlendEquation = cbeq;
+                feds3.extendedDynamicState3ColorWriteMask = cwm;
+                *tail = &feds3, tail = &feds3.pNext;
+                dexts.push_back("VK_EXT_extended_dynamic_state3");
+                use_eds3_ext = true;
+            }
+        }
+    }
+
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = g_family;
@@ -292,18 +351,102 @@ bool init() {
     dci.pNext = &features;
     if (!check(p_create_device(g_physical, &dci, nullptr, &g_device), "vkCreateDevice")) return false;
     p_vkGetDeviceQueue(g_device, g_family, 0, &g_queue);
+    auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
+        reinterpret_cast<PFN_vkGetInstanceProcAddr>(g_gipa)(g_instance, "vkGetDeviceProcAddr"));
+    if (gdpa && want_dyn) {
+        auto load_dev_fn = [&](const char* core_name, const char* ext_name, bool try_core,
+                               bool try_ext) -> PFN_vkVoidFunction {
+            PFN_vkVoidFunction fn = nullptr;
+            if (try_core) fn = gdpa(g_device, core_name);
+            if (!fn && try_ext && ext_name) fn = gdpa(g_device, ext_name);
+            return fn;
+        };
+        if (v13 || use_eds1_ext) {
+            g_dyn_caps.set_cull_mode = reinterpret_cast<PFN_vkCmdSetCullMode>(
+                load_dev_fn("vkCmdSetCullMode", "vkCmdSetCullModeEXT", v13, use_eds1_ext));
+            g_dyn_caps.set_front_face = reinterpret_cast<PFN_vkCmdSetFrontFace>(
+                load_dev_fn("vkCmdSetFrontFace", "vkCmdSetFrontFaceEXT", v13, use_eds1_ext));
+            g_dyn_caps.set_primitive_topology = reinterpret_cast<PFN_vkCmdSetPrimitiveTopology>(
+                load_dev_fn("vkCmdSetPrimitiveTopology", "vkCmdSetPrimitiveTopologyEXT", v13, use_eds1_ext));
+            g_dyn_caps.set_depth_test_enable = reinterpret_cast<PFN_vkCmdSetDepthTestEnable>(
+                load_dev_fn("vkCmdSetDepthTestEnable", "vkCmdSetDepthTestEnableEXT", v13, use_eds1_ext));
+            g_dyn_caps.set_depth_write_enable = reinterpret_cast<PFN_vkCmdSetDepthWriteEnable>(
+                load_dev_fn("vkCmdSetDepthWriteEnable", "vkCmdSetDepthWriteEnableEXT", v13, use_eds1_ext));
+            g_dyn_caps.set_depth_compare_op = reinterpret_cast<PFN_vkCmdSetDepthCompareOp>(
+                load_dev_fn("vkCmdSetDepthCompareOp", "vkCmdSetDepthCompareOpEXT", v13, use_eds1_ext));
+            g_dyn_caps.set_stencil_test_enable = reinterpret_cast<PFN_vkCmdSetStencilTestEnable>(
+                load_dev_fn("vkCmdSetStencilTestEnable", "vkCmdSetStencilTestEnableEXT", v13, use_eds1_ext));
+            g_dyn_caps.set_stencil_op = reinterpret_cast<PFN_vkCmdSetStencilOp>(
+                load_dev_fn("vkCmdSetStencilOp", "vkCmdSetStencilOpEXT", v13, use_eds1_ext));
+            g_dyn_caps.bind_vertex_buffers2 = reinterpret_cast<PFN_vkCmdBindVertexBuffers2>(
+                load_dev_fn("vkCmdBindVertexBuffers2", "vkCmdBindVertexBuffers2EXT", v13, use_eds1_ext));
+            g_dyn_caps.cull_mode = g_dyn_caps.set_cull_mode != nullptr;
+            g_dyn_caps.front_face = g_dyn_caps.set_front_face != nullptr;
+            g_dyn_caps.primitive_topology = g_dyn_caps.set_primitive_topology != nullptr;
+            g_dyn_caps.depth_test_enable = g_dyn_caps.set_depth_test_enable != nullptr;
+            g_dyn_caps.depth_write_enable = g_dyn_caps.set_depth_write_enable != nullptr;
+            g_dyn_caps.depth_compare_op = g_dyn_caps.set_depth_compare_op != nullptr;
+            g_dyn_caps.stencil_test_enable = g_dyn_caps.set_stencil_test_enable != nullptr;
+            g_dyn_caps.stencil_op = g_dyn_caps.set_stencil_op != nullptr;
+            g_dyn_caps.vertex_stride = g_dyn_caps.bind_vertex_buffers2 != nullptr;
+        }
+        if (v13 || use_eds2_ext) {
+            g_dyn_caps.set_depth_bias_enable = reinterpret_cast<PFN_vkCmdSetDepthBiasEnable>(
+                load_dev_fn("vkCmdSetDepthBiasEnable", "vkCmdSetDepthBiasEnableEXT", v13, use_eds2_ext));
+            g_dyn_caps.set_primitive_restart_enable = reinterpret_cast<PFN_vkCmdSetPrimitiveRestartEnable>(
+                load_dev_fn("vkCmdSetPrimitiveRestartEnable", "vkCmdSetPrimitiveRestartEnableEXT", v13, use_eds2_ext));
+            g_dyn_caps.set_rasterizer_discard_enable = reinterpret_cast<PFN_vkCmdSetRasterizerDiscardEnable>(
+                load_dev_fn("vkCmdSetRasterizerDiscardEnable", "vkCmdSetRasterizerDiscardEnableEXT", v13, use_eds2_ext));
+            g_dyn_caps.depth_bias_enable = g_dyn_caps.set_depth_bias_enable != nullptr;
+            g_dyn_caps.primitive_restart_enable = g_dyn_caps.set_primitive_restart_enable != nullptr;
+            g_dyn_caps.rasterizer_discard_enable = g_dyn_caps.set_rasterizer_discard_enable != nullptr;
+        }
+        if (use_eds3_ext) {
+            if (feds3.extendedDynamicState3PolygonMode)
+                g_dyn_caps.set_polygon_mode =
+                    reinterpret_cast<PFN_vkCmdSetPolygonModeEXT>(gdpa(g_device, "vkCmdSetPolygonModeEXT"));
+            if (feds3.extendedDynamicState3DepthClampEnable && g_features.depthClamp)
+                g_dyn_caps.set_depth_clamp_enable =
+                    reinterpret_cast<PFN_vkCmdSetDepthClampEnableEXT>(gdpa(g_device, "vkCmdSetDepthClampEnableEXT"));
+            if (feds3.extendedDynamicState3AlphaToCoverageEnable)
+                g_dyn_caps.set_alpha_to_coverage_enable = reinterpret_cast<PFN_vkCmdSetAlphaToCoverageEnableEXT>(
+                    gdpa(g_device, "vkCmdSetAlphaToCoverageEnableEXT"));
+            if (feds3.extendedDynamicState3ColorBlendEnable)
+                g_dyn_caps.set_color_blend_enable =
+                    reinterpret_cast<PFN_vkCmdSetColorBlendEnableEXT>(gdpa(g_device, "vkCmdSetColorBlendEnableEXT"));
+            if (feds3.extendedDynamicState3ColorBlendEquation)
+                g_dyn_caps.set_color_blend_equation = reinterpret_cast<PFN_vkCmdSetColorBlendEquationEXT>(
+                    gdpa(g_device, "vkCmdSetColorBlendEquationEXT"));
+            if (feds3.extendedDynamicState3ColorWriteMask)
+                g_dyn_caps.set_color_write_mask =
+                    reinterpret_cast<PFN_vkCmdSetColorWriteMaskEXT>(gdpa(g_device, "vkCmdSetColorWriteMaskEXT"));
+            g_dyn_caps.polygon_mode = g_dyn_caps.set_polygon_mode != nullptr;
+            g_dyn_caps.depth_clamp_enable = g_dyn_caps.set_depth_clamp_enable != nullptr;
+            g_dyn_caps.alpha_to_coverage_enable = g_dyn_caps.set_alpha_to_coverage_enable != nullptr;
+            g_dyn_caps.color_blend_enable = g_dyn_caps.set_color_blend_enable != nullptr;
+            g_dyn_caps.color_blend_equation = g_dyn_caps.set_color_blend_equation != nullptr;
+            g_dyn_caps.color_write_mask = g_dyn_caps.set_color_write_mask != nullptr;
+        }
+    }
+    log("nvn/vk: dynamic state: eds1(cull=%u front=%u topo=%u dtest=%u dwrite=%u dcmp=%u stest=%u sop=%u stride=%u) "
+        "eds2(dbias=%u prst=%u rdisc=%u) eds3(poly=%u dclamp=%u a2c=%u cbe=%u cbeq=%u cwm=%u)",
+        g_dyn_caps.cull_mode ? 1u : 0u, g_dyn_caps.front_face ? 1u : 0u, g_dyn_caps.primitive_topology ? 1u : 0u,
+        g_dyn_caps.depth_test_enable ? 1u : 0u, g_dyn_caps.depth_write_enable ? 1u : 0u,
+        g_dyn_caps.depth_compare_op ? 1u : 0u, g_dyn_caps.stencil_test_enable ? 1u : 0u,
+        g_dyn_caps.stencil_op ? 1u : 0u, g_dyn_caps.vertex_stride ? 1u : 0u,
+        g_dyn_caps.depth_bias_enable ? 1u : 0u, g_dyn_caps.primitive_restart_enable ? 1u : 0u,
+        g_dyn_caps.rasterizer_discard_enable ? 1u : 0u, g_dyn_caps.polygon_mode ? 1u : 0u,
+        g_dyn_caps.depth_clamp_enable ? 1u : 0u, g_dyn_caps.alpha_to_coverage_enable ? 1u : 0u,
+        g_dyn_caps.color_blend_enable ? 1u : 0u, g_dyn_caps.color_blend_equation ? 1u : 0u,
+        g_dyn_caps.color_write_mask ? 1u : 0u);
     pipeline_cache();
     if (display_timing) {
-        auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-            reinterpret_cast<PFN_vkGetInstanceProcAddr>(g_gipa)(g_instance, "vkGetDeviceProcAddr"));
         g_past_timing = gdpa ? reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
                                    gdpa(g_device, "vkGetPastPresentationTimingGOOGLE"))
                              : nullptr;
         log("nvn/vk: display timing %s", g_past_timing ? "on (the picture's real latency)" : "not loaded");
     }
     if (indirect_count) {  // device commands of an extension: from the device (the loader may not know them)
-        auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
-            reinterpret_cast<PFN_vkGetInstanceProcAddr>(g_gipa)(g_instance, "vkGetDeviceProcAddr"));
         if (gdpa) {
             p_vkCmdDrawIndexedIndirectCountKHR = reinterpret_cast<PFN_vkCmdDrawIndexedIndirectCountKHR>(
                 gdpa(g_device, "vkCmdDrawIndexedIndirectCountKHR"));
@@ -491,6 +634,7 @@ bool vk_indirect_count() { return g_indirect_count; }
 bool vk_list_restart() { return g_list_restart; }
 bool vk_dynamic_rendering() { return g_dynamic_rendering; }
 const VkPhysicalDeviceFeatures& vk_features() { return g_features; }
+const DynamicStateCaps& vk_dynamic_caps() { return g_dyn_caps; }
 bool is_xclipse() {
     return std::strstr(g_device_props.deviceName, "Xclipse") != nullptr || g_device_props.vendorID == 0x144d;
 }
