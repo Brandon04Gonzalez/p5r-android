@@ -59,7 +59,7 @@ std::recursive_mutex& gpu_lock();  // nvn_vk.cpp
 
 namespace {
 
-constexpr uint32_t kMaxSlots = 8;
+constexpr uint32_t kMaxSlots = 12;
 constexpr uint32_t kMaxParts = 8;  // command buffers per submit: chunks, the split, the last part
 constexpr uint64_t kFenceTimeout = 10'000'000'000ull;  // heavy scene/shader transitions on mobile GPUs can take >2 s
 
@@ -99,7 +99,7 @@ struct DescBank {
     uint32_t descs_used[16] = {};
     uint64_t last_serial = 0;
 };
-constexpr uint32_t kDescBanks = 4;
+constexpr uint32_t kDescBanks = 8;
 DescBank g_desc_banks[kDescBanks];
 uint32_t g_active_desc_bank = 0;
 uint64_t g_desc_epoch = 1;
@@ -110,7 +110,7 @@ VkSemaphore g_rendered[kMaxSlots] = {};  // per swapchain image: signaled for it
 std::atomic<uint64_t> g_submitted{0}, g_completed{0};
 std::atomic<uint64_t> g_barrier{0};  // NX_ASYNC_GPU: the last submit with write-backs, retired before the next replay
 FrameTimes g_times;
-uint32_t g_max_replays = 2;                       // pipelined: submits in flight
+uint32_t g_max_replays = 4;                       // pipelined: submits in flight
 uint32_t g_plan_dispatches = 0, g_seen_dispatches = 0;  // pipelined: the submit's DispatchCompute commands, replayed
 // Pipelined, per log period: submits, split ones, write-backs after the first part's fence / after the whole submit,
 // waits for the oldest submit (two in flight), and how far into the replay the split came.
@@ -440,10 +440,13 @@ uint64_t frame_recording_serial() { return g_submitted + 1; }  // the serial the
 
 void frame_init(VkCommandPool pool, uint32_t family, VkBuffer ring, uint8_t* ring_ptr, uint64_t ring_size) {
     // NX_ASYNC_GPU=1 (or 2): two frames in flight; 3 or 4: that many. A frame is a submit and a present, a slot each.
-    // NX_PIPELINED likewise (at most that many submits in flight, whatever the slots).
-    uint32_t frames = uint32_t(std::clamp(env_int(pipelined() ? "NX_PIPELINED" : "NX_ASYNC_GPU"), 2, 4));
+    // NX_PIPELINED likewise (at most that many submits in flight; default 4 when unset so multi-submit frames don't stall on themselves).
+    const char* mode_env = pipelined() ? "NX_PIPELINED" : "NX_ASYNC_GPU";
+    const char* raw_env = std::getenv(mode_env);
+    const int requested = (raw_env && raw_env[0]) ? env_int(mode_env) : (pipelined() ? 4 : 2);
+    uint32_t frames = uint32_t(std::clamp(requested, 2, 6));
     g_max_replays = frames;
-    g_slot_count = std::min(kMaxSlots, frames * 2);
+    g_slot_count = std::min(kMaxSlots, pipelined() ? (frames * 2 + 2) : (frames * 2));
     VkDevice d = vk_device();
     g_slot_pools = std::getenv("NX_CB_RESET") == nullptr;
     for (uint32_t k = 0; k < g_slot_count; k++) {

@@ -88,7 +88,7 @@ struct UnstableSlot {
     const uint8_t* p = nullptr;
     uint64_t skip_until = 0;
 };
-constexpr uint32_t kUnstableSlots = 4096;
+constexpr uint32_t kUnstableSlots = 16384;
 UnstableSlot g_unstable_front[kUnstableSlots];
 
 inline uint32_t unstable_slot_index(const uint8_t* p) {
@@ -308,6 +308,9 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
         if (auto it = g_entries.find(p); it != g_entries.end()) {
             found_entry = &it->second;
             ef = {p, found_entry, g_entry_front_gen};
+        } else if (pc.skip_until > g_submits) {
+            g_stats_cache.unstable++;
+            return false;
         }
     }
 
@@ -377,7 +380,7 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
 
     const uint64_t serial = frame_recording_serial();
     if (seen.p != p) {
-        if (seen.submit != 0 && seen.submit + 4 >= g_submits && seen.count == 1 && pc.cached_count == 0) {
+        if (seen.submit != 0 && seen.submit + 4 >= g_submits && seen.count == 1) {
             record_page_churn(pc);
         }
         seen = {p, size, sh, 1, 0, 0, g_submits};
@@ -395,7 +398,7 @@ bool cache_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t ali
             const uint32_t shift = std::min<uint32_t>(seen.unstable_streak - 1, 4);
             seen.skip_until = g_submits + (30ull << shift);
             g_unstable_front[u_idx] = {p, seen.skip_until};
-            if (pc.cached_count == 0) record_page_churn(pc);
+            record_page_churn(pc);
         }
         seen.size = size;
         seen.hash = sh;
