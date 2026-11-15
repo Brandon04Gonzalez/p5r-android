@@ -100,6 +100,13 @@ public class Launcher extends Activity {
 
     String label(Option o) { return t(o.labelsEs[o.pick], o.labelsEn[o.pick]); }
 
+    Option findOption(String key) {
+        for (Option o : options) {
+            if (key.equals(o.key)) return o;
+        }
+        return null;
+    }
+
     static File dataDir() { return new File(Environment.getExternalStorageDirectory(), DATA); }
 
     static final class Api30Helper {
@@ -319,6 +326,10 @@ public class Launcher extends Activity {
                 new String[] {"0", "1"},
                 new String[] {"Desactivada", "Activada"},
                 new String[] {"Off", "On"}, 0));
+        options.add(new Option("NX_FSR", "Superresolución (FSR 1.0)", "Super resolution (FSR 1.0)",
+                new String[] {"0", "1"},
+                new String[] {"Desactivada", "Activada"},
+                new String[] {"Off", "On"}, 0));
         options.add(new Option("NX_HUD_1080", "Interfaz", "Interface", new String[] {"0", "1"},
                 new String[] {"720p (más rápida)", "1080p (textos nítidos)"},
                 new String[] {"720p (faster)", "1080p (sharp text)"}, 0));
@@ -328,6 +339,10 @@ public class Launcher extends Activity {
                 new String[] {"30 fps", "60 fps (experimental)"}, new String[] {"30 fps", "60 fps (experimental)"}, 0));
         options.add(new Option("NX_SHADOWS", "Sombras", "Shadows", new String[] {"0", "1"},
                 new String[] {"Desactivadas", "Activadas"}, new String[] {"Off", "On"}, 0));
+        options.add(new Option("NX_MALI_LOW_SHADOWS", "Calidad de sombras", "Shadow quality",
+                new String[] {"1", "0"},
+                new String[] {"Baja (0.5x - mejor rendimiento)", "Original (1.0x)"},
+                new String[] {"Low (0.5x - best performance)", "Original (1.0x)"}, 0));
         options.add(new Option("NX_SHOW_FPS", "Contador de FPS", "FPS counter", new String[] {"0", "1"},
                 new String[] {"Desactivado", "Activado"}, new String[] {"Off", "On"}, 0));
         options.add(new Option("NX_TOUCH_SHOW", "Controles táctiles", "On-screen controls", new String[] {"1", "0"},
@@ -429,6 +444,7 @@ public class Launcher extends Activity {
                     o.pick = (o.pick + 1) % o.values.length;
                     value.setText(label(o));
                     save();
+                    updateButtons(getWindow().getDecorView());
                 }
             });
             value.setTag(o);
@@ -688,7 +704,17 @@ public class Launcher extends Activity {
     void updateButtons(View v) {
         if (v instanceof Button && v.getTag() instanceof Option) {
             Option o = (Option) v.getTag();
-            ((Button) v).setText(label((Option) v.getTag()));
+            Button b = (Button) v;
+            b.setText(label(o));
+            if ("NX_MALI_LOW_SHADOWS".equals(o.key)) {
+                Option shadows = findOption("NX_SHADOWS");
+                boolean enabled = shadows != null && "1".equals(shadows.values[shadows.pick]);
+                b.setEnabled(enabled);
+                b.setAlpha(enabled ? 1.0f : 0.4f);
+                if (b.getParent() instanceof View) {
+                    ((View) b.getParent()).setAlpha(enabled ? 1.0f : 0.4f);
+                }
+            }
         } else if (v instanceof android.view.ViewGroup) {
             android.view.ViewGroup g = (android.view.ViewGroup) v;
             for (int k = 0; k < g.getChildCount(); k++) updateButtons(g.getChildAt(k));

@@ -78,8 +78,18 @@ final class Lang {
         put("60 fps (experimental)", "60 fps (expérimental)", "60 fps (experimentell)", "60 fps (sperimentale)",
                 "60 fps (experimental)", "60 fps（実験的）", "60 fps (실험적)", "60 fps（实验性）", "60 fps（實驗性）");
         put("Shadows", "Ombres", "Schatten", "Ombre", "Sombras", "影", "그림자", "阴影", "陰影");
+        put("Shadow quality", "Qualité des ombres", "Schattenqualität", "Qualità delle ombre", "Qualidade das sombras",
+                "影の品質", "그림자 품질", "阴影质量", "陰影品質");
+        put("Low (0.5x - best performance)", "Basse (0.5x - meilleures performances)", "Niedrig (0.5x - beste Leistung)",
+                "Bassa (0.5x - prestazioni migliori)", "Baixa (0.5x - melhor desempenho)", "低 (0.5x - 高性能)",
+                "낮음 (0.5x - 최고 성능)", "低（0.5x - 最佳性能）", "低（0.5x - 最佳效能）");
+        put("Original (1.0x)", "Originale (1.0x)", "Original (1.0x)", "Originale (1.0x)", "Original (1.0x)",
+                "オリジナル (1.0x)", "원본 (1.0x)", "原始（1.0x）", "原始（1.0x）");
         put("Off", "Désactivé", "Aus", "Disattivato", "Desativado", "オフ", "끔", "关", "關");
         put("Fullscreen (stretch)", "Plein écran (étirer)", "Vollbild (strecken)", "Schermo intero (allarga)", "Tela cheia (esticar)", "\u5168\u753b\u9762\uff08\u5f15\u304d\u4f38\u3070\u3057\uff09", "\uc804\uccb4 \ud654\uba74 (\ub298\uc774\uae30)", "\u5168\u5c4f\uff08\u62c9\u4f38\uff09", "\u5168\u87a2\u5e55\uff08\u62c9\u4f38\uff09");
+        put("Super resolution (FSR 1.0)", "Super-résolution (FSR 1.0)", "Superauflösung (FSR 1.0)",
+                "Super risoluzione (FSR 1.0)", "Super resolução (FSR 1.0)", "超解像（FSR 1.0）",
+                "초해상도 (FSR 1.0)", "超分辨率（FSR 1.0）", "超解析度（FSR 1.0）");
         put("On", "Activé", "An", "Attivato", "Ativado", "オン", "켬", "开", "開");
         put("FPS counter", "Compteur de FPS", "FPS-Anzeige", "Contatore FPS", "Contador de FPS", "FPS表示", "FPS 표시",
                 "帧率显示", "FPS 顯示");
