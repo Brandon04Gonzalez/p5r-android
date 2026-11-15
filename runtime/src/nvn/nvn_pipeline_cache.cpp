@@ -142,35 +142,41 @@ static uint64_t rec_hash(const WarmRec& r) { return hash_bytes(reinterpret_cast<
 
 bool warm_load(std::vector<WarmRec>& out) {
     if (!pipeline_cache()) return false;
-    std::lock_guard lk(g_warm_lock);
-    auto load_from = [&](const std::string& path, bool mark_new) -> bool {
-        FILE* f = plat::fopen_utf8(path, "rb");
-        if (!f) return false;
-        uint32_t head[2] = {};
-        bool ok = std::fread(head, 4, 2, f) == 2 && head[0] == kKeysMagic && head[1] == sizeof(WarmRec);
-        WarmRec r;
-        while (ok && std::fread(&r, sizeof r, 1, f) == 1) {
-            if (g_known.insert(rec_hash(r)).second) {
-                out.push_back(r);
-                if (mark_new && g_new_recs.size() < 16384) g_new_recs.push_back(r);
+    bool ok = false;
+    bool need_save = false;
+    {
+        std::lock_guard lk(g_warm_lock);
+        auto load_from = [&](const std::string& path, bool mark_new) -> bool {
+            FILE* f = plat::fopen_utf8(path, "rb");
+            if (!f) return false;
+            uint32_t head[2] = {};
+            bool file_ok = std::fread(head, 4, 2, f) == 2 && head[0] == kKeysMagic && head[1] == sizeof(WarmRec);
+            WarmRec r;
+            while (file_ok && std::fread(&r, sizeof r, 1, f) == 1) {
+                if (g_known.insert(rec_hash(r)).second) {
+                    out.push_back(r);
+                    if (mark_new && g_new_recs.size() < 16384) g_new_recs.push_back(r);
+                }
+            }
+            std::fclose(f);
+            return file_ok;
+        };
+        ok = load_from(keys_path(), false);
+        if (const char* legacy = plat::get_pipeline_cache_path(); legacy && *legacy) {
+            std::string leg = legacy;
+            std::string leg_keys = (leg.size() > 4 ? leg.substr(0, leg.size() - 4) : leg) + ".keys";
+            if (leg_keys != keys_path()) {
+                size_t before = out.size();
+                if (load_from(leg_keys, true) && out.size() > before) {
+                    log("nvn/vk: imported %zu pipeline keys from %s", out.size() - before, leg_keys.c_str());
+                    ok = true;
+                }
             }
         }
-        std::fclose(f);
-        return ok;
-    };
-    bool ok = load_from(keys_path(), false);
-    if (const char* legacy = plat::get_pipeline_cache_path(); legacy && *legacy) {
-        std::string leg = legacy;
-        std::string leg_keys = (leg.size() > 4 ? leg.substr(0, leg.size() - 4) : leg) + ".keys";
-        if (leg_keys != keys_path()) {
-            size_t before = out.size();
-            if (load_from(leg_keys, true) && out.size() > before) {
-                log("nvn/vk: imported %zu pipeline keys from %s", out.size() - before, leg_keys.c_str());
-                ok = true;
-            }
-        }
+        need_save = !g_new_recs.empty();
     }
-    if (!g_new_recs.empty()) warm_save();
+    // Release g_warm_lock before calling warm_save(), which locks g_warm_lock itself.
+    if (need_save) warm_save();
     return ok;
 }
 
