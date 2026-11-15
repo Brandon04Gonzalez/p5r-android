@@ -31,7 +31,7 @@ VkImageView view(VkDevice device, VkImage image, VkFormat format) {
 
 }  // namespace
 
-bool PresentPass::init(VkDevice device, VkFormat format, const std::vector<VkImage>& game_images, bool scaled) {
+bool PresentPass::init(VkDevice device, VkFormat format, const std::vector<VkImage>& game_images, bool scaled, VkPipelineCache cache) {
     device_ = device;
     format_ = format;
     src_images_ = game_images;
@@ -126,7 +126,7 @@ bool PresentPass::init(VkDevice device, VkFormat format, const std::vector<VkIma
     gp.pDynamicState = &ds;
     gp.layout = layout_;
     gp.renderPass = render_pass_;
-    VkResult r = p_vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, 1, &gp, nullptr, &pipeline_);
+    VkResult r = p_vkCreateGraphicsPipelines(device, cache, 1, &gp, nullptr, &pipeline_);
     p_vkDestroyShaderModule(device, vs, nullptr);
     p_vkDestroyShaderModule(device, fs, nullptr);
     if (r != VK_SUCCESS) {

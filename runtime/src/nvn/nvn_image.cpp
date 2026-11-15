@@ -104,6 +104,26 @@ int32_t hud_quarters() {
     return q;
 }
 
+bool low_3d_on() {
+    static const bool on = [] {
+        const char* e = std::getenv("NX_LOW_3D");
+        return e && e[0] == '1';
+    }();
+    return on;
+}
+
+bool low_3d_texture(const Texture& t) {
+    if (!low_3d_on() || t.stride) return false;
+    // P5R 3D scene render targets (960x540) and post-process chain targets (480x270, 240x135) in handheld mode
+    if (t.target == 1 && t.levels <= 1 && t.samples <= 1) {
+        if ((t.width == 960 && t.height == 540) ||
+            (t.width == 480 && t.height == 270) ||
+            (t.width == 240 && t.height == 135))
+            return true;
+    }
+    return false;
+}
+
 GpuImage* image_of(uint64_t guest) {
     Texture* t = get<Texture>(guest);
     if (!t) return nullptr;
@@ -153,6 +173,25 @@ GpuImage* image_of(uint64_t guest) {
     img->height = (t->target == 0 || t->target == 3) && !one_d ? 1u : std::max(1u, t->height);
     img->levels = std::max(1u, t->levels);
     if (hud_1080_texture(*t)) img->hud = true, img->width = uint32_t(hud_up(1280)), img->height = uint32_t(hud_up(720));
+    if (low_3d_texture(*t)) {
+        img->low_3d = true;
+        img->width = std::max(1u, (t->width * 3) / 4);   // 960->720, 480->360, 240->180
+        img->height = std::max(1u, (t->height * 3) / 4); // 540->405, 270->202, 135->101
+    }
+    static const bool low_shadows = [] {
+        const char* e = std::getenv("NX_MALI_LOW_SHADOWS");
+        if (e) return e[0] != '0';
+#if defined(__ANDROID__)
+        return is_mali();
+#else
+        return false;
+#endif
+    }();
+    if (low_shadows && aspect == 1 && t->width == t->height && t->width >= 1024 && (t->target == 1 || t->target == 4)) {
+        img->shadow = true;
+        img->width = std::max(1u, t->width / 2);
+        img->height = std::max(1u, t->height / 2);
+    }
     uint32_t depth = std::max(1u, t->target == 3 && !one_d && t->depth <= 1 ? t->height : t->depth);  // GL-style layers
     bool is3d = t->target == 2, cube = t->target == 8 || t->target == 9;
     bool array = t->target == 3 || t->target == 4 || t->target == 6 || t->target == 9;
@@ -184,7 +223,16 @@ GpuImage* image_of(uint64_t guest) {
     VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     // 3D textures are rendered one slice at a time (a colour-grading LUT): 2D views of a slice need this flag
     // (Metal otherwise refuses a 2D view of a 3D texture).
-    ci.flags = cube ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT : is3d ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT : 0;
+    // A square 2D array of 6n layers is often a cube the shader samples as samplerCube (reflection probes): made
+    // cube-compatible so that view is not replaced by the dummy (black reflections). Not on Metal, which aborts on it.
+#if defined(__ANDROID__)
+    if (!cube && !is3d && array && img->view_type == VK_IMAGE_VIEW_TYPE_2D_ARRAY && img->width == img->height &&
+        img->layers >= 6 && img->layers % 6 == 0 && !std::getenv("NX_NO_CUBE_COMPAT"))
+        img->cube_compat = true;
+#endif
+    ci.flags = cube || img->cube_compat ? VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT
+               : is3d                   ? VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT
+                                        : 0;
     // Colour images may be viewed in another format of the same size (an sRGB view of RGBA8, docs/nvn/DEBUG.md #29).
     // With ubwc_flags (Android): only where a view can differ, and with the list of those formats, as Adreno keeps
     // its framebuffer compression (UBWC) on an image whose views are listed; MUTABLE_FORMAT alone turns it off

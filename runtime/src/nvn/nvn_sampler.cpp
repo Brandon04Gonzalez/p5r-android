@@ -4,6 +4,14 @@
 #include <cstring>
 #include <unordered_map>
 
+#if defined(__aarch64__)
+#include <arm_acle.h>
+#if defined(__linux__) || defined(__ANDROID__)
+#include <sys/auxv.h>
+#endif
+#define USE_ARM_CRC32 1
+#endif
+
 #include "nvn_pipeline.h"
 
 namespace nx::nvn {
@@ -33,12 +41,23 @@ VkSampler sampler_for(const SamplerInfo& s, bool shadow, bool biased) {
     // of before held, compared the same way), hashed; no allocation on a hit.
     using Key = ByteKey<sizeof(SamplerInfo) + 2>;
     static std::unordered_map<Key, VkSampler, ByteKeyHash> cache;
+    static thread_local Key s_last_key{};
+    static thread_local VkSampler s_last_sampler = VK_NULL_HANDLE;
+
     Key key;
     std::memcpy(key.b, &s, sizeof s);
     key.b[sizeof s] = shadow ? '1' : '0';
     key.b[sizeof s + 1] = biased ? '1' : '0';
-    auto& v = cache[key];
-    if (v) return v;
+
+    if (s_last_sampler && std::memcmp(s_last_key.b, key.b, sizeof(key.b)) == 0)
+        return s_last_sampler;
+
+    auto it = cache.find(key);
+    if (it != cache.end()) {
+        s_last_key = key;
+        s_last_sampler = it->second;
+        return it->second;
+    }
     VkSamplerCreateInfo ci{VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     // NVN min filter: 0 nearest, 1 linear, 2 nearest mip nearest, 3 linear mip nearest, 4 nearest mip linear,
     // 5 linear mip linear; mag: 0 nearest, 1 linear.
@@ -62,10 +81,15 @@ VkSampler sampler_for(const SamplerInfo& s, bool shadow, bool biased) {
     ci.minLod = m <= 1 ? 0.0f : std::max(0.0f, s.lod_min);
     ci.maxLod = m <= 1 ? 0.25f : std::max(ci.minLod, s.lod_max);  // no mipmapping: level 0 only
     // NX_MAX_ANISO=<n>: anisotropic filtering at most n taps (1: off). P5R asks 16 for its ground and walls, which a
-    // small GPU pays in every pixel of the 3D passes.
+    // small GPU pays in every pixel of the 3D passes. Clamped to 2 on Android/ARM to prevent Mali memory bus saturation.
     static const float aniso_cap = [] {
         const char* e = std::getenv("NX_MAX_ANISO");
-        return std::clamp(e ? float(std::atof(e)) : 16.0f, 1.0f, 16.0f);
+#if defined(__ANDROID__)
+        float def = is_mali() ? 1.0f : 2.0f;
+#else
+        float def = 16.0f;
+#endif
+        return std::clamp(e ? float(std::atof(e)) : def, 1.0f, 16.0f);
     }();
     ci.maxAnisotropy = std::min(s.max_anisotropy, aniso_cap);
     ci.anisotropyEnable = ci.maxAnisotropy > 1.0f;
@@ -75,14 +99,51 @@ VkSampler sampler_for(const SamplerInfo& s, bool shadow, bool biased) {
     ci.borderColor = white ? VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE
                      : s.border[3] > 0.5f ? VK_BORDER_COLOR_FLOAT_OPAQUE_BLACK
                                           : VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK;
-    p_vkCreateSampler(vk_device(), &ci, nullptr, &v);
-    return v;
+    VkSampler sm = VK_NULL_HANDLE;
+    p_vkCreateSampler(vk_device(), &ci, nullptr, &sm);
+    cache[key] = sm;
+    s_last_key = key;
+    s_last_sampler = sm;
+    return sm;
 }
 
 // ---- pitch-linear texture contents (moved from nvn_pipeline.cpp) ------------------------------------------------
 
-// Four independent lanes: one multiply chain ran at ~1 byte per cycle (Wonder's 16 MB glyph cache: ~5 ms).
+// Fast memory hashing for buffer verification. On AArch64 with CRC32 extension,
+// hardware __crc32cd operates at 1 cycle per 8 bytes across 4 unrolled streams.
+#if defined(USE_ARM_CRC32)
+__attribute__((target("crc")))
+static uint64_t hash_memory_crc32(const uint8_t* p, uint64_t size) {
+    uint32_t c0 = 0xFFFFFFFF, c1 = 0xFFFFFFFF, c2 = 0xFFFFFFFF, c3 = 0xFFFFFFFF;
+    const uint64_t n = size / 32;
+    const uint64_t* w = reinterpret_cast<const uint64_t*>(p);
+    for (uint64_t k = 0; k < n; k++) {
+        c0 = __crc32cd(c0, w[4 * k + 0]);
+        c1 = __crc32cd(c1, w[4 * k + 1]);
+        c2 = __crc32cd(c2, w[4 * k + 2]);
+        c3 = __crc32cd(c3, w[4 * k + 3]);
+    }
+    for (uint64_t k = n * 4; k < size / 8; k++) {
+        c0 = __crc32cd(c0, w[k]);
+    }
+    for (uint64_t k = (size & ~7ull); k < size; k++) {
+        c0 = __crc32cb(c0, p[k]);
+    }
+    const uint32_t lo = c0 ^ c1;
+    const uint32_t hi = c2 ^ c3;
+    return (uint64_t(hi) << 32) | lo;
+}
+#endif
+
 uint64_t hash_memory(const uint8_t* p, uint64_t size) {
+#if defined(USE_ARM_CRC32)
+#if defined(__linux__) || defined(__ANDROID__)
+    static const bool s_has_crc32 = (getauxval(AT_HWCAP) & (1UL << 7)) != 0;
+    if (__builtin_expect(s_has_crc32, 1)) return hash_memory_crc32(p, size);
+#else
+    return hash_memory_crc32(p, size);
+#endif
+#endif
     uint64_t h[4] = {0x9E3779B97F4A7C15ull, 1, 2, 3}, n = size / 32;
     const uint64_t* w = reinterpret_cast<const uint64_t*>(p);
     for (uint64_t k = 0; k < n; k++)

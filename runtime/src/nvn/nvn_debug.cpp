@@ -360,11 +360,6 @@ double g_period_ns = 1.0;
 
 }  // namespace
 
-bool gpu_profile_on() {
-    static const bool on = std::getenv("NX_GPU_PROFILE") && std::atoi(std::getenv("NX_GPU_PROFILE")) == 1;
-    return on;
-}
-
 void gpu_profile_begin(VkCommandBuffer cb) {
     if (!gpu_profile_on()) return;
     if (!g_queries) {
@@ -578,11 +573,6 @@ struct ZeroStat {
 std::map<std::string, ZeroStat> g_zero_stats;
 
 }  // namespace
-
-bool zero_draws_on() {
-    static const bool on = std::getenv("NX_ZERO_DRAWS") != nullptr;
-    return on;
-}
 
 void zero_draws_begin_submit(VkCommandBuffer cb) {
     if (!zero_draws_on()) return;

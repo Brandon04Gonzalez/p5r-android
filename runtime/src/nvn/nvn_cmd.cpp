@@ -14,6 +14,7 @@
 #include <cstdlib>
 #include <deque>
 #include <map>
+#include <unordered_map>
 
 #include "nvn.h"
 #include "nvn_shaders.h"
@@ -24,9 +25,57 @@ std::shared_ptr<CmdList> peek_list(uint64_t handle);
 
 namespace {
 
+std::mutex g_cmdlist_pool_lock;
+std::vector<std::shared_ptr<CmdList>> g_cmdlist_pool;
+
+void reset_cmdlist(CmdList& l) {
+    l.cmds.clear();
+    l.blob_bytes.clear();
+    l.blobs.clear();
+    l.handle = 0;
+    l.epoch = 0;
+    l.skinned = 0;
+    l.scanned_size = SIZE_MAX;
+    l.own_dispatches = 0;
+    l.calls.clear();
+}
+
+std::shared_ptr<CmdList> alloc_cmdlist() {
+    std::lock_guard lk(g_cmdlist_pool_lock);
+    for (size_t i = g_cmdlist_pool.size(); i > 0; i--) {
+        if (g_cmdlist_pool[i - 1].use_count() == 1) {
+            std::shared_ptr<CmdList> l = std::move(g_cmdlist_pool[i - 1]);
+            g_cmdlist_pool[i - 1] = std::move(g_cmdlist_pool.back());
+            g_cmdlist_pool.pop_back();
+            reset_cmdlist(*l);
+            return l;
+        }
+    }
+    return std::make_shared<CmdList>();
+}
+
+void recycle_cmdlist(std::shared_ptr<CmdList> l) {
+    if (!l) return;
+    if (l.use_count() == 1) reset_cmdlist(*l);
+    std::lock_guard lk(g_cmdlist_pool_lock);
+    if (g_cmdlist_pool.size() < 64) {
+        g_cmdlist_pool.push_back(std::move(l));
+        return;
+    }
+    // Replace a pooled list with smaller capacity if the pool is full.
+    size_t min_idx = SIZE_MAX, min_cap = l->cmds.capacity();
+    for (size_t i = 0; i < g_cmdlist_pool.size(); i++) {
+        if (g_cmdlist_pool[i].use_count() == 1 && g_cmdlist_pool[i]->cmds.capacity() < min_cap) {
+            min_cap = g_cmdlist_pool[i]->cmds.capacity();
+            min_idx = i;
+        }
+    }
+    if (min_idx != SIZE_MAX) g_cmdlist_pool[min_idx] = std::move(l);
+}
+
 struct CommandBuffer : Object {
     std::mutex lock;
-    std::shared_ptr<CmdList> recording = std::make_shared<CmdList>();
+    std::shared_ptr<CmdList> recording = alloc_cmdlist();
     // The memory the game hands over (AddCommandMemory / AddControlMemory) and what recording "uses" of it. Engines
     // look at the used amounts right after EndRecording (a list that used nothing is dropped, never submitted) and
     // at the free ones (to add memory in time), so usage grows with the commands recorded, survives EndRecording
@@ -36,6 +85,9 @@ struct CommandBuffer : Object {
     uint64_t command_base = 0, control_base = 0;  // usage before this recording
     uint64_t command_memory = 0;                  // the memory added last: its GPU address (see AddCommandMemory)
     uint64_t command_pool = 0;                    // its NVNmemoryPool*
+    uint32_t last_stencil_ref = ~0u;
+    uint32_t last_stencil_mask = ~0u;
+    uint32_t last_stencil_value_mask = ~0u;
 };
 
 constexpr uint64_t kCommandBytes = 16, kControlBytes = 4;  // per recorded command
@@ -74,7 +126,7 @@ uint64_t command_memory_address(uint64_t pool, uint64_t offset) {
 }
 std::map<uint64_t, std::pair<uint64_t, uint64_t>> g_regions;  // start -> (end, handle)
 std::mutex g_handles_lock;
-std::map<uint64_t, HandleEntry> g_handles;
+std::unordered_map<uint64_t, HandleEntry> g_handles;
 std::deque<std::pair<uint64_t, uint64_t>> g_handle_order;  // (handle, queued at), oldest first
 constexpr size_t kKeepHandles = 1 << 18;
 uint64_t g_handle_clock = 0;
@@ -111,7 +163,7 @@ struct Dropped {
 };
 constexpr size_t kDropRing = 1 << 19;
 std::vector<Dropped> g_dropped;
-std::map<uint64_t, Dropped> g_aged_lists;  // the safety net's drops, by handle
+std::unordered_map<uint64_t, Dropped> g_aged_lists;  // the safety net's drops, by handle
 uint64_t g_aged = 0, g_aged_called = 0, g_overlap_drops = 0, g_pool_drops = 0;
 bool drops_on() {
     static const bool on = std::getenv("NX_CMD_DROPS") != nullptr;
@@ -144,7 +196,14 @@ void CommandBufferFinalize(CPU& c) { destroy(c.x[0]); }
 void CommandBufferBeginRecording(CPU& c) {
     if (auto* cb = get<CommandBuffer>(c.x[0])) {
         std::lock_guard lk(cb->lock);
-        cb->recording = std::make_shared<CmdList>();
+        if (cb->recording && cb->recording.use_count() == 1) {
+            reset_cmdlist(*cb->recording);
+        } else {
+            cb->recording = alloc_cmdlist();
+        }
+        cb->last_stencil_ref = ~0u;
+        cb->last_stencil_mask = ~0u;
+        cb->last_stencil_value_mask = ~0u;
     }
 }
 
@@ -193,7 +252,7 @@ bool skinned_program(uint64_t program) {
 }
 
 void CommandBufferEndRecording(CPU& c) {  // NVNcommandHandle
-    std::shared_ptr<CmdList> list = std::make_shared<CmdList>();
+    std::shared_ptr<CmdList> list = alloc_cmdlist();
     uint64_t start = 0, end = 0, pool = 0;
     const uint64_t cb_guest = c.x[0];
     if (auto* cb = get<CommandBuffer>(c.x[0])) {
@@ -241,6 +300,7 @@ void CommandBufferEndRecording(CPU& c) {  // NVNcommandHandle
         log("nvn list: end %llx -> handle %llu: %zu cmds, %zu draws, %zu calls, lr %s", (unsigned long long)c.x[0],
             (unsigned long long)h, list->cmds.size(), draws, calls, describe(c.x[30]).c_str());
     }
+    std::vector<std::shared_ptr<CmdList>> recycled;
     {
         std::lock_guard lk(g_handles_lock);
         uint64_t now = ++g_handle_clock;
@@ -255,6 +315,7 @@ void CommandBufferEndRecording(CPU& c) {  // NVNcommandHandle
                             (unsigned long long)old->first, (unsigned long long)old->second.pool, (unsigned long long)h,
                             (unsigned long long)pool);
                     note_drop(old->first, old->second, h, start, end, pool, cb_guest);
+                    recycled.push_back(std::move(old->second.list));
                     g_handles.erase(old);
                 }
                 r = g_regions.erase(r);
@@ -289,6 +350,7 @@ void CommandBufferEndRecording(CPU& c) {  // NVNcommandHandle
                 auto reg = g_regions.find(it->second.start);
                 if (reg != g_regions.end() && reg->second.second == old) g_regions.erase(reg);
                 note_drop(old, it->second, 0, 0, 0, 0, 0);
+                recycled.push_back(std::move(it->second.list));
                 g_handles.erase(it);
             }
         }
@@ -298,6 +360,7 @@ void CommandBufferEndRecording(CPU& c) {  // NVNcommandHandle
                 g_handles.size(), g_handle_order.size(), (unsigned long long)g_overlap_drops,
                 (unsigned long long)g_pool_drops, (unsigned long long)g_aged, (unsigned long long)g_aged_called);
     }
+    for (auto& l : recycled) recycle_cmdlist(std::move(l));
     c.x[0] = h;
 }
 
@@ -372,10 +435,26 @@ void record(uint64_t guest, Cmd cmd, const void* blob, size_t size) {
         return;
     }
     std::lock_guard lk(cb->lock);
+    if (cmd.op == Cmd::SetStencilRef) {
+        if (cb->last_stencil_ref == cmd.n) return;
+        cb->last_stencil_ref = cmd.n;
+    } else if (cmd.op == Cmd::SetStencilMask) {
+        if (cb->last_stencil_mask == cmd.n) return;
+        cb->last_stencil_mask = cmd.n;
+    } else if (cmd.op == Cmd::SetStencilValueMask) {
+        if (cb->last_stencil_value_mask == cmd.n) return;
+        cb->last_stencil_value_mask = cmd.n;
+    } else if (cmd.op == Cmd::CallList) {
+        cb->last_stencil_ref = ~0u;
+        cb->last_stencil_mask = ~0u;
+        cb->last_stencil_value_mask = ~0u;
+    }
     if (blob) {
         cmd.blob = uint32_t(cb->recording->blobs.size());
+        uint32_t off = uint32_t(cb->recording->blob_bytes.size());
+        cb->recording->blobs.push_back({off, uint32_t(size)});
         auto* p = static_cast<const uint8_t*>(blob);
-        cb->recording->blobs.emplace_back(p, p + size);
+        cb->recording->blob_bytes.insert(cb->recording->blob_bytes.end(), p, p + size);
     }
     cb->recording->cmds.push_back(cmd);
 }
@@ -452,15 +531,20 @@ void command_memory_released(uint64_t gpu, uint64_t size) {
         return e && e[0] == '0';
     }();
     if (off || !gpu) return;
-    std::lock_guard lk(g_handles_lock);
+    std::vector<std::shared_ptr<CmdList>> recycled;
     size_t n = 0;
-    for (auto r = g_regions.lower_bound(gpu); r != g_regions.end() && r->first < gpu + size;) {
-        if (auto it = g_handles.find(r->second.second); it != g_handles.end()) {
-            note_drop(it->first, it->second, ~0ull, gpu, gpu + size, 0, 0);
-            g_handles.erase(it), n++;
+    {
+        std::lock_guard lk(g_handles_lock);
+        for (auto r = g_regions.lower_bound(gpu); r != g_regions.end() && r->first < gpu + size;) {
+            if (auto it = g_handles.find(r->second.second); it != g_handles.end()) {
+                note_drop(it->first, it->second, ~0ull, gpu, gpu + size, 0, 0);
+                recycled.push_back(std::move(it->second.list));
+                g_handles.erase(it), n++;
+            }
+            r = g_regions.erase(r);
         }
-        r = g_regions.erase(r);
     }
+    for (auto& l : recycled) recycle_cmdlist(std::move(l));
     static int logged = 0;
     if (n && logged++ < 20)
         log("nvn: memory pool at gpu %llx (%llu KB) finalized: %zu command lists in it dropped", (unsigned long long)gpu,

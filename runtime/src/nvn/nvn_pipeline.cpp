@@ -192,7 +192,7 @@ bool identity(const VkComponentMapping& m) {
 // height 1, since the translator samples them as 2D, G8). A shader declaring another shape than the texture it gets
 // (a samplerCube given a 2D texture) reads the dummy instead: Metal aborts on the view.
 bool view_compatible(const GpuImage& img, VkImageViewType type, uint32_t layers) {
-    bool cube_img = img.view_type == VK_IMAGE_VIEW_TYPE_CUBE || img.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
+    bool cube_img = img.cube_compat || img.view_type == VK_IMAGE_VIEW_TYPE_CUBE || img.view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
     bool img3d = img.view_type == VK_IMAGE_VIEW_TYPE_3D;
     bool img1d = img.view_type == VK_IMAGE_VIEW_TYPE_1D || img.view_type == VK_IMAGE_VIEW_TYPE_1D_ARRAY;
     switch (type) {
@@ -271,10 +271,29 @@ bool descriptor_layout_counts(VkDescriptorSetLayout layout, uint32_t (&out)[16])
 
 const ProgramLayout& program_layout(const std::vector<const ShaderInfo*>& stages) {
     static std::map<std::vector<const ShaderInfo*>, ProgramLayout> cache;
-    static const std::pair<const std::vector<const ShaderInfo*>, ProgramLayout>* last = nullptr;  // entries stay
-    if (last && last->first == stages) return last->second;  // runs of draws use one program
+    struct LayoutMru {
+        const ShaderInfo* s0 = nullptr;
+        const ShaderInfo* s1 = nullptr;
+        size_t count = 0;
+        const ProgramLayout* pl = nullptr;
+    };
+    static thread_local LayoutMru mru[4]{};
+    static thread_local size_t mru_next = 0;
+    const size_t n = stages.size();
+    if (n == 1 || n == 2) {
+        const ShaderInfo* a0 = stages[0];
+        const ShaderInfo* a1 = n == 2 ? stages[1] : nullptr;
+        for (const LayoutMru& e : mru)
+            if (e.pl && e.count == n && e.s0 == a0 && e.s1 == a1) return *e.pl;
+    }
     auto it = cache.find(stages);
-    if (it != cache.end()) return (last = &*it)->second;
+    if (it != cache.end()) {
+        if (n == 1 || n == 2) {
+            mru[mru_next] = {stages[0], n == 2 ? stages[1] : nullptr, n, &it->second};
+            mru_next = (mru_next + 1) & 3;
+        }
+        return it->second;
+    }
     std::map<uint32_t, VkDescriptorSetLayoutBinding> sets[4];
     for (const ShaderInfo* s : stages)
         for (const DescriptorBinding& b : s->refl.bindings) {
@@ -308,6 +327,27 @@ const ProgramLayout& program_layout(const std::vector<const ShaderInfo*>& stages
         for (auto& [n, b] : sets[0])
             if (n < 64 && dynamic >> n & 1) b.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         pl.dynamic = dynamic;
+    }
+    static const uint32_t max_dynamic_ssbo = [] {
+        const char* e = std::getenv("NX_DYNAMIC_SSBO");
+#if defined(__ANDROID__)
+        if (e && e[0] == '0') return 0u;
+#else
+        if (!e || e[0] != '1') return 0u;
+#endif
+        VkPhysicalDeviceProperties p{};
+        p_vkGetPhysicalDeviceProperties(vk_physical(), &p);
+        log("nvn/vk: storage buffers bound with dynamic offsets (up to %u per layout)",
+            p.limits.maxDescriptorSetStorageBuffersDynamic);
+        return p.limits.maxDescriptorSetStorageBuffersDynamic;
+    }();
+    uint64_t dynamic_ssbo = 0;
+    for (auto& [n, b] : sets[1])
+        if (b.descriptorType == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER && b.descriptorCount == 1 && n < 64) dynamic_ssbo |= 1ull << n;
+    if (dynamic_ssbo && uint32_t(__builtin_popcountll(dynamic_ssbo)) <= max_dynamic_ssbo) {
+        for (auto& [n, b] : sets[1])
+            if (n < 64 && dynamic_ssbo >> n & 1) b.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
+        pl.dynamic_ssbo = dynamic_ssbo;
     }
     static const bool trace = std::getenv("NX_TRACE_PIPELINES") != nullptr;
     for (int k = 0; k < 4; k++) {
@@ -428,11 +468,13 @@ Pool& pool() {
         auto* pl = new Pool;
         const char* e = std::getenv("NX_PIPE_THREADS");
         unsigned hw = std::thread::hardware_concurrency();
-        unsigned n = e ? unsigned(std::atoi(e)) : std::min(2u, hw > 1 ? hw - 1 : 1u);
+        unsigned n = e ? unsigned(std::atoi(e)) : std::min(4u, hw > 2 ? hw - 2 : 1u);
         pl->threads = std::min(n, 8u);
         for (unsigned i = 0; i < pl->threads; i++)
             std::thread([pl] {
                 t_worker = true;
+                plat::set_thread_name("pipe-worker");
+                plat::pin_current_thread_to_little_cores("pipe-worker");
                 for (;;) {
                     std::shared_ptr<PipeTask> t;
                     {
@@ -648,19 +690,52 @@ void pipeline_warm_step() {
     static std::vector<WarmRec> recs;
     static std::vector<bool> done;
     static size_t remaining = 0;
+    static uint64_t last_shader_epoch = 0;
+    static size_t scan_budget = 0;
     if (!loaded) {
         loaded = true;
         warm_load(recs);
         done.assign(recs.size(), false);
         remaining = recs.size();
-        if (remaining) log("nvn/vk: prewarm: %zu pipelines from earlier sessions", remaining);
+        if (remaining) {
+            log("nvn/vk: prewarm: %zu pipelines from earlier sessions", remaining);
+            std::vector<std::string> hashes;
+            std::set<std::string> seen;
+            for (const WarmRec& r : recs) {
+                if (r.vs[0] && seen.insert(r.vs).second) hashes.emplace_back(r.vs);
+                if (r.fs[0] && seen.insert(r.fs).second) hashes.emplace_back(r.fs);
+            }
+            if (!hashes.empty()) {
+                std::thread([hashes = std::move(hashes)] {
+                    plat::set_thread_name("shader-prewarm");
+                    plat::pin_current_thread_to_little_cores("shader-prewarm");
+                    size_t loaded_cnt = 0;
+                    for (const std::string& h : hashes) {
+                        if (shader_for_prewarm(h)) loaded_cnt++;
+                    }
+                    log("nvn/vk: prewarm: background preloaded %zu of %zu unique shaders from disk",
+                        loaded_cnt, hashes.size());
+                }).detach();
+            }
+        }
     }
     if (!remaining) return;
+    static const bool canon_off = std::getenv("NX_PIPE_CANON") && std::getenv("NX_PIPE_CANON")[0] == '0';
+    const uint64_t epoch = shader_epoch();
+    if (epoch != last_shader_epoch) {
+        last_shader_epoch = epoch;
+        scan_budget = recs.size();
+    }
+    const bool fast_scan = scan_budget > 0;
+    const size_t limit = fast_scan ? std::min<size_t>(scan_budget, 256) : std::min<size_t>(recs.size(), 64);
+    const size_t max_inflight = fast_scan ? 64 : 32;
+    const uint64_t kBudgetNs = fast_scan ? 2'500'000 : 1'000'000;
     const uint64_t t0 = plat::monotonic_ns();
-    constexpr uint64_t kBudgetNs = 1000000;  // replay-thread time per submit spent preparing builds
-    for (size_t scanned = 0; scanned < std::min<size_t>(recs.size(), 64) && g_prewarm_inflight < 32; scanned++) {  // 64 lookups per submit: the shaders of other courses never load
-        if (plat::monotonic_ns() - t0 > kBudgetNs) break;
-        size_t i = cursor++ % recs.size();
+    for (size_t scanned = 0; scanned < limit && g_prewarm_inflight < max_inflight && remaining > 0; scanned++) {
+        if ((!done[cursor] || (scanned & 63) == 63) && plat::monotonic_ns() - t0 > kBudgetNs) break;
+        size_t i = cursor;
+        if (++cursor >= recs.size()) cursor = 0;
+        if (fast_scan && scan_budget) scan_budget--;
         if (done[i]) continue;
         WarmRec& r = recs[i];
         const ShaderInfo* vs = shader_by_hash(r.vs);
@@ -669,6 +744,7 @@ void pipeline_warm_step() {
         done[i] = true, remaining--;
         PipelineKey key = r.key;
         key.vs = vs, key.fs = fs;
+        if (!canon_off) key = canonical_key(key);
         PKey ck = bytes_of(key);
         if (g_canon.count(ck) || g_inflight.count(ck)) continue;
         std::vector<const ShaderInfo*> stages{vs};
@@ -738,6 +814,12 @@ PipelineKey canonical_key(const PipelineKey& in) {
             // to back so both faces evaluate the identical stencil test and operations.
             if (in.polygon.cull == 0 || (k.depth.stencil_func[1] == 0 && k.depth.depth_pass[1] == 0) ||
                 (k.depth.depth_pass[1] <= 1 && k.depth.depth_pass[0] > 1)) {
+                static int s_mirror_count = 0;
+                if (s_mirror_count++ < 30) {
+                    log("nvn/vk: stencil front->back unified for pipeline vs %s fs %s (func=%u pass=%u cull=%u)",
+                        in.vs ? in.vs->hash.c_str() : "-", in.fs ? in.fs->hash.c_str() : "-",
+                        unsigned(k.depth.stencil_func[0]), unsigned(k.depth.depth_pass[0]), unsigned(in.polygon.cull));
+                }
                 k.depth.stencil_func[1] = k.depth.stencil_func[0];
                 k.depth.stencil_fail[1] = k.depth.stencil_fail[0];
                 k.depth.depth_fail[1]   = k.depth.depth_fail[0];
@@ -1073,7 +1155,15 @@ VkImageView attachment_view(GpuImage& img, uint32_t level, uint32_t layer, VkFor
         ci.viewType = VK_IMAGE_VIEW_TYPE_2D;
         ci.format = format;
         ci.subresourceRange = {img.aspect, level, 1, layer, 1};
-        if (p_vkCreateImageView(vk_device(), &ci, nullptr, &v) != VK_SUCCESS) v = img.view;
+        VkResult res = p_vkCreateImageView(vk_device(), &ci, nullptr, &v);
+        if (res != VK_SUCCESS) {
+            log("nvn/vk: attachment_view failed to create view for image %p, format %d, aspect %#x: %d",
+                img.image, int(format), unsigned(img.aspect), int(res));
+            v = img.view;
+        } else if (img.aspect & VK_IMAGE_ASPECT_STENCIL_BIT) {
+            log("nvn/vk: created depth-stencil attachment view for image %p format %d aspect %#x",
+                img.image, int(format), unsigned(img.aspect));
+        }
     }
     return v;
 }
@@ -1129,11 +1219,17 @@ static bool tex_audit(const Texture& t, GpuImage& img, bool uploading) {
 
 GpuImage* ensure_contents(VkCommandBuffer cb, uint64_t texture) {
     Texture* t = get<Texture>(texture);
-    GpuImage* img = t ? image_of(texture) : nullptr;
+    if (!t) return nullptr;
+    GpuImage* img = t->image ? t->image.get() : image_of(texture);
     if (!img) return nullptr;
-    bool dirty = t->dirty.exchange(false);
-    uint64_t dirty_lo = t->dirty_lo.exchange(UINT64_MAX), dirty_hi = t->dirty_hi.exchange(0);
-    if (dirty_hi <= dirty_lo) dirty_lo = 0, dirty_hi = UINT64_MAX;  // marked without a range: all of it
+    bool dirty = false;
+    uint64_t dirty_lo = 0, dirty_hi = UINT64_MAX;
+    if (__builtin_expect(t->dirty.load(std::memory_order_relaxed), 0)) {
+        dirty = t->dirty.exchange(false);
+        dirty_lo = t->dirty_lo.exchange(UINT64_MAX);
+        dirty_hi = t->dirty_hi.exchange(0);
+        if (dirty_hi <= dirty_lo) dirty_lo = 0, dirty_hi = UINT64_MAX;  // marked without a range: all of it
+    }
     static const bool reupload = std::getenv("NX_TEXELS_REUPLOAD") != nullptr;  // bisecting: the old way
     bool upload = !img->rendered && (!img->uploaded || (dirty && (!img->texels || reupload)));
     if (img->hud) upload = false;  // NX_HUD_1080: larger than its guest memory; the GPU fills it
@@ -1279,7 +1375,11 @@ VkImageView storage_view(VkCommandBuffer cb, uint64_t texture, const ImageShape&
     return d.view;
 }
 
+static uint64_t g_view_forget_serial = 1;
+uint64_t view_forget_serial() { return g_view_forget_serial; }
+
 void forget_image_views(const GpuImage& img) {
+    g_view_forget_serial++;
     // The caches are ordered by image first: its views are one run from the smallest key with that image (this was
     // a scan of every cached view per destroyed texture, a visible share of the replay time).
     auto drop = [&](auto& cache, auto lowest) {

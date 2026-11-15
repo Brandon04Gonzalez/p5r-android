@@ -96,7 +96,7 @@ bool init() {
     ci.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     ci.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT, ci.stage.module = module, ci.stage.pName = "main";
     ci.layout = g_layout;
-    if (p_vkCreateComputePipelines(d, VK_NULL_HANDLE, 1, &ci, nullptr, &g_pipeline) != VK_SUCCESS) return false;
+    if (p_vkCreateComputePipelines(d, pipeline_cache(), 1, &ci, nullptr, &g_pipeline) != VK_SUCCESS) return false;
     VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
     qi.queryType = VK_QUERY_TYPE_TIMESTAMP, qi.queryCount = 3 * kSlots;
     if (p_vkCreateQueryPool(d, &qi, nullptr, &g_pool) != VK_SUCCESS) return false;

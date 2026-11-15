@@ -68,6 +68,11 @@ void exit_process(int code) { ExitProcess(UINT(code)); }
 void sleep_ns(int64_t ns) { std::this_thread::sleep_for(std::chrono::nanoseconds(ns)); }
 void yield() { SwitchToThread(); }
 void set_thread_name(const char*) {}
+void pin_current_thread_to_big_cores(const char*) {}
+void pin_current_thread_to_core(int, const char*) {}
+void pin_current_thread_to_little_cores(const char*) {}
+void reset_current_thread_affinity(const char*) {}
+void set_thread_priority(int) {}
 float default_render_scale() { return 1.0f; }
 void release_window(void*) {}
 uint64_t window_generation() { return 1; }
@@ -130,6 +135,8 @@ std::string data_root() {
     const char* r = std::getenv("NX_DATA_ROOT");
     return r ? r : nx::game::kInfo.pc_data_root;
 }
+
+const char* get_pipeline_cache_path() { return nullptr; }
 
 // ---- window ---------------------------------------------------------------------------------------------------
 

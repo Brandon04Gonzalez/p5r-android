@@ -8,8 +8,8 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
-#include <map>
 #include <unordered_map>
+#include <vector>
 
 #include "nvn_draw_state.h"
 
@@ -25,21 +25,32 @@ struct Entry {
     uint64_t size = 0, padded = 0;
     Upload upload;
 };
-// By host address; several sizes of one address are rare, so the latest one is kept.
-std::map<const uint8_t*, Entry> g_copies;
+
+struct DedupSpan {
+    const uint8_t* p = nullptr;
+    uint64_t size = 0;
+    uint32_t front_idx = 0;
+};
+// Recorded spans in the current submit for linear invalidation, keeping reserved capacity across submits.
+std::vector<DedupSpan> g_copies;
 uint64_t g_saved = 0, g_copied = 0;
 
-// In front of the map (a tree walk per bound buffer of every draw, and most are hits): a slot per address hash with a
-// copy of that address's entry in g_copies. A slot of the current generation always equals the map's entry: both are
-// written together, dedup_invalidate clears the slot of each entry it erases, dedup_reset starts a new generation.
+// Open-addressed front hash table (linear probing) per address hash. Slots of the current generation hold active
+// entries or tombstones (p == nullptr) from dedup_invalidate; dedup_reset advances the generation in O(1).
 struct Front {
     const uint8_t* p = nullptr;
     uint64_t generation = 0;
     Entry entry;
 };
-Front g_front[1024];
+constexpr size_t kFrontSlots = 65536;
+constexpr uint32_t kMaxProbe = 8;
+Front g_front[kFrontSlots];
 uint64_t g_generation = 1;
-Front& front_of(const uint8_t* p) { return g_front[(uintptr_t(p) >> 4 ^ uintptr_t(p) >> 14) & 1023]; }
+static uint64_t s_dedup_inval = 1;
+inline uint32_t front_index_of(const uint8_t* p) {
+    const uintptr_t v = uintptr_t(p);
+    return uint32_t(((v >> 4) ^ (v >> 12) ^ (v >> 21) ^ (v >> 30)) & (kFrontSlots - 1));
+}
 
 // NX_UPLOAD_STATS: bytes copied per kind, and of those the bytes equal to the last copy of the same address and size.
 struct KindStats {
@@ -66,56 +77,110 @@ void count_copy(const uint8_t* p, uint64_t size) {
 
 UploadKind g_upload_kind = kUploadOther;
 
+namespace {
+static const uint8_t* s_last_dedup_p = nullptr;
+static uint64_t s_last_dedup_gen = 0;
+static Entry s_last_dedup_entry{};
+}  // namespace
+
 Upload dedup_upload(const uint8_t* p, uint64_t size, uint64_t padded, uint64_t align) {
     if (!p || !size) {
         Upload u = upload_alloc(padded, align);
         std::memset(u.ptr, 0, padded);
         return u;
     }
-    frame_guest_read(p, size);  // deferred write-backs over these bytes land first (nvn_frames.cpp)
     static const bool off = std::getenv("NX_NO_DEDUP") != nullptr;  // bisecting: a fresh copy every time
-    Front& f = front_of(p);
-    const Entry* e = nullptr;
-    if (!off && f.generation == g_generation && f.p == p) {
-        e = &f.entry;  // the map's entry for p
-    } else if (auto it = off ? g_copies.end() : g_copies.find(p); it != g_copies.end()) {
-        f = {p, g_generation, it->second};
-        e = &f.entry;
+    if (!off && p == s_last_dedup_p && g_generation == s_last_dedup_gen) {
+        if (s_last_dedup_entry.size == size && s_last_dedup_entry.padded == padded && s_last_dedup_entry.upload.offset % align == 0) {
+            g_saved += padded;
+            return s_last_dedup_entry.upload;
+        }
     }
-    if (e && e->size == size && e->padded == padded && e->upload.offset % align == 0) {
-        g_saved += padded;
-        return e->upload;
+    const uint32_t base_idx = front_index_of(p);
+    uint32_t target_idx = kFrontSlots;
+    bool existing = false;
+    uint64_t prev_size = 0;
+    if (!off) {
+        for (uint32_t step = 0; step < kMaxProbe; step++) {
+            const uint32_t idx = (base_idx + step) & (kFrontSlots - 1);
+            const Front& f = g_front[idx];
+            if (f.generation != g_generation) {
+                if (target_idx == kFrontSlots) target_idx = idx;
+                break;
+            }
+            if (f.p == nullptr) {
+                if (target_idx == kFrontSlots) target_idx = idx;
+                continue;
+            }
+            if (f.p == p) {
+                target_idx = idx;
+                existing = true;
+                prev_size = f.entry.size;
+                if (f.entry.size == size && f.entry.padded == padded && f.entry.upload.offset % align == 0) {
+                    g_saved += padded;
+                    s_last_dedup_p = p;
+                    s_last_dedup_gen = g_generation;
+                    s_last_dedup_entry = f.entry;
+                    return f.entry.upload;
+                }
+                break;
+            }
+        }
     }
+    if (target_idx == kFrontSlots) target_idx = base_idx;
+    frame_guest_read(p, size);  // deferred write-backs over these bytes land first (nvn_frames.cpp)
+    auto record_entry = [&](const Upload& u) {
+        Entry ent{size, padded, u};
+        g_front[target_idx] = {p, g_generation, ent};
+        s_last_dedup_p = p;
+        s_last_dedup_gen = g_generation;
+        s_last_dedup_entry = ent;
+        if (!existing || size > prev_size) {
+            if (g_copies.capacity() < 1024) g_copies.reserve(1024);
+            g_copies.push_back({p, size, target_idx});
+        }
+    };
     Upload u;
     if (g_upload_kind != kUploadOther && cache_upload(p, size, padded, align, u)) {  // nvn_buffer_cache.cpp
-        g_copies[p] = {size, padded, u};
-        f = {p, g_generation, {size, padded, u}};
+        record_entry(u);
         return u;
     }
     u = upload_alloc(padded, align);
-    std::memcpy(u.ptr, p, size);
+    plat::fast_memcpy(u.ptr, p, size);
     if (padded > size) std::memset(u.ptr + size, 0, padded - size);
     if (upload_stats_on()) count_copy(p, size);
-    g_copies[p] = {size, padded, u};
-    f = {p, g_generation, {size, padded, u}};
+    record_entry(u);
     g_copied += padded;
     return u;
 }
 
-void dedup_reset() { g_copies.clear(), g_generation++; }
+uint64_t dedup_generation() { return g_generation; }
+uint64_t dedup_inval_epoch() { return s_dedup_inval; }
+
+void dedup_reset() {
+    g_copies.clear(), g_generation++;
+    s_last_dedup_p = nullptr;
+}
 
 void dedup_invalidate(const uint8_t* p, uint64_t size) {
-    // Entries starting before p may still reach into it: look back over the few that can.
-    auto it = g_copies.lower_bound(p + size);
-    while (it != g_copies.begin()) {
-        --it;
-        if (it->first + it->second.size <= p) {
-            if (p - it->first > (64ll << 20)) break;  // nothing larger than 64 MB is copied
-            continue;
+    s_dedup_inval++;
+    stream_cache_invalidate(p, size);
+    index_cache_invalidate(p, size);
+    sets_invalidate_range(p, size);
+    s_last_dedup_p = nullptr;
+    if (!p || !size || g_copies.empty()) return;
+    const uint8_t* const end = p + size;
+    size_t kept = 0;
+    for (size_t i = 0; i < g_copies.size(); i++) {
+        const DedupSpan& span = g_copies[i];
+        if (span.p < end && span.p + span.size > p) {
+            Front& f = g_front[span.front_idx];
+            if (f.generation == g_generation && f.p == span.p) f.p = nullptr;
+        } else {
+            g_copies[kept++] = span;
         }
-        if (Front& f = front_of(it->first); f.p == it->first) f.generation = 0;
-        it = g_copies.erase(it);
     }
+    g_copies.resize(kept);
 }
 
 // c[0], the NVN driver's constants, as far as shaders read them (docs/nvn/TRANSLATOR.md): buffer descriptors

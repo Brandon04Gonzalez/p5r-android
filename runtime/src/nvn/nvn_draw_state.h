@@ -58,7 +58,11 @@ struct Stats {
 
 extern State g_state;
 extern Stats g_stats;
+extern uint32_t g_pipeline_state_version;
+extern uint32_t g_attrib_state_version;
+extern uint32_t g_tex_state_version;
 extern bool g_hud_target;  // NX_HUD_1080: this draw's target is a 1920x1080 image of a 1280x720 texture (nvn_vk.h)
+extern bool g_low_3d_target;  // NX_LOW_3D: this draw's target is a 720x405 image of a 960x540 texture (nvn_vk.h)
 
 const uint8_t* guest_bytes(uint64_t gpu);
 uint32_t handle_texture(uint64_t handle, uint32_t* sampler);
@@ -101,7 +105,11 @@ void cache_begin_submit();  // frees the copies retired submits read
 void cache_log();
 void dedup_reset();                                     // at each submit
 void dedup_invalidate(const uint8_t* p, uint64_t size);  // guest bytes written during the replay
+uint64_t dedup_generation();
+uint64_t dedup_inval_epoch();
 void dedup_log();
+void stream_cache_invalidate(const uint8_t* p, uint64_t size);
+void index_cache_invalidate(const uint8_t* p, uint64_t size);
 // nvn_written.cpp: compute results within a submit (docs/nvn/GLITCH-PLAN.md G5), one copy per written guest range.
 bool written_separate();  // NX_COMPUTE_SEPARATE=1: a copy per binding, as before
 // A dispatch's storage binding it writes: the range's copy (made, reused or merged), kAlign aligned.
@@ -133,14 +141,23 @@ bool draw_slow(uint32_t what);
 // What a texture binding of the draw being replayed samples.
 struct ResolvedTexture {
     uint64_t texture = 0;  // guest NVNtexture*; 0: nothing behind the binding (the dummy)
+    Texture* object = nullptr;
+    GpuImage* gpu_image = nullptr;
     SamplerInfo sampler;
     ViewInfo view;
     VkSampler vk_sampler = VK_NULL_HANDLE;  // sampler_for(sampler, shadow) when the handle cache has it
+    VkImageView vk_view = VK_NULL_HANDLE;
+    VkImage vk_image = VK_NULL_HANDLE;  // the image vk_view was made for: a texture given a new image drops the view
+    VkImageLayout vk_layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    uint64_t vk_view_serial = 0;
+    bool ready_cached = false;
 };
 struct DrawTextures {
     TexBindings bindings;  // the set 2 bindings of the program's stages
     std::vector<uint64_t> handles;
     std::vector<ResolvedTexture> resolved;
+    bool set2_unchanged = false;
+    uint64_t serial = 0;  // bumped whenever any binding of the draw differs from the one before
 };
 extern DrawTextures g_textures;  // filled by gather_textures, read by build_sets and the traces of the same draw
 enum : uint32_t { kNeedBreak = 1, kSampledPending = 2 };
@@ -153,9 +170,12 @@ Upload zero_stream();  // 64 zero bytes for vertex binding 15
 bool draw_inputs_shared(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, const Cmd& c, DrawInputs& in);
 std::vector<WriteBack>& separate_write_backs();  // NX_COMPUTE_SEPARATE=1: a write-back per binding
 void sets_begin_submit();
+void sets_invalidate_bound();
+void sets_invalidate_range(const uint8_t* p, uint64_t size);
 void sets_log();
 // nvn_draw.cpp: `img` is a target of the open pass that a draw or clear of the pass wrote.
 bool pass_wrote(const GpuImage* img);
+void flush_compute_barrier(VkCommandBuffer cb);
 void written_cpu_write(const uint8_t* p, uint64_t size);       // replay-time guest writes (logged when they meet one)
 std::vector<WriteBack> written_take();                         // one write-back per range, at the end of the submit
 void written_reset();
@@ -163,11 +183,14 @@ void written_log();
 // c[0], the NVN driver constants of a stage (nvn_dedup.cpp).
 std::array<uint8_t, 0x1000> driver_constants(ShaderStage stage, int st);
 
+bool debug_shader_overrides_active();
 bool debug_shader_overrides(const std::vector<const ShaderInfo*>*& shaders, const ShaderInfo*& fs,
                             std::vector<const ShaderInfo*>& swapped);
 // nvn_raster.cpp: the stencil, polygon offset, depth bounds and depth clamp commands into g_state (false for other
 // commands), and their dynamic state for the next draw (stencil reference and masks, depth bias).
 bool raster_command(const Cmd& c);
+void stencil_dynamic(VkCommandBuffer cb);
+void depth_bias_dynamic(VkCommandBuffer cb, bool slack);
 void raster_dynamic(VkCommandBuffer cb, bool slack);  // slack: equal_slack_pass (nvn.h)
 
 void trace_compute_once(const ShaderInfo* cs, uint32_t x, uint32_t y, uint32_t z);

@@ -12,6 +12,7 @@
 #include <map>
 #include <mutex>
 #include <string>
+#include <unordered_set>
 
 #include "nvn_pipeline.h"
 
@@ -605,6 +606,183 @@ uint32_t unwritten_inputs(const ShaderInfo* vs, const ShaderInfo* fs) {
     return mask;
 }
 
+// Optimization pass for ARM Mali GPUs (e.g. Mali-G57 MC2 Bifrost/Valhall).
+// Strips OpNop (0), OpLine (8), OpNoLine (317) to eliminate dead debug code,
+// and enforces DontUnroll (0x2) on OpLoopMerge (37) to prevent Mali register file spilling.
+bool optimize_spirv_mali(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    if (in.size() < 5) return false;
+
+    out.clear();
+    out.reserve(in.size());
+    out.assign(in.begin(), in.begin() + 5);
+
+    bool modified = false;
+    for (size_t i = 5; i < in.size();) {
+        uint32_t len = in[i] >> 16, op = in[i] & 0xffff;
+        if (!len || i + len > in.size()) return false;
+
+        // Strip debug/nop instructions
+        if (op == 0 /* OpNop */ || op == 8 /* OpLine */ || op == 317 /* OpNoLine */) {
+            modified = true;
+            i += len;
+            continue;
+        }
+
+        // OpLoopMerge: word 0 = (len << 16) | 37, word 1 = merge id, word 2 = continue id, word 3 = loop control mask
+        if (op == 37 /* OpLoopMerge */ && len >= 4) {
+            uint32_t loop_control = in[i + 3];
+            // Clear Unroll (0x1), set DontUnroll (0x2)
+            uint32_t new_control = (loop_control & ~1u) | 2u;
+            if (new_control != loop_control) {
+                modified = true;
+            }
+            out.push_back(in[i]);
+            out.push_back(in[i + 1]);
+            out.push_back(in[i + 2]);
+            out.push_back(new_control);
+            for (size_t k = 4; k < len; ++k) {
+                out.push_back(in[i + k]);
+            }
+            i += len;
+            continue;
+        }
+
+        out.insert(out.end(), in.begin() + i, in.begin() + i + len);
+        i += len;
+    }
+
+    return modified;
+}
+
+// Injects OpExecutionMode %main EarlyFragmentTests (ExecutionMode 20) for opaque fragment shaders
+// on ARM Mali GPUs (e.g. Mali-G57 MC2). This enables Forward Pixel Kill (FPK) hardware to discard
+// occluded fragments prior to shader execution, eliminating fragment shading for hidden surfaces.
+bool inject_early_fragment_tests_mali(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    constexpr uint32_t OpEntryPointOp = 15, OpExecutionModeOp = 16;
+    constexpr uint32_t ExecutionModelFragment = 4;
+    constexpr uint32_t ModeEarlyFragmentTests = 20;
+    constexpr uint32_t ModeDepthReplacing = 12;
+
+    if (in.size() < 5) return false;
+
+    uint32_t entry_id = 0;
+    size_t after_mode = 0;
+    bool has_discard = false;
+    bool has_early_tests = false;
+    bool is_fragment = false;
+
+    for (size_t i = 5; i < in.size();) {
+        uint32_t len = in[i] >> 16, op = in[i] & 0xffff;
+        if (!len || i + len > in.size()) return false;
+        const uint32_t* w = &in[i];
+
+        if (op == OpEntryPointOp && len >= 3) {
+            if (w[1] == ExecutionModelFragment) {
+                is_fragment = true;
+                entry_id = w[2];
+            }
+            after_mode = std::max(after_mode, i + len);
+        } else if (op == OpExecutionModeOp && len >= 3) {
+            after_mode = std::max(after_mode, i + len);
+            if (w[2] == ModeEarlyFragmentTests) has_early_tests = true;
+            if (w[2] == ModeDepthReplacing) has_discard = true;
+        } else if (op == 252 /* OpKill */ || op == 5380 /* OpDemoteToHelperInvocationEXT */ ||
+                   op == 4416 /* OpTerminateInvocation */) {
+            has_discard = true;
+        }
+        i += len;
+    }
+
+    if (!is_fragment || !entry_id || !after_mode || has_discard || has_early_tests) return false;
+
+    const std::vector<uint32_t> mode_inst = {(3u << 16) | OpExecutionModeOp, entry_id, ModeEarlyFragmentTests};
+
+    out.assign(in.begin(), in.begin() + long(after_mode));
+    out.insert(out.end(), mode_inst.begin(), mode_inst.end());
+    out.insert(out.end(), in.begin() + long(after_mode), in.end());
+    return true;
+}
+
+// Inject RelaxedPrecision (FP16 / mediump) for ARM Mali GPUs (e.g. Mali-G57 MC2 Bifrost/Valhall).
+// Mali execution engines have 2x peak throughput for FP16 ALU instructions and halved register pressure.
+// We decorate fragment color ALU (OpFAdd, OpFSub, OpFMul, OpVectorTimesScalar, OpDot) and
+// sampled texel outputs (OpImageSampleImplicitLod, OpImageSampleExplicitLod) with RelaxedPrecision.
+// Vertex positions, UV interpolation, OpFDiv, and depth calculations remain in full FP32.
+bool inject_fp16_relaxed_precision_mali(const std::vector<uint32_t>& in, std::vector<uint32_t>& out) {
+    if (in.size() < 5) return false;
+
+    uint32_t f32_type = 0;
+    std::unordered_set<uint32_t> fp32_types;
+    std::unordered_set<uint32_t> already_relaxed;
+    std::unordered_set<uint32_t> builtins;
+    std::vector<uint32_t> targets;
+    targets.reserve(128);
+
+    size_t insert_pos = 0;
+
+    for (size_t i = 5; i < in.size();) {
+        uint32_t len = in[i] >> 16, op = in[i] & 0xffff;
+        if (!len || i + len > in.size()) return false;
+        const uint32_t* w = &in[i];
+
+        if (!insert_pos && ((op >= 19 && op <= 39) || (op >= 41 && op <= 52) || op == 59)) {
+            insert_pos = i;
+        }
+
+        if (op == 22 /* OpTypeFloat */ && len == 3 && w[2] == 32) {
+            f32_type = w[1];
+            fp32_types.insert(w[1]);
+        } else if (op == 23 /* OpTypeVector */ && len == 4) {
+            if (f32_type && w[2] == f32_type) {
+                fp32_types.insert(w[1]);
+            }
+        } else if (op == 71 /* OpDecorate */ && len >= 3) {
+            if (w[2] == 0 /* DecorationRelaxedPrecision */) {
+                already_relaxed.insert(w[1]);
+            } else if (w[2] == 11 /* DecorationBuiltIn */) {
+                builtins.insert(w[1]);
+            }
+        } else if (len >= 3) {
+            // OpImageSampleImplicitLod (87), OpImageSampleExplicitLod (88)
+            // OpFAdd (129), OpFSub (131), OpFMul (133), OpVectorTimesScalar (142), OpDot (148)
+            if (op == 87 || op == 88 || op == 129 || op == 131 || op == 133 || op == 142 || op == 148) {
+                uint32_t res_type = w[1];
+                uint32_t res_id = w[2];
+                if (fp32_types.count(res_type)) {
+                    targets.push_back(res_id);
+                }
+            }
+        }
+        i += len;
+    }
+
+    if (targets.empty() || !insert_pos) return false;
+
+    std::vector<uint32_t> final_targets;
+    final_targets.reserve(targets.size());
+    for (uint32_t id : targets) {
+        if (!already_relaxed.count(id) && !builtins.count(id)) {
+            already_relaxed.insert(id);
+            final_targets.push_back(id);
+        }
+    }
+
+    if (final_targets.empty()) return false;
+
+    out.clear();
+    out.reserve(in.size() + final_targets.size() * 3);
+    out.assign(in.begin(), in.begin() + insert_pos);
+
+    for (uint32_t id : final_targets) {
+        out.push_back((3u << 16) | 71u); // OpDecorate
+        out.push_back(id);
+        out.push_back(0u);              // DecorationRelaxedPrecision
+    }
+
+    out.insert(out.end(), in.begin() + insert_pos, in.end());
+    return true;
+}
+
 std::vector<uint32_t> patched_spirv(const ShaderInfo* s, const uint8_t* kinds, uint32_t unwritten, bool* int_inputs) {
     std::vector<uint32_t> code = s->spirv, next;  // each pass reads `code` and leaves its result in `next`
     if (strip_interlock(code, next)) code.swap(next);
@@ -648,6 +826,38 @@ std::vector<uint32_t> patched_spirv(const ShaderInfo* s, const uint8_t* kinds, u
         return e && std::atoi(e) != 0;
     }();
     if (fc && s->stage != ShaderStage::Compute && preserve_inf_nan(code, next)) code.swap(next);
+    static const bool mali_opt = [] {
+        const char* e = std::getenv("NX_MALI_SPIRV_OPT");
+        return !(e && e[0] == '0');
+    }();
+    if (mali_opt && optimize_spirv_mali(code, next)) code.swap(next);
+    static const bool early_tests_on = [] {
+        const char* e = std::getenv("NX_MALI_EARLY_TESTS");
+        return e && e[0] == '1';
+    }();
+    if (early_tests_on && s->stage == ShaderStage::Fragment && inject_early_fragment_tests_mali(code, next)) {
+        code.swap(next);
+        static int early_logs = 0;
+        if (early_logs++ < 5) log("nvn/vk: shader %s: injected EarlyFragmentTests for Mali FPK hardware culling", s->hash.c_str());
+    }
+    static const bool mali_fp16_bloom = [] {
+        const char* e = std::getenv("NX_MALI_FP16_BLOOM");
+        return e && e[0] == '1';
+    }();
+    static const bool mali_fp16_all = [] {
+        const char* e = std::getenv("NX_MALI_FP16");
+        return e && e[0] == '1';
+    }();
+    // Protect character 3D cel-shading outlines by restricting default FP16 RelaxedPrecision
+    // strictly to post-processing, bloom, blur, and tone mapping passes (which declare <= 2 vertex inputs).
+    bool is_bloom_postfx = (s->refl.inputs.size() <= 2);
+    if ((mali_fp16_all || (mali_fp16_bloom && is_bloom_postfx)) &&
+        s->stage == ShaderStage::Fragment && inject_fp16_relaxed_precision_mali(code, next)) {
+        code.swap(next);
+        static int fp16_logs = 0;
+        if (fp16_logs++ < 10) log("nvn/vk: shader %s (%s): injected FP16 RelaxedPrecision decorations",
+                                  s->hash.c_str(), is_bloom_postfx ? "bloom/postfx" : "general");
+    }
     return code;
 }
 

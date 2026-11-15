@@ -100,7 +100,7 @@ bool native_r11g11b10() {
     if (!vk_physical()) return false;  // asked before the device exists: not decided yet
     // Mali and Xclipse GPUs produce NaNs and green/purple flickering with B10G11R11_UFLOAT; keep RGBA16F
     if (is_mali() || is_xclipse()) {
-        log("nvn/vk: Mali/Xclipse GPU detected: R11G11B10F kept as RGBA16F to prevent green/purple flickering and bloom overexposure");
+        log("nvn/vk: Mali/Xclipse GPU detected: R11G11B10F kept as RGBA16F to prevent green/purple/grey flickering");
         state.store(0, std::memory_order_release);
         return false;
     }
@@ -137,8 +137,8 @@ bool native_d24s8() {
     VkFormatProperties fp{};
     p_vkGetPhysicalDeviceFormatProperties(vk_physical(), VK_FORMAT_D24_UNORM_S8_UINT, &fp);
     const bool on = wanted && (fp.optimalTilingFeatures & need) == need;
-    if (wanted) log("nvn/vk: D24S8 %s (format features %#x)", on ? "native (D24_UNORM_S8_UINT)" : "as D32S8",
-                    unsigned(fp.optimalTilingFeatures));
+    log("nvn/vk: D24S8 %s (optimal tiling features %#x, requested %s)", on ? "native (D24_UNORM_S8_UINT)" : "as D32S8",
+        unsigned(fp.optimalTilingFeatures), wanted ? "yes" : "no");
     state.store(on ? 1 : 0, std::memory_order_release);
     return on;
 }
@@ -163,7 +163,15 @@ bool ubwc_flags() {
 uint32_t upload_memory_type(uint32_t bits) {
     const VkMemoryPropertyFlags plain = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     const char* e = std::getenv("NX_RING_CACHED");
-    if (e && e[0] == '1') {
+#if defined(__ANDROID__)
+    // Default to host-cached coherent memory on Android so the ~11 MB/frame upload ring writes
+    // stay in CPU L1/L2/L3 cache without stalling the shared LPDDR4X bus on mobile SoCs.
+    // Cleanly falls back to uncached memory if the Vulkan driver has no coherent cached type.
+    bool try_cached = !e || e[0] != '0';
+#else
+    bool try_cached = e && e[0] == '1';
+#endif
+    if (try_cached) {
         VkPhysicalDeviceMemoryProperties mp{};
         p_vkGetPhysicalDeviceMemoryProperties(vk_physical(), &mp);
         for (uint32_t k = 0; k < mp.memoryTypeCount; k++)

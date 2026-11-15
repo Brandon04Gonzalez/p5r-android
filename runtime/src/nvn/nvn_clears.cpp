@@ -47,7 +47,7 @@ uint64_t g_scissored = 0, g_masked = 0, g_mask_fallback = 0, g_scissor_lost = 0;
 bool clears_v2() {
     static const bool on = [] {
         const char* e = std::getenv("NX_CLEARS_V2");
-        return e && e[0] == '1';
+        return !(e && e[0] == '0');
     }();
     return on;
 }
@@ -302,6 +302,23 @@ void clears_flush_other(VkCommandBuffer cb, const Targets& t) {
     g_flush_reason = 14;
 }
 
+void clears_flush_image(VkCommandBuffer cb, uint64_t guest_texture) {
+    if (!clears_v2() || g_list.empty() || !guest_texture) return;
+    const GpuImage* img = image_of(guest_texture);
+    if (!img) return;
+    std::vector<Pending> run;
+    for (auto it = g_list.begin(); it != g_list.end();) {
+        if (entry_has_image(*it, img)) {
+            run.push_back(*it);
+            it = g_list.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (const Pending& e : run) flush_entry(cb, e);
+    g_flush_reason = 14;
+}
+
 void clears_begin_submit() { g_list.clear(); }
 bool clears_keep_pending() { return clears_v2(); }
 
@@ -329,6 +346,10 @@ void draw_clear(VkCommandBuffer cb, const Targets& t, const Cmd& c) {
     GpuImage* img = guest ? image_of(guest) : nullptr;
     if (!img || color != (img->aspect == VK_IMAGE_ASPECT_COLOR_BIT)) return;
     if (color && !(c.mask & 0xF)) return;  // no channel enabled
+    // When NX_SHADOWS=0 or NX_DISABLE_BLOOM=1 skips all draws into this target, once the target has been
+    // cleared once (img->rendered == true), nothing ever writes to it again: skip redundant per-frame clears.
+    if (img->rendered && (shadow_draw_skipped(t) || bloom_draw_skipped(t))) return;
+
     VkClearAttachment a{};
     if (color) {
         a.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT, a.colorAttachment = c.n;

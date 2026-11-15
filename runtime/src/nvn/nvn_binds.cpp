@@ -113,13 +113,10 @@ void SetRasterizerDiscard(CPU& c) {
 }
 
 void SetRenderEnable(CPU& c) {
+    hle_chain_once(c, "SetRenderEnable");
     Cmd cmd{Cmd::SetRenderEnable};
     cmd.n = uint32_t(c.x[1] & 1);
     record(c.x[0], cmd);
-    static std::atomic<uint64_t> counts[2];
-    uint64_t n = ++counts[cmd.n];
-    if (n == 1 || n % 5000 == 0)
-        log("nvn: SetRenderEnable(%u) x%llu", cmd.n, (unsigned long long)n);
 }
 
 // SetRenderEnableConditional(cmd, NVNconditionalRenderMode, NVNbufferAddress): rendering on or off from values the

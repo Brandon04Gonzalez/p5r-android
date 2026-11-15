@@ -11,6 +11,7 @@
 // NX_OCCL=1: on. NX_OCCL_FORCE=0|1: every conditional draw skipped / drawn (the most culling could save).
 // NX_OCCL_STATS=1: how many objects were hidden.
 // NX_TRACE_OCCL=<lines>[@<first frame>]: the sequence (frame, draw, op, counter/mode, address, targets).
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 #include <unordered_map>
@@ -23,6 +24,8 @@
 
 namespace nx::nvn {
 
+bool g_occl_object = false;
+
 using namespace replay;
 using namespace vk;
 
@@ -34,7 +37,6 @@ bool g_pool_reset = false;  // every query reset once (the pool's first submit)
 uint32_t g_used = 0;        // this submit's queries (begun and ended around one draw each)
 uint32_t g_copied = 0;      // [0, g_copied): their results are in the upload ring, at g_result
 std::vector<Upload> g_result;
-bool g_object = false;           // between a ResetCounter of samples passed and its ReportCounter
 int32_t g_object_query = -1;     // its draw's query (-1: none yet)
 uint32_t g_object_draws = 0;     // draws since the ResetCounter
 std::unordered_map<uint64_t, int32_t> g_reports;  // report address -> query (-1: unknown)
@@ -57,6 +59,93 @@ bool on() {
         return want && can;
     }();
     return v;
+}
+
+// CPU-side temporal occlusion culling for mobile GPUs without VK_KHR_draw_indirect_count (e.g. Mali-G57):
+// Uses a 4-pool ring of core Vulkan 1.0 occlusion queries, non-blocking availability readback, 1/4 staggered
+// bounding-box sampling, and 3-fail hysteresis to skip occluded SetRenderEnableConditional draws on the CPU.
+constexpr uint32_t kCpuPools = 4;
+constexpr uint32_t kCpuQueries = 1024;
+constexpr uint32_t kCpuVisSlots = 4096;  // power of two
+
+// One verdict per object per frame: a frame's passes span several submits (3 per frame), and an object drawn in one
+// pass and skipped in another (a prepass or G-buffer pass against the lit pass) came out black. Query results write
+// `visible` (the next verdict); `use` is what the conditional draws of frame `frame` see, taken from it at the
+// frame's first look.
+struct CpuVisEntry {
+    uint64_t addr = 0;
+    uint32_t last_submit = 0;
+    uint8_t fail_streak = 0;
+    bool visible = true;
+    bool use = true;
+    uint64_t frame = 0;
+};
+
+VkQueryPool g_cpu_pools[kCpuPools] = {};
+bool g_cpu_pool_reset[kCpuPools] = {};
+uint32_t g_cpu_slot_used[kCpuPools] = {};
+std::vector<uint64_t> g_cpu_slot_addrs[kCpuPools];
+uint32_t g_cpu_slot = 0;
+uint32_t g_cpu_submit_id = 0;
+uint32_t g_cpu_obj_seq = 0;
+uint32_t g_cpu_phase = 0;
+bool g_cpu_sample_this = false;
+CpuVisEntry g_cpu_vis[kCpuVisSlots] = {};
+
+bool cpu_on() {
+    static const bool v = [] {
+        if (forced() || zero_draws_on() || on()) return false;
+        const char* e = std::getenv("NX_OCCL_CPU");
+#if defined(__ANDROID__)
+        // Opt-in on Android: hiding objects from last frames' query results made buildings vanish and pop.
+        bool want = e && e[0] == '1';
+#else
+        bool want = e && e[0] == '1';
+#endif
+        log("nvn: cpu temporal occlusion culling %s",
+            want ? "on (4-pool non-blocking query ring, 1/4 staggered)" : "off");
+        return want;
+    }();
+    return v;
+}
+
+CpuVisEntry* cpu_vis_find(uint64_t addr, bool insert) {
+    if (!addr) return nullptr;
+    const uint32_t base = uint32_t(((addr >> 4) ^ (addr >> 17)) & (kCpuVisSlots - 1));
+    uint32_t victim = base;
+    uint32_t oldest_age = 0;
+    for (uint32_t i = 0; i < 4; i++) {
+        const uint32_t idx = (base + i) & (kCpuVisSlots - 1);
+        CpuVisEntry& e = g_cpu_vis[idx];
+        if (e.addr == addr) return &e;
+        if (!e.addr) {
+            if (insert) {
+                e = {addr, g_cpu_submit_id, 0, true, true, g_frame.load()};
+                return &e;
+            }
+            return nullptr;
+        }
+        const uint32_t age = g_cpu_submit_id - e.last_submit;
+        if (age >= oldest_age) {
+            oldest_age = age;
+            victim = idx;
+        }
+    }
+    if (!insert) return nullptr;
+    CpuVisEntry& v = g_cpu_vis[victim];
+    v = {addr, g_cpu_submit_id, 0, true, true, g_frame.load()};
+    return &v;
+}
+
+// The verdict the draws of this frame use: the latest one as of the frame's first look; a hidden verdict nothing
+// re-confirmed for ~3 frames (9 submits) lapses to drawn.
+bool cpu_vis_use(CpuVisEntry& e) {
+    const uint64_t f = g_frame.load();
+    if (e.frame != f) {
+        e.frame = f;
+        e.use = e.visible || (g_cpu_submit_id - e.last_submit) > 9;
+    }
+    return e.use;
 }
 
 // NX_TRACE_OCCL=<lines>[@<first frame>]
@@ -92,7 +181,55 @@ void copy_results(VkCommandBuffer cb) {
 }  // namespace
 
 void occlusion_begin_submit(VkCommandBuffer cb) {
-    g_object = false, g_object_query = -1, g_object_draws = 0, g_conditional = -1;
+    g_occl_object = false, g_object_query = -1, g_object_draws = 0, g_conditional = -1;
+    g_cpu_sample_this = false;
+    if (cpu_on()) {
+        g_cpu_submit_id++;
+        g_cpu_slot = (g_cpu_slot + 1) & (kCpuPools - 1);
+        g_cpu_phase = (g_cpu_phase + 1) & 3u;
+        g_cpu_obj_seq = 0;
+        VkQueryPool& pool = g_cpu_pools[g_cpu_slot];
+        if (!pool) {
+            VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
+            qi.queryType = VK_QUERY_TYPE_OCCLUSION;
+            qi.queryCount = kCpuQueries;
+            if (p_vkCreateQueryPool(vk_device(), &qi, nullptr, &pool) != VK_SUCCESS) pool = VK_NULL_HANDLE;
+        }
+        const uint32_t prev_used = g_cpu_slot_used[g_cpu_slot];
+        if (pool && g_cpu_pool_reset[g_cpu_slot] && prev_used > 0) {
+            uint32_t raw[kCpuQueries * 2];
+            const VkResult res = p_vkGetQueryPoolResults(
+                vk_device(), pool, 0, prev_used, prev_used * 2 * sizeof(uint32_t), raw, 2 * sizeof(uint32_t),
+                VK_QUERY_RESULT_WITH_AVAILABILITY_BIT);
+            if (res == VK_SUCCESS || res == VK_NOT_READY) {
+                const auto& addrs = g_cpu_slot_addrs[g_cpu_slot];
+                const uint32_t n = std::min<uint32_t>(prev_used, uint32_t(addrs.size()));
+                for (uint32_t i = 0; i < n; i++) {
+                    const uint32_t samples = raw[i * 2];
+                    const uint32_t avail = raw[i * 2 + 1];
+                    const uint64_t addr = addrs[i];
+                    if (!avail || !addr) continue;
+                    CpuVisEntry* e = cpu_vis_find(addr, true);
+                    if (!e) continue;
+                    e->last_submit = g_cpu_submit_id;
+                    if (samples > 0) {
+                        e->fail_streak = 0;
+                        e->visible = true;
+                    } else {
+                        if (e->fail_streak < 255) e->fail_streak++;
+                        if (e->fail_streak >= 3) e->visible = false;  // three hidden samples in a row
+                    }
+                }
+            }
+        }
+        if (pool && (!g_cpu_pool_reset[g_cpu_slot] || prev_used > 0)) {
+            p_vkCmdResetQueryPool(cb, pool, 0, g_cpu_pool_reset[g_cpu_slot] ? prev_used : kCpuQueries);
+            g_cpu_pool_reset[g_cpu_slot] = true;
+        }
+        g_cpu_slot_used[g_cpu_slot] = 0;
+        g_cpu_slot_addrs[g_cpu_slot].clear();
+        return;
+    }
     if (!on()) return;
     if (!g_pool) {
         VkQueryPoolCreateInfo qi{VK_STRUCTURE_TYPE_QUERY_POOL_CREATE_INFO};
@@ -119,18 +256,53 @@ void occlusion_begin_submit(VkCommandBuffer cb) {
 
 void occlusion_reset(VkCommandBuffer, const Cmd& c, const Targets& t) {
     trace("reset", c, t);
-    if (c.n == 1) g_object = true, g_object_query = -1, g_object_draws = 0;  // samples passed
+    if (c.n == 1) {
+        g_occl_object = true, g_object_query = -1, g_object_draws = 0;  // samples passed
+        if (cpu_on()) {
+            const uint32_t seq = g_cpu_obj_seq++;
+            g_cpu_sample_this = ((seq & 3u) == g_cpu_phase);
+            if (!forced()) g_state.render_enable = true;
+        }
+    }
 }
 
 void occlusion_report(VkCommandBuffer, const Cmd& c, const Targets& t) {
     if (c.n != 1) return;
     trace("report", c, t);
-    if (!on()) return;
+    if (cpu_on()) {
+        if (g_occl_object && g_cpu_sample_this) {
+            if (g_object_draws == 1 && g_object_query >= 0 &&
+                uint32_t(g_object_query) < g_cpu_slot_addrs[g_cpu_slot].size()) {
+                g_cpu_slot_addrs[g_cpu_slot][size_t(g_object_query)] = c.a[0];
+            } else if (g_object_draws > 1) {
+                g_stats_occl.several++;
+                if (CpuVisEntry* e = cpu_vis_find(c.a[0], false)) {
+                    e->fail_streak = 0;
+                    e->visible = true;
+                }
+            }
+        }
+        g_occl_object = false;
+        g_cpu_sample_this = false;
+        return;
+    }
+    if (!on()) {
+        g_occl_object = false;
+        return;
+    }
     // One draw since the ResetCounter: its query. Otherwise unknown (drawn).
-    const bool one = g_object && g_object_draws == 1 && g_object_query >= 0;
-    if (g_object && g_object_draws > 1) g_stats_occl.several++;
+    const bool one = g_occl_object && g_object_draws == 1 && g_object_query >= 0;
+    if (g_occl_object && g_object_draws > 1) g_stats_occl.several++;
     g_reports[c.a[0]] = one ? g_object_query : -1;
-    g_object = false;
+    g_occl_object = false;
+}
+
+bool occlusion_cpu_culling() { return cpu_on(); }
+
+bool occlusion_object_skipped() {
+    if (!g_occl_object || zero_draws_on()) return false;
+    if (cpu_on()) return !g_cpu_sample_this;
+    return !on();
 }
 
 void occlusion_conditional(VkCommandBuffer cb, const Cmd& c, const Targets& t) {
@@ -142,6 +314,19 @@ void occlusion_conditional(VkCommandBuffer cb, const Cmd& c, const Targets& t) {
         return;
     }
     g_state.render_enable = true;
+    if (cpu_on()) {
+        if (c.n == 1) {
+            CpuVisEntry* e = cpu_vis_find(c.a[0], false);
+            if (e && !cpu_vis_use(*e)) {
+                g_state.render_enable = false;
+                g_stats_occl.hidden++;
+                g_stats_occl.conditional++;
+                return;
+            }
+            g_stats_occl.visible++;
+        }
+        return;
+    }
     if (!on()) return;
     // Mode 1: drawn when the counter at the address differs from the u64 16 bytes on (0 in P5R's slots): when the
     // object's query passed samples. Other modes: drawn.
@@ -156,8 +341,24 @@ void occlusion_conditional(VkCommandBuffer cb, const Cmd& c, const Targets& t) {
 
 void occlusion_render_enable() { g_conditional = -1; }  // SetRenderEnable ends the conditional draws
 
-int32_t occlusion_query_begin(VkCommandBuffer cb) {
-    if (!g_object || !g_pool) return -1;
+int32_t occlusion_query_begin_slow(VkCommandBuffer cb) {
+    if (cpu_on()) {
+        VkQueryPool pool = g_cpu_pools[g_cpu_slot];
+        if (!g_occl_object || !g_cpu_sample_this || !pool || !g_cpu_pool_reset[g_cpu_slot]) return -1;
+        g_object_draws++;
+        uint32_t& used = g_cpu_slot_used[g_cpu_slot];
+        if (used >= kCpuQueries) {
+            g_stats_occl.used_up++;
+            return -1;
+        }
+        const int32_t q = int32_t(used++);
+        g_cpu_slot_addrs[g_cpu_slot].push_back(0);
+        p_vkCmdBeginQuery(cb, pool, uint32_t(q), 0);
+        g_object_query = q;
+        g_stats_occl.queries++;
+        return q;
+    }
+    if (!g_occl_object || !g_pool) return -1;
     g_object_draws++;
     if (g_used >= kQueries) {
         g_stats_occl.used_up++;
@@ -170,8 +371,14 @@ int32_t occlusion_query_begin(VkCommandBuffer cb) {
     return q;
 }
 
-void occlusion_query_end(VkCommandBuffer cb, int32_t q) {
-    if (q >= 0) p_vkCmdEndQuery(cb, g_pool, uint32_t(q));
+void occlusion_query_end_slow(VkCommandBuffer cb, int32_t q) {
+    if (q < 0) return;
+    if (cpu_on()) {
+        VkQueryPool pool = g_cpu_pools[g_cpu_slot];
+        if (pool) p_vkCmdEndQuery(cb, pool, uint32_t(q));
+        return;
+    }
+    p_vkCmdEndQuery(cb, g_pool, uint32_t(q));
 }
 
 bool occlusion_draw(VkCommandBuffer cb, bool indexed, uint32_t count, uint32_t instances, uint32_t first,

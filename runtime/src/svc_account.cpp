@@ -1,5 +1,6 @@
 // acc:u0 (accounts) and the storage objects am hands out (launch parameters).
 #include "ipc.h"
+#include "platform.h"
 #include "users.h"
 
 namespace nx {
@@ -23,7 +24,7 @@ std::shared_ptr<Service> make_storage(std::shared_ptr<std::vector<uint8_t>> blob
             Buffer in = c.in_buf(0);
             if (off < 0 || uint64_t(off) > blob->size()) return 0x3E880u;
             size_t n = std::min<size_t>(in.size, blob->size() - size_t(off));
-            std::memcpy(blob->data() + off, reinterpret_cast<void*>(in.addr), n);
+            plat::fast_memcpy(blob->data() + off, reinterpret_cast<void*>(in.addr), n);
             return 0u;
         };
         a->cmds[11] = [blob](IpcCtx& c) {  // Read(offset)
@@ -31,7 +32,7 @@ std::shared_ptr<Service> make_storage(std::shared_ptr<std::vector<uint8_t>> blob
             Buffer out = c.out_buf(0);
             if (off < 0 || uint64_t(off) > blob->size()) return 0x3E880u;  // out of bounds
             size_t n = std::min<size_t>(out.size, blob->size() - size_t(off));
-            std::memcpy(reinterpret_cast<void*>(out.addr), blob->data() + off, n);
+            plat::fast_memcpy(reinterpret_cast<void*>(out.addr), blob->data() + off, n);
             return 0u;
         };
         c.push_object(a);

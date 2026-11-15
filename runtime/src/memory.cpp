@@ -168,4 +168,12 @@ VmInfo vm_query(uint64_t addr) {
     return {gap_start, gap_end - gap_start, kMemFree, 0};
 }
 
+namespace plat {
+
+void fast_memcpy(void* __restrict dst, const void* __restrict src, size_t n) {
+    if (n > 0) __builtin_memcpy(dst, src, n);
+}
+
+}  // namespace plat
+
 }  // namespace nx

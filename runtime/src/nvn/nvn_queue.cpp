@@ -26,6 +26,7 @@
 #include "nvn.h"
 #include "nvn_ultrawide.h"
 #include "platform.h"
+#include "kernel.h"
 
 namespace nx {
 extern std::atomic<uint64_t> g_movie_gots;      // hle_movie.cpp
@@ -272,8 +273,14 @@ void SyncWait(CPU& c) {
 void QueueInitialize(CPU& c) { c.x[0] = 1; }  // NVNboolean (NVNqueue*, const NVNqueueBuilder*)
 void QueueFinalize(CPU&) {}
 void QueueSubmitCommands(CPU& c) {  // (NVNqueue*, int count, const NVNcommandHandle*)
+    static thread_local bool s_prio_set = [] {
+        plat::set_thread_priority(-8);
+        return true;
+    }();
+    (void)s_prio_set;
     plat::perf_hint_thread();  // this thread replays: part of every frame (perf_hint.cpp)
     std::vector<std::shared_ptr<CmdList>> lists;
+    lists.reserve(uint32_t(c.x[1]));
     static uint64_t submitted = 0, missing = 0;
     for (uint32_t k = 0; k < uint32_t(c.x[1]); k++) {
         submitted++;

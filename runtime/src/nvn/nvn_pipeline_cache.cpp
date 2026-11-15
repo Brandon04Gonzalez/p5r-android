@@ -28,9 +28,45 @@ std::string g_path;
 uint64_t g_alias = 0, g_modules = 0, g_module_ns = 0, g_astc = 0, g_astc_ns = 0;
 std::atomic<uint64_t> g_pipelines{0}, g_pipeline_ns{0}, g_worker_pipelines{0}, g_worker_ns{0};  // also counted from the compile worker threads
 uint64_t g_waited = 0, g_waited_ns = 0, g_skipped = 0, g_prewarmed = 0;
+std::mutex g_warm_lock;
 std::unordered_set<uint64_t> g_known;  // hashes of the records in the .keys file or already queued to it
 std::vector<WarmRec> g_new_recs;
 constexpr uint32_t kKeysMagic = 0x314b5750;  // "PWK1"
+
+void warm_save();
+
+bool valid_cache_blob(const std::vector<uint8_t>& data, const VkPhysicalDeviceProperties& p) {
+    struct CacheHeader {
+        uint32_t headerSize;
+        uint32_t headerVersion;
+        uint32_t vendorID;
+        uint32_t deviceID;
+        uint8_t  pipelineCacheUUID[VK_UUID_SIZE];
+    };
+    if (data.size() < sizeof(CacheHeader)) return false;
+    const auto* h = reinterpret_cast<const CacheHeader*>(data.data());
+    return h->headerSize >= sizeof(CacheHeader) &&
+           h->headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE &&
+           h->vendorID == p.vendorID &&
+           h->deviceID == p.deviceID &&
+           std::memcmp(h->pipelineCacheUUID, p.pipelineCacheUUID, VK_UUID_SIZE) == 0;
+}
+
+std::vector<uint8_t> read_cache_file(const std::string& path) {
+    std::vector<uint8_t> data;
+    if (FILE* f = plat::fopen_utf8(path, "rb")) {
+        plat::fseek64(f, 0, SEEK_END);
+        int64_t n = plat::ftell64(f);
+        plat::fseek64(f, 0, SEEK_SET);
+        if (n > 0) {
+            data.resize(size_t(n));
+            size_t read_bytes = std::fread(data.data(), 1, data.size(), f);
+            data.resize(read_bytes);
+        }
+        std::fclose(f);
+    }
+    return data;
+}
 
 }  // namespace
 
@@ -43,13 +79,20 @@ VkPipelineCache pipeline_cache() {
     char name[64];
     std::snprintf(name, sizeof name, "/pipelines_%04x_%04x.bin", p.vendorID, p.deviceID);
     g_path = plat::data_root() + name;
-    std::vector<uint8_t> data;
-    if (FILE* f = plat::fopen_utf8(g_path, "rb")) {
-        plat::fseek64(f, 0, SEEK_END);
-        int64_t n = plat::ftell64(f);
-        plat::fseek64(f, 0, SEEK_SET);
-        if (n > 0) data.resize(size_t(n)), data.resize(std::fread(data.data(), 1, data.size(), f));
-        std::fclose(f);
+
+    std::vector<uint8_t> data = read_cache_file(g_path);
+    if (!data.empty() && !valid_cache_blob(data, p)) {
+        log("nvn/vk: pipeline cache %s has mismatched header, resetting", g_path.c_str());
+        data.clear();
+    }
+    bool migrated = false;
+    if (const char* legacy = plat::get_pipeline_cache_path(); legacy && *legacy && g_path != legacy) {
+        std::vector<uint8_t> leg_data = read_cache_file(legacy);
+        if (valid_cache_blob(leg_data, p) && leg_data.size() > data.size()) {
+            log("nvn/vk: migrating pipeline cache from %s (%zu bytes -> %s)", legacy, leg_data.size(), g_path.c_str());
+            data = std::move(leg_data);
+            migrated = true;
+        }
     }
     VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     ci.initialDataSize = data.size();
@@ -58,13 +101,15 @@ VkPipelineCache pipeline_cache() {
         ci.initialDataSize = 0, ci.pInitialData = nullptr;  // a cache the driver refuses: start empty
         p_vkCreatePipelineCache(vk_device(), &ci, nullptr, &g_cache);
     }
-    g_saved_size = data.size();
+    g_saved_size = migrated ? 0 : data.size();
     log("nvn/vk: pipeline cache %s (%zu bytes loaded)", g_path.c_str(), data.size());
+    if (migrated) pipeline_cache_save();
     return g_cache;
 }
 
 void pipeline_cache_save() {
     if (!g_cache) return;
+    warm_save();
     size_t n = 0;
     if (p_vkGetPipelineCacheData(vk_device(), g_cache, &n, nullptr) != VK_SUCCESS || n <= g_saved_size) return;
     std::vector<uint8_t> data(n);
@@ -97,16 +142,35 @@ static uint64_t rec_hash(const WarmRec& r) { return hash_bytes(reinterpret_cast<
 
 bool warm_load(std::vector<WarmRec>& out) {
     if (!pipeline_cache()) return false;
-    FILE* f = plat::fopen_utf8(keys_path(), "rb");
-    if (!f) return false;
-    uint32_t head[2] = {};
-    bool ok = std::fread(head, 4, 2, f) == 2 && head[0] == kKeysMagic && head[1] == sizeof(WarmRec);
-    WarmRec r;
-    while (ok && std::fread(&r, sizeof r, 1, f) == 1) {
-        out.push_back(r);
-        g_known.insert(rec_hash(r));
+    std::lock_guard lk(g_warm_lock);
+    auto load_from = [&](const std::string& path, bool mark_new) -> bool {
+        FILE* f = plat::fopen_utf8(path, "rb");
+        if (!f) return false;
+        uint32_t head[2] = {};
+        bool ok = std::fread(head, 4, 2, f) == 2 && head[0] == kKeysMagic && head[1] == sizeof(WarmRec);
+        WarmRec r;
+        while (ok && std::fread(&r, sizeof r, 1, f) == 1) {
+            if (g_known.insert(rec_hash(r)).second) {
+                out.push_back(r);
+                if (mark_new && g_new_recs.size() < 16384) g_new_recs.push_back(r);
+            }
+        }
+        std::fclose(f);
+        return ok;
+    };
+    bool ok = load_from(keys_path(), false);
+    if (const char* legacy = plat::get_pipeline_cache_path(); legacy && *legacy) {
+        std::string leg = legacy;
+        std::string leg_keys = (leg.size() > 4 ? leg.substr(0, leg.size() - 4) : leg) + ".keys";
+        if (leg_keys != keys_path()) {
+            size_t before = out.size();
+            if (load_from(leg_keys, true) && out.size() > before) {
+                log("nvn/vk: imported %zu pipeline keys from %s", out.size() - before, leg_keys.c_str());
+                ok = true;
+            }
+        }
     }
-    std::fclose(f);
+    if (!g_new_recs.empty()) warm_save();
     return ok;
 }
 
@@ -118,11 +182,18 @@ void warm_record(const PipelineKey& k) {
     if (k.fs) std::memcpy(r.fs, k.fs->hash.c_str(), k.fs->hash.size());
     r.key = k;
     r.key.vs = nullptr, r.key.fs = nullptr;
+    std::lock_guard lk(g_warm_lock);
     if (g_known.size() < 16384 && g_known.insert(rec_hash(r)).second) g_new_recs.push_back(r);  // ~700 bytes each
 }
 
-static void warm_save() {
-    if (g_new_recs.empty() || !g_cache) return;
+namespace {
+void warm_save() {
+    std::vector<WarmRec> recs;
+    {
+        std::lock_guard lk(g_warm_lock);
+        if (g_new_recs.empty() || !g_cache) return;
+        recs.swap(g_new_recs);
+    }
     std::string path = keys_path();
     bool fresh = true;
     if (FILE* t = plat::fopen_utf8(path, "rb")) {
@@ -135,11 +206,11 @@ static void warm_save() {
             uint32_t head[2] = {kKeysMagic, uint32_t(sizeof(WarmRec))};
             std::fwrite(head, 4, 2, f);
         }
-        std::fwrite(g_new_recs.data(), sizeof(WarmRec), g_new_recs.size(), f);
+        std::fwrite(recs.data(), sizeof(WarmRec), recs.size(), f);
         std::fclose(f);
-        g_new_recs.clear();
     }
 }
+}  // namespace
 void note_pipeline_alias() { g_alias++; }
 void note_module_created(uint64_t ns) { g_modules++, g_module_ns += ns; }
 void note_astc_decoded(uint64_t ns) { g_astc++, g_astc_ns += ns; }
@@ -159,11 +230,18 @@ void creation_log(uint64_t frames) {
             (unsigned long long)frames, (unsigned long long)g_prewarmed, (unsigned long long)g_worker_pipelines.load(),
             double(g_worker_ns.load()) / 1e6, (unsigned long long)g_waited, double(g_waited_ns) / 1e6,
             (unsigned long long)g_skipped);
+    const bool had_new_pipelines = g_pipelines.load() > 0 || g_worker_pipelines.load() > 0;
     g_worker_pipelines = 0, g_worker_ns = 0;
     g_prewarmed = g_waited = g_waited_ns = g_skipped = 0;
     g_pipelines = 0, g_pipeline_ns = 0, g_astc = g_astc_ns = 0;
     static uint64_t windows = 0;
-    if (++windows % 10 == 0) pipeline_cache_save(), warm_save();
+    static uint64_t last_save_ns = 0;
+    uint64_t now_ns = plat::monotonic_ns();
+    if (++windows % 10 == 0 || (had_new_pipelines && now_ns - last_save_ns >= 15ULL * 1'000'000'000ULL) ||
+        (now_ns - last_save_ns >= 120ULL * 1'000'000'000ULL)) {
+        last_save_ns = now_ns;
+        pipeline_cache_save();
+    }
 }
 
 }  // namespace nx::nvn

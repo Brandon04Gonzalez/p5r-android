@@ -169,6 +169,11 @@ void set_thread_name(const char* name) {
 }
 
 int64_t current_thread_id() { return int64_t(syscall(SYS_gettid)); }
+void pin_current_thread_to_big_cores(const char*) {}
+void pin_current_thread_to_core(int, const char*) {}
+void pin_current_thread_to_little_cores(const char*) {}
+void reset_current_thread_affinity(const char*) {}
+void set_thread_priority(int) {}
 
 bool profile(const int64_t*, const uint64_t* const*, size_t, int, const std::string&) { return false; }  // use perf
 
@@ -210,6 +215,8 @@ std::string data_root() {
     return r ? r : nx::game::kInfo.pc_data_root;
 }
 
+const char* get_pipeline_cache_path() { return nullptr; }
+
 std::string setting(const std::string& key) {
     std::string env = "NX_";
     for (char ch : key) env += char(std::toupper(static_cast<unsigned char>(ch)));
@@ -239,7 +246,12 @@ void* create_window() {
         if (g_window) return;
         int w = 1280, h = 720;
         std::string r = setting("resolution");
-        if (!r.empty()) std::sscanf(r.c_str(), "%dx%d", &w, &h);
+        if (!r.empty()) {
+            if (r == "540" || r == "960x540") w = 960, h = 540;
+            else if (r == "1080" || r == "1920x1080") w = 1920, h = 1080;
+            else if (r == "720" || r == "1280x720") w = 1280, h = 720;
+            else std::sscanf(r.c_str(), "%dx%d", &w, &h);
+        }
         g_window = SDL_CreateWindow(nx::game::kInfo.title, w, h,
                                     SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY | SDL_WINDOW_VULKAN |
                                         (headless() ? SDL_WINDOW_HIDDEN : 0));

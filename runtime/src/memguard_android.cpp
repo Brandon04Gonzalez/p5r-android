@@ -105,8 +105,8 @@ void start_memory_guard() {
         uint64_t ticks = 0, peak = 0, read_ns = 0, read_max = 0;
         bool smaps = mode == "smaps" || mode == "ab";
         for (;;) {
-            std::this_thread::sleep_for(std::chrono::milliseconds(250));
-            if (mode == "ab" && ticks && ticks % 160 == 0) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2500));
+            if (mode == "ab" && ticks && ticks % 16 == 0) {
                 smaps = !smaps;
                 log("memory: guard source %s -> %s", smaps ? "statm" : "smaps", smaps ? "smaps" : "statm");
             }
@@ -118,10 +118,10 @@ void start_memory_guard() {
             r.end = t1;
             read_ns += t1 - t0, read_max = std::max(read_max, t1 - t0);
             if (f > peak) peak = f;
-            if (++ticks % 120 == 0) {
+            if (++ticks % 12 == 0) {
                 log("memory: %.2f GB %s (peak %.2f GB, limit %.1f GB), read avg %.2f ms, max %.2f ms",
                     double(f) / double(1ull << 30), smaps ? "Pss (smaps)" : "resident (statm)",
-                    double(peak) / double(1ull << 30), gb, double(read_ns) / 120e6, double(read_max) / 1e6);
+                    double(peak) / double(1ull << 30), gb, double(read_ns) / 12e6, double(read_max) / 1e6);
                 read_ns = read_max = 0;
                 log("memory: anon %llu MB, file %llu MB, swapped %llu MB (VmSwap) | system: MemAvailable %llu MB, SwapFree %llu MB",
                     (unsigned long long)(kb_field("/proc/self/status", "RssAnon:") >> 10),

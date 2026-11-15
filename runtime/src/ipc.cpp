@@ -1,9 +1,11 @@
-﻿// HIPC message parsing / building, sessions, domains and the service manager (sm:).
+// HIPC message parsing / building, sessions, domains and the service manager (sm:).
 #include "ipc.h"
 
 #include <mutex>
 #include <set>
 #include <unordered_map>
+
+#include "platform.h"
 
 namespace nx {
 
@@ -163,7 +165,7 @@ uint32_t ipc_request(CPU& c, uint32_t handle, uint64_t buf, uint64_t) {
             for (uint32_t h : ctx.out_move) w[q++] = h;
         }
         w[q] = rc;
-        std::memcpy(&w[q + 1], ctx.out.data(), ctx.out.size());
+        plat::fast_memcpy(&w[q + 1], ctx.out.data(), ctx.out.size());
         w[0] = ctx.type;
         w[1] = uint32_t(1 + (ctx.out.size() + 3) / 4) | (has_special ? 0x80000000u : 0);
         return 0;
@@ -278,7 +280,7 @@ uint32_t ipc_request(CPU& c, uint32_t handle, uint64_t buf, uint64_t) {
         st<uint32_t>(o + 4, 0);
         st<uint32_t>(o + 8, rc);
         st<uint32_t>(o + 12, 0);
-        std::memcpy(reinterpret_cast<void*>(o + 16), ctx.out.data(), ctx.out.size());
+        plat::fast_memcpy(reinterpret_cast<void*>(o + 16), ctx.out.data(), ctx.out.size());
         uint64_t end = o + 16 + ((ctx.out.size() + 3) & ~size_t(3));
         for (uint32_t id : out_obj_ids) {
             st<uint32_t>(end, id);
@@ -311,7 +313,7 @@ uint32_t map_shared_memory(KSharedMemory& s, uint64_t addr, uint64_t size) {
     // guest reads at addr. Record the mapping: services update both through shm_sync().
     commit(addr, size);
     vm_set(addr, size, 0x06 /* shared */, 3);
-    std::memcpy(reinterpret_cast<void*>(addr), reinterpret_cast<void*>(s.host), std::min(size, s.size));
+    plat::fast_memcpy(reinterpret_cast<void*>(addr), reinterpret_cast<void*>(s.host), std::min(size, s.size));
     s.host = addr;  // from now on the service writes straight to the guest's view
     return 0;
 }

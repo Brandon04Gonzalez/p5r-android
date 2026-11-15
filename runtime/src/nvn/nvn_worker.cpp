@@ -35,6 +35,7 @@ bool enabled() {
 }
 
 void run() {
+    plat::perf_hint_thread();
     plat::set_thread_name("nvn replay");
     for (;;) {
         std::pair<uint64_t, std::function<void()>> job;

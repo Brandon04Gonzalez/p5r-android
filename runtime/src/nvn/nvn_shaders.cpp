@@ -13,6 +13,7 @@
 #include <cstring>
 
 #ifndef NX_SHADERS_STANDALONE
+#include <atomic>
 #include <memory>
 #include <mutex>
 
@@ -231,13 +232,97 @@ Cache& cache() {
     return c;
 }
 
+std::atomic<uint64_t> g_shader_epoch{0};
+
+void ensure_resources_loaded(Cache& k) {
+    if (k.resources_loaded) return;
+    k.resources_loaded = true;
+    std::string dir = plat::data_root() + "/spirv/";
+    std::string text;
+    if (read_whole(dir + "results.tsv", text))
+        log("nvn: %zu shader records from %sresults.tsv", parse_results_tsv(text, k.resources), dir.c_str());
+    else
+        log("nvn: no %sresults.tsv: storage buffers of translated shaders cannot be bound", dir.c_str());
+}
+
+void populate_control(ShaderInfo& info, const uint8_t* code, const ShaderControl& c) {
+    if (info.control.valid) return;
+    if (c.const_size && uint64_t(c.const_offset) + c.const_size <= c.code_size) {
+        info.constants.assign(code + c.const_offset, code + c.const_offset + c.const_size);
+    }
+    if (info.stage == ShaderStage::Compute) {
+        for (int i = 0; i < 3; i++) info.local_size[i] = std::max<uint32_t>(1, c.local_size[i]);
+    }
+    info.control = c;
+}
+
 }  // namespace
+
+uint64_t shader_epoch() { return g_shader_epoch.load(std::memory_order_acquire); }
 
 const ShaderInfo* shader_by_hash(const std::string& hash) {
     Cache& k = cache();
     std::lock_guard lk(k.lock);
     auto it = k.by_hash.find(hash);
     return it == k.by_hash.end() ? nullptr : it->second.get();
+}
+
+const ShaderInfo* shader_for_prewarm(const std::string& hash) {
+    if (hash.empty()) return nullptr;
+    Cache& k = cache();
+    bool has_res = false;
+    std::string res_str;
+    {
+        std::lock_guard lk(k.lock);
+        ensure_resources_loaded(k);
+        if (auto it = k.by_hash.find(hash); it != k.by_hash.end()) return it->second.get();
+        auto res = k.resources.find(hash);
+        if (res != k.resources.end()) {
+            has_res = true;
+            res_str = res->second;
+        }
+    }
+    std::string dir = plat::data_root() + "/spirv/";
+    std::string bytes;
+    if (!read_whole(dir + hash + ".spv", bytes) || bytes.size() % 4 || bytes.empty()) {
+        std::lock_guard lk(k.lock);
+        k.by_hash.emplace(hash, nullptr);
+        return nullptr;
+    }
+    std::vector<uint32_t> words(bytes.size() / 4);
+    std::memcpy(words.data(), bytes.data(), bytes.size());
+    auto info = std::make_unique<ShaderInfo>();
+    info->hash = hash;
+    std::string error;
+    if (!reflect_spirv(words.data(), words.size(), info->refl, &error)) {
+        std::lock_guard lk(k.lock);
+        k.by_hash.emplace(hash, nullptr);
+        return nullptr;
+    }
+    info->stage = info->refl.stage;
+    info->spirv = std::move(words);
+    if (info->stage == ShaderStage::Compute) {
+        for (int i = 0; i < 3; i++) info->local_size[i] = std::max<uint32_t>(1, info->refl.local_size[i]);
+    }
+    if (has_res) {
+        std::vector<HarnessResource> list;
+        if (!parse_harness_resources(res_str, list) || !apply_harness(info->refl, list)) {
+            std::lock_guard lk(k.lock);
+            k.by_hash.emplace(hash, nullptr);
+            return nullptr;
+        }
+    }
+    info->dynamic_uniforms = dynamic_uniform_bindings(info.get());
+    info->written_storage = written_storage_bindings(info.get());
+    info->masks_known = true;
+
+    std::lock_guard lk(k.lock);
+    auto [it, inserted] = k.by_hash.emplace(hash, nullptr);
+    if (inserted) {
+        it->second = std::move(info);
+        g_shader_epoch.fetch_add(1, std::memory_order_release);
+    }
+    return it->second.get();
 }
 
 const ShaderInfo* shader_for(uint64_t code_host, uint64_t control) {
@@ -253,44 +338,52 @@ const ShaderInfo* shader_for(uint64_t code_host, uint64_t control) {
     std::string hash = shader_hash(code, c.code_size);
 
     Cache& k = cache();
-    std::lock_guard lk(k.lock);
-    if (auto it = k.by_hash.find(hash); it != k.by_hash.end()) return it->second.get();
-    std::string dir = plat::data_root() + "/spirv/";
-    if (!k.resources_loaded) {
-        k.resources_loaded = true;
-        std::string text;
-        if (read_whole(dir + "results.tsv", text))
-            log("nvn: %zu shader records from %sresults.tsv", parse_results_tsv(text, k.resources), dir.c_str());
-        else
-            log("nvn: no %sresults.tsv: storage buffers of translated shaders cannot be bound", dir.c_str());
+    bool has_res = false;
+    std::string res_str;
+    {
+        std::lock_guard lk(k.lock);
+        ensure_resources_loaded(k);
+        if (auto it = k.by_hash.find(hash); it != k.by_hash.end()) {
+            if (it->second) populate_control(*it->second, code, c);
+            return it->second.get();
+        }
+        auto res = k.resources.find(hash);
+        if (res != k.resources.end()) {
+            has_res = true;
+            res_str = res->second;
+        }
     }
-    std::unique_ptr<ShaderInfo>& slot = k.by_hash[hash];
+    std::string dir = plat::data_root() + "/spirv/";
     std::string bytes;
     if (!read_whole(dir + hash + ".spv", bytes) || bytes.size() % 4 || bytes.empty()) {
-        log("nvn: shader %s (code %#x bytes, control %llx): no %s%s.spv", hash.c_str(), c.code_size,
-            (unsigned long long)control, dir.c_str(), hash.c_str());
-        if (std::getenv("NX_DUMP_SHADER_MISSES")) {  // for translating shaders the offline inventory missed
-            std::string out = plat::data_root() + "/shader_misses/";
-            plat::make_dirs(out);
-            if (FILE* f = plat::fopen_utf8(out + "code_" + hash + ".bin", "wb")) {
-                std::fwrite(code, 1, c.code_size, f);
-                std::fclose(f);
-            }
-            if (FILE* f = plat::fopen_utf8(out + "ctrl_" + hash + ".bin", "wb")) {
-                std::fwrite(ctrl, 1, 0x880, f);
-                std::fclose(f);
+        std::lock_guard lk(k.lock);
+        if (k.by_hash.emplace(hash, nullptr).second) {
+            log("nvn: shader %s (code %#x bytes, control %llx): no %s%s.spv", hash.c_str(), c.code_size,
+                (unsigned long long)control, dir.c_str(), hash.c_str());
+            if (std::getenv("NX_DUMP_SHADER_MISSES")) {  // for translating shaders the offline inventory missed
+                std::string out = plat::data_root() + "/shader_misses/";
+                plat::make_dirs(out);
+                if (FILE* f = plat::fopen_utf8(out + "code_" + hash + ".bin", "wb")) {
+                    std::fwrite(code, 1, c.code_size, f);
+                    std::fclose(f);
+                }
+                if (FILE* f = plat::fopen_utf8(out + "ctrl_" + hash + ".bin", "wb")) {
+                    std::fwrite(ctrl, 1, 0x880, f);
+                    std::fclose(f);
+                }
             }
         }
         return nullptr;
     }
     std::vector<uint32_t> words(bytes.size() / 4);
     std::memcpy(words.data(), bytes.data(), bytes.size());
-    auto res = k.resources.find(hash);
     auto info = std::make_unique<ShaderInfo>();
     std::string error;
-    const std::string* record = res == k.resources.end() ? nullptr : &res->second;
+    const std::string* record = has_res ? &res_str : nullptr;
     if (!make_shader_info(code, ctrl, std::move(words), record, *info, &error)) {
         log("nvn: shader %s: %s", hash.c_str(), error.c_str());
+        std::lock_guard lk(k.lock);
+        k.by_hash.emplace(hash, nullptr);
         return nullptr;
     }
     if (g_trace)
@@ -300,8 +393,16 @@ const ShaderInfo* shader_for(uint64_t code_host, uint64_t control) {
     info->dynamic_uniforms = dynamic_uniform_bindings(info.get());
     info->written_storage = written_storage_bindings(info.get());
     info->masks_known = true;
-    slot = std::move(info);
-    return slot.get();
+
+    std::lock_guard lk(k.lock);
+    auto [it, inserted] = k.by_hash.emplace(hash, nullptr);
+    if (inserted) {
+        it->second = std::move(info);
+        g_shader_epoch.fetch_add(1, std::memory_order_release);
+    } else if (it->second) {
+        populate_control(*it->second, code, c);
+    }
+    return it->second.get();
 }
 
 #endif  // NX_SHADERS_STANDALONE

@@ -258,11 +258,11 @@ void GetSixAxisSensorHandles(CPU& c) {
     uint64_t out = c.x[0];
     int32_t count = int32_t(c.x[1]);
     if (out && count > 0) {
-        st<uint32_t>(out, 1);
-        c.x[0] = 1;
-    } else {
-        c.x[0] = 0;
+        for (int32_t i = 0; i < count; i++) {
+            st<uint32_t>(out + i * 4, uint32_t(i + 1));
+        }
     }
+    c.x[0] = 0;  // nn::Result: 0 is ResultSuccess
 }
 
 void GetSixAxisSensorState(CPU& c) {

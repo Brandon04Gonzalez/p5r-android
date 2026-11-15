@@ -90,8 +90,9 @@ const Cpus& cpus() {
             // SELinux blocked cpufreq sysfs access: fall back to standard ARM big.LITTLE / DynamIQ topology
             x.cluster.clear();
             if (n == 8) {
-                x.cluster = {0, 0, 0, 0, 1, 1, 1, 2};
-                x.clusters = 3;
+                // On 8-core MediaTek (Helio G99) / Qualcomm SoCs: cores 0-5 are LITTLE (cluster 0), cores 6-7 are BIG (cluster 1)
+                x.cluster = {0, 0, 0, 0, 0, 0, 1, 1};
+                x.clusters = 2;
             } else {
                 for (long k = 0; k < n; k++)
                     x.cluster.push_back(k < n / 2 ? 0 : 1);

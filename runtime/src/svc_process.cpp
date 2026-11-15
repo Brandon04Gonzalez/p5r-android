@@ -8,6 +8,7 @@
 #include <nx/runtime.h>
 
 #include "kernel.h"
+#include "platform.h"
 
 namespace nx {
 
@@ -78,7 +79,7 @@ uint32_t map_transfer_memory(uint32_t handle, uint64_t addr, uint64_t size) {
     auto tm = std::dynamic_pointer_cast<KTransferMemory>(handle_get(handle));
     if (!tm) return 0xE401;
     commit(addr, size);
-    std::memcpy(reinterpret_cast<void*>(addr), reinterpret_cast<void*>(tm->addr), std::min(size, tm->size));
+    plat::fast_memcpy(reinterpret_cast<void*>(addr), reinterpret_cast<void*>(tm->addr), std::min(size, tm->size));
     vm_set(addr, size, kMemAlias, 3);
     return 0;
 }
@@ -86,7 +87,7 @@ uint32_t map_transfer_memory(uint32_t handle, uint64_t addr, uint64_t size) {
 // UnmapTransferMemory(handle, addr, size): the contents go back to the owner.
 uint32_t unmap_transfer_memory(uint32_t handle, uint64_t addr, uint64_t size) {
     auto tm = std::dynamic_pointer_cast<KTransferMemory>(handle_get(handle));
-    if (tm) std::memcpy(reinterpret_cast<void*>(tm->addr), reinterpret_cast<void*>(addr), std::min(size, tm->size));
+    if (tm) plat::fast_memcpy(reinterpret_cast<void*>(tm->addr), reinterpret_cast<void*>(addr), std::min(size, tm->size));
     decommit(addr, size);
     vm_set(addr, size, kMemFree, 0);
     return 0;
@@ -103,7 +104,7 @@ void set_tls_template(uint64_t start, uint64_t end) {
 }
 
 void init_tls_block(uint64_t block) {
-    if (!g_tls_template.empty()) std::memcpy(reinterpret_cast<void*>(block + 0x10), g_tls_template.data(), g_tls_template.size());
+    if (!g_tls_template.empty()) plat::fast_memcpy(reinterpret_cast<void*>(block + 0x10), g_tls_template.data(), g_tls_template.size());
 }
 
 }  // namespace nx

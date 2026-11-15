@@ -32,6 +32,11 @@ void sleep_ns(int64_t ns);
 void yield();
 void set_thread_name(const char* name);
 int64_t current_thread_id();  // the host OS thread id
+void pin_current_thread_to_big_cores(const char* thread_name);
+void pin_current_thread_to_core(int core_id, const char* thread_name);
+void pin_current_thread_to_little_cores(const char* thread_name);
+void reset_current_thread_affinity(const char* thread_name);
+void set_thread_priority(int priority);
 // Samples the given threads (thread CPU time, 1 kHz) for `seconds`: host pc, a few host frames and the guest lr
 // (read through guest_lr[k], the thread's x30). Writes one line per sample to `path`:
 //   <tid> <guest lr> <module>:<offset> [<module>:<offset> ...]   (host pc first, then callers)
@@ -46,6 +51,8 @@ int fseek64(FILE* f, int64_t off, int origin);
 // Positional read, safe with other threads reading the same FILE (no shared file position). Bytes read.
 uint64_t read_at(FILE* f, int64_t off, void* buf, uint64_t size);
 bool make_dirs(const std::string& path);
+const char* get_pipeline_cache_path();
+void fast_memcpy(void* dst, const void* src, size_t n);
 
 // ---- output ----
 void log_line(const char* line);  // stderr / logcat
@@ -152,3 +159,12 @@ const char* vulkan_surface_extension();
 int vulkan_create_surface(void* instance, void* native_window, uint64_t* surface, void* gipa);
 
 }  // namespace nx::plat
+
+namespace nx::platform {
+using nx::plat::pin_current_thread_to_big_cores;
+using nx::plat::pin_current_thread_to_core;
+using nx::plat::pin_current_thread_to_little_cores;
+using nx::plat::place_fast_cores;
+using nx::plat::reset_current_thread_affinity;
+using nx::plat::set_thread_priority;
+}

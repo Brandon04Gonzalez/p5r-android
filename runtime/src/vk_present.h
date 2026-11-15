@@ -13,7 +13,7 @@ namespace nx::vk {
 class PresentPass {
 public:
     // Pipeline and one sampling view per game image. False: not available (the caller copies instead).
-    bool init(VkDevice device, VkFormat format, const std::vector<VkImage>& game_images, bool scaled);
+    bool init(VkDevice device, VkFormat format, const std::vector<VkImage>& game_images, bool scaled, VkPipelineCache cache = VK_NULL_HANDLE);
     // Views and framebuffers of the host images, and the mapping for `transform` (the swapchain's preTransform).
     bool set_targets(const std::vector<VkImage>& host_images, VkExtent2D extent, VkSurfaceTransformFlagBitsKHR transform);
     // Draws game image `src` into host image `dst` (host image: undefined -> present src; game image: present src

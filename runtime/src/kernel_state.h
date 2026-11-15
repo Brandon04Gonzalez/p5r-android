@@ -18,6 +18,7 @@ constexpr uint32_t kPseudoCurrentProcess = 0xFFFF8001;
 
 extern std::recursive_mutex g_k;              // the "kernel lock"
 extern std::vector<KThread*> g_sync_waiters;  // threads in WaitSynchronization: woken by any change of waitable state
+extern std::atomic<uint32_t> g_sync_waiter_count;
 extern std::unordered_map<uint32_t, std::shared_ptr<KObject>> g_handles;
 extern uint32_t g_next_handle;
 extern std::atomic<uint64_t> g_next_thread_id;

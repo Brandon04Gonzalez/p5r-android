@@ -19,23 +19,27 @@ using namespace nx::vk;
 
 namespace {
 
+static int s_trace_cube_draws_traced = 0;
+static uint64_t s_trace_draws_traced = 0;
+static std::map<const ShaderInfo*, int> s_trace_skin_seen;
+static int s_trace_skin_total = 0;
+
 // NX_TRACE_CUBE_DRAWS=<first frame>: the draws into cube and cube-array targets from that frame on (3000 at most),
 // what makes the light probes. A scene start writes the 6 faces of one level at once (6 colour targets). Per sampled
 // texture: `rt` GPU-written, `up` only uploaded from guest memory (GPU writes through an older object are not there),
 // `undef` never written (reads black), `SELF` an image this draw renders into (a mip chain reading the level above).
 void trace_cube_draw(const Targets& t, const ShaderInfo* vs, const ShaderInfo* fs, const TexBindings& tex_bindings,
                      const std::vector<uint64_t>& handles) {
-    static const char* env = std::getenv("NX_TRACE_CUBE_DRAWS");
-    static const uint64_t from = env ? std::strtoull(env, nullptr, 10) : 0;
-    static int traced = 0;
-    if (!env || traced >= 3000 || g_frame < from) return;
+    static const char* const s_trace_cube_draws_env = std::getenv("NX_TRACE_CUBE_DRAWS");
+    static const uint64_t s_trace_cube_draws_from = s_trace_cube_draws_env ? std::strtoull(s_trace_cube_draws_env, nullptr, 10) : 0;
+    if (!s_trace_cube_draws_env || s_trace_cube_draws_traced >= 3000 || g_frame < s_trace_cube_draws_from) return;
     GpuImage* targets[8] = {};
     bool cube = false;
     for (uint32_t k = 0; k < t.color_count && k < 8; k++)
         if ((targets[k] = t.colors[k] ? image_of(t.colors[k]) : nullptr))
             cube |= targets[k]->view_type == VK_IMAGE_VIEW_TYPE_CUBE || targets[k]->view_type == VK_IMAGE_VIEW_TYPE_CUBE_ARRAY;
     if (!cube) return;
-    traced++;
+    s_trace_cube_draws_traced++;
     std::string tex;
     for (size_t k = 0; k < tex_bindings.size(); k++) {
         uint64_t texture = 0;
@@ -446,18 +450,16 @@ void trace_draw(const Targets& t, uint32_t mode, bool indexed, const Cmd& c, con
         debug_hud_note(t.color_count ? t.colors[0] : 0, sampled);
     }
     // NX_TRACE_DRAWS=<first draw>: logs 80 draws from there.
-    static const char* trace_env = std::getenv("NX_TRACE_DRAWS");
-    static const uint64_t trace_from = trace_env ? std::strtoull(trace_env, nullptr, 10) : 0;
-    // NX_TRACE_TARGET=<hex NVNtexture*>: only draws into that color target.
-    static const char* target_env = std::getenv("NX_TRACE_TARGET");
-    static const uint64_t trace_target = target_env ? std::strtoull(target_env, nullptr, 16) : 0;
-    static uint64_t traced = 0;
-    // NX_TRACE_FS_HASH=<hash>[,<hash>...]: only draws with those fragment shaders.
-    static const char* fs_env = std::getenv("NX_TRACE_FS_HASH");
-    static const uint64_t trace_count = std::getenv("NX_TRACE_COUNT") ? std::strtoull(std::getenv("NX_TRACE_COUNT"), nullptr, 10) : 80;
-    if (trace_env && g_stats.done >= trace_from && traced < trace_count && (!trace_target || t.colors[0] == trace_target) &&
-        (!fs_env || (fs && std::strstr(fs_env, fs->hash.c_str())))) {  // one hash or a comma list
-        traced++;
+    static const char* const s_trace_draws_env = std::getenv("NX_TRACE_DRAWS");
+    static const uint64_t s_trace_draws_from = s_trace_draws_env ? std::strtoull(s_trace_draws_env, nullptr, 10) : 0;
+    static const char* const s_trace_target_env = std::getenv("NX_TRACE_TARGET");
+    static const uint64_t s_trace_target = s_trace_target_env ? std::strtoull(s_trace_target_env, nullptr, 16) : 0;
+    static const char* const s_trace_fs_env = std::getenv("NX_TRACE_FS_HASH");
+    static const uint64_t s_trace_count = std::getenv("NX_TRACE_COUNT") ? std::strtoull(std::getenv("NX_TRACE_COUNT"), nullptr, 10) : 80;
+    if (s_trace_draws_env && g_stats.done >= s_trace_draws_from && s_trace_draws_traced < s_trace_count &&
+        (!s_trace_target || t.colors[0] == s_trace_target) &&
+        (!s_trace_fs_env || (fs && std::strstr(s_trace_fs_env, fs->hash.c_str())))) {  // one hash or a comma list
+        s_trace_draws_traced++;
         // NX_TRACE_VERTS=1: the first 3 vertices of stream 0 as floats and halves (8 words each at most).
         if (std::getenv("NX_TRACE_VERTS") && !g_state.streams.empty())
             if (const Range& vb = g_state.vertex_buffers[0]; vb.address)
@@ -629,16 +631,14 @@ uint32_t read_uint(const uint8_t* p, uint32_t size, uint32_t k) {
 }  // namespace
 
 void trace_skin(bool indexed, const Cmd& c, const ShaderInfo* vs, const ShaderInfo* fs) {
-    static const bool on = std::getenv("NX_TRACE_SKIN") != nullptr;
-    static std::map<const ShaderInfo*, int> seen;
-    static int total = 0;
-    if (!on || !vs || total >= 60) return;
+    static const bool s_trace_skin_on = std::getenv("NX_TRACE_SKIN") != nullptr;
+    if (!s_trace_skin_on || !vs || s_trace_skin_total >= 60) return;
     int int_loc = -1;
     for (const ShaderIo& in : vs->refl.inputs)
         if (in.location < g_state.attribs.size() && int_layout(g_state.attribs[in.location].format).first)
             int_loc = int(in.location);
-    if (int_loc < 0 || seen[vs]++ >= 3) return;
-    total++;
+    if (int_loc < 0 || s_trace_skin_seen[vs]++ >= 3) return;
+    s_trace_skin_total++;
     uint32_t count = uint32_t(indexed ? c.i[0] : c.i[1]);
     log("skin: vs %s fs %s %s count %u base %d first %d x%d", vs->hash.c_str(), fs ? fs->hash.c_str() : "-",
         indexed ? "indexed" : "arrays", count, indexed ? c.i[1] : 0, indexed ? 0 : c.i[0], c.i[3]);
@@ -724,22 +724,44 @@ void trace_compute_once(const ShaderInfo* cs, uint32_t x, uint32_t y, uint32_t z
         }
 }
 
+namespace {
+struct DebugShaderOverrides {
+    std::string swap_fs;
+    std::string skip_fs;
+    bool active = false;
+};
+const DebugShaderOverrides& debug_overrides_cfg() {
+    static const DebugShaderOverrides cfg = [] {
+        DebugShaderOverrides d;
+        if (const char* e = std::getenv("NX_SWAP_FS")) d.swap_fs = e;
+        if (const char* e = std::getenv("NX_SKIP_FS")) d.skip_fs = e;
+        d.active = !d.swap_fs.empty() || !d.skip_fs.empty();
+        return d;
+    }();
+    return cfg;
+}
+}  // namespace
+
+bool debug_shader_overrides_active() {
+    return debug_overrides_cfg().active;
+}
+
 // Debug overrides of a draw's fragment shader; false: drop the draw.
 bool debug_shader_overrides(const std::vector<const ShaderInfo*>*& shaders, const ShaderInfo*& fs,
                             std::vector<const ShaderInfo*>& swapped) {
+    const auto& cfg = debug_overrides_cfg();
+    if (!cfg.active) return true;
     // NX_SWAP_FS=<from>:<to>: draws with fragment shader <from> use <to> instead (loaded already), to see what a
     // shader's geometry covers or what its textures hold.
-    static const std::string swap = std::getenv("NX_SWAP_FS") ? std::getenv("NX_SWAP_FS") : "";
-    if (!swap.empty() && fs && swap.compare(0, 16, fs->hash) == 0 && swap.size() > 17)
-        if (const ShaderInfo* to = shader_by_hash(swap.substr(17))) {
+    if (!cfg.swap_fs.empty() && fs && cfg.swap_fs.compare(0, 16, fs->hash) == 0 && cfg.swap_fs.size() > 17)
+        if (const ShaderInfo* to = shader_by_hash(cfg.swap_fs.substr(17))) {
             swapped = *shaders;
             std::replace(swapped.begin(), swapped.end(), fs, to);
             shaders = &swapped;
             fs = to;
         }
     // NX_SKIP_FS=<hash>,<hash>: draws with those fragment shaders are dropped (to measure what they cost).
-    static const std::string skip = std::getenv("NX_SKIP_FS") ? std::getenv("NX_SKIP_FS") : "";
-    return skip.empty() || !fs || skip.find(fs->hash) == std::string::npos;
+    return cfg.skip_fs.empty() || !fs || cfg.skip_fs.find(fs->hash) == std::string::npos;
 }
 
 }  // namespace nx::nvn::replay

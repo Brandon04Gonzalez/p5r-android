@@ -18,6 +18,7 @@
 #include <sched.h>
 #include <signal.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
 #include <time.h>
 #include <malloc.h>
 #include <unistd.h>
@@ -50,6 +51,10 @@
 #if NX_NCE
 #include "nce/nce.h"
 #endif
+
+namespace nx::nvn {
+void pipeline_cache_save();
+}
 
 #ifndef MAP_FIXED_NOREPLACE
 #define MAP_FIXED_NOREPLACE 0x100000
@@ -101,6 +106,9 @@ struct ThreadStart {
 };
 
 static void* thread_entry(void* p) {
+    if (const char* e = getenv("NX_MALLOC_TUNE"); !(e && e[0] == '0')) {
+        mallopt(M_BIONIC_ZERO_INIT, 1);
+    }
     nx::plat::place_fast_cores();
     ThreadStart s = *static_cast<ThreadStart*>(p);
     delete static_cast<ThreadStart*>(p);
@@ -142,6 +150,121 @@ void yield() {
 }
 void set_thread_name(const char* name) { pthread_setname_np(pthread_self(), name); }
 int64_t current_thread_id() { return gettid(); }
+
+namespace {
+struct CpuMasks {
+    long num_cores = 0;
+    cpu_set_t big{};
+    cpu_set_t little{};
+    bool valid = false;
+};
+
+const CpuMasks& get_cpu_masks() {
+    static const CpuMasks masks = [] {
+        CpuMasks m{};
+        m.num_cores = sysconf(_SC_NPROCESSORS_CONF);
+        if (m.num_cores < 8) return m;
+        int n = int(std::min<long>(m.num_cores, CPU_SETSIZE));
+        unsigned long freqs[CPU_SETSIZE] = {};
+        unsigned long min_f = ~0ul, max_f = 0;
+        bool any_freq = false;
+        for (int i = 0; i < n; ++i) {
+            char path[96];
+            std::snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", i);
+            FILE* f = std::fopen(path, "r");
+            if (f) {
+                unsigned long khz = 0;
+                if (std::fscanf(f, "%lu", &khz) == 1 && khz > 0) {
+                    freqs[i] = khz;
+                    min_f = std::min(min_f, khz);
+                    max_f = std::max(max_f, khz);
+                    any_freq = true;
+                }
+                std::fclose(f);
+            }
+        }
+        CPU_ZERO(&m.big);
+        CPU_ZERO(&m.little);
+        if (any_freq && max_f > min_f) {
+            unsigned long threshold = min_f + (max_f - min_f) / 4;
+            for (int i = 0; i < n; ++i) {
+                if (freqs[i] > threshold) CPU_SET(i, &m.big);
+                else CPU_SET(i, &m.little);
+            }
+            if (CPU_COUNT(&m.big) > 0 && CPU_COUNT(&m.little) > 0) {
+                m.valid = true;
+                return m;
+            }
+        }
+        // Fallback for 6+2 8-core SoCs if sysfs frequencies are unreadable
+        CPU_ZERO(&m.big);
+        CPU_ZERO(&m.little);
+        for (int i = 0; i < 6; ++i) CPU_SET(i, &m.little);
+        CPU_SET(6, &m.big);
+        CPU_SET(7, &m.big);
+        m.valid = true;
+        return m;
+    }();
+    return masks;
+}
+}  // namespace
+
+void pin_current_thread_to_big_cores(const char* thread_name) {
+    const CpuMasks& m = get_cpu_masks();
+    if (!m.valid) return;
+
+    int rc = sched_setaffinity(0, sizeof(cpu_set_t), &m.big);
+    if (rc != 0) {
+        __android_log_print(ANDROID_LOG_WARN, "p5r", "Failed to pin thread '%s': errno %d", thread_name, rc);
+    }
+}
+
+void pin_current_thread_to_core(int core_id, const char* thread_name) {
+    long num_cores = sysconf(_SC_NPROCESSORS_CONF);
+    if (core_id < 0 || core_id >= num_cores) return;
+
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    CPU_SET(core_id, &cpuset);
+
+    int rc = sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+    if (rc != 0) {
+        __android_log_print(ANDROID_LOG_WARN, "p5r", "Failed to pin thread '%s' to Core %d: errno %d", thread_name, core_id, rc);
+    }
+}
+
+void pin_current_thread_to_little_cores(const char* thread_name) {
+    const CpuMasks& m = get_cpu_masks();
+    if (!m.valid) return;
+
+    int rc = sched_setaffinity(0, sizeof(cpu_set_t), &m.little);
+    if (rc != 0) {
+        __android_log_print(ANDROID_LOG_WARN, "p5r", "Failed to pin thread '%s' to Little Cores: errno %d", thread_name, rc);
+    }
+}
+
+void reset_current_thread_affinity(const char* thread_name) {
+    long num_cores = sysconf(_SC_NPROCESSORS_CONF);
+    if (num_cores <= 0) return;
+
+    cpu_set_t cpuset;
+    CPU_ZERO(&cpuset);
+    for (int i = 0; i < num_cores; ++i) {
+        CPU_SET(i, &cpuset);
+    }
+
+    int rc = sched_setaffinity(0, sizeof(cpu_set_t), &cpuset);
+    if (rc != 0) {
+        __android_log_print(ANDROID_LOG_WARN, "p5r", "Failed to reset affinity for thread '%s': errno %d", thread_name, rc);
+    }
+}
+
+void set_thread_priority(int priority) {
+    int rc = setpriority(PRIO_PROCESS, 0, priority);
+    if (rc != 0) {
+        __android_log_print(ANDROID_LOG_WARN, "p5r", "Failed to set thread priority %d: errno %d", priority, errno);
+    }
+}
 
 // ---- sampling profiler (simpleperf is not always allowed on retail phones) ------------------------------------
 
@@ -269,6 +392,14 @@ void log_line(const char* line) { __android_log_write(ANDROID_LOG_INFO, nx::game
 
 std::string data_root() { return g_root; }
 
+const char* get_pipeline_cache_path() {
+    static std::string path;
+    if (path.empty() && g_app && g_app->activity && g_app->activity->internalDataPath) {
+        path = std::string(g_app->activity->internalDataPath) + "/vk_pipeline_cache.bin";
+    }
+    return path.empty() ? nullptr : path.c_str();
+}
+
 // The device's locale (Settings > System > Languages) as "es-MX".
 std::string system_language() {
     if (!g_app || !g_app->config) return "";
@@ -333,6 +464,7 @@ void window_size(uint32_t& w, uint32_t& h) {
     auto parse_target_h = [](const std::string& s) -> uint32_t {
         if (s == "360p" || s == "360") return 360;
         if (s == "480p" || s == "480") return 480;
+        if (s == "540p" || s == "540") return 720;
         if (s == "720p" || s == "720") return 720;
         if (s == "1080p" || s == "1080") return 1080;
         unsigned cw = 0, ch = 0;
@@ -402,27 +534,149 @@ float default_render_scale() {
 // ---- Vulkan ---------------------------------------------------------------------------------------------------
 
 #if defined(NX_CUSTOM_DRIVER)
-// A GPU driver the user imported (the launcher's "Import GPU driver", e.g. Mesa Turnip for Adreno), opened with
-// libadrenotools in place of the system driver. <files>/gpu_driver/active.txt holds the driver's file name; without
-// it, or with NX_SYSTEM_DRIVER=1 in config.txt, or if the driver fails to open, the system libvulkan.so is used.
+// A GPU driver the user imported (the launcher's "Import GPU driver", e.g. Turnip for Adreno or custom/PanVK for Mali),
+// opened with libadrenotools in place of the system driver, or directly via dlopen for standalone ICDs (Mali/PanVK).
+// <files>/gpu_driver/active.txt holds the driver's file name; without it, or with NX_SYSTEM_DRIVER=1 in config.txt,
+// or if the driver fails to open, the system libvulkan.so is used.
+static void* g_custom_gipa = nullptr;
+
 void* open_custom_vulkan() {
-    if (const char* e = getenv("NX_SYSTEM_DRIVER"); e && e[0] == '1') return nullptr;
-    if (g_internal_dir.empty()) return nullptr;
-    const std::string dir = g_internal_dir + "/gpu_driver/";
+    if (const char* e = getenv("NX_SYSTEM_DRIVER"); e && e[0] == '1') {
+        nx::log("gpu driver: NX_SYSTEM_DRIVER=1 set, using system driver");
+        return nullptr;
+    }
+
+    std::string dir;
+    if (const char* env_d = getenv("NX_GPU_DRIVER_DIR"); env_d && env_d[0]) {
+        dir = env_d;
+    } else if (!g_internal_dir.empty()) {
+        dir = g_internal_dir + "/gpu_driver";
+    } else if (g_app && g_app->activity && g_app->activity->internalDataPath) {
+        dir = std::string(g_app->activity->internalDataPath) + "/gpu_driver";
+    } else if (const char* env_int = getenv("NX_INTERNAL_DIR"); env_int && env_int[0]) {
+        dir = std::string(env_int) + "/gpu_driver";
+    }
+    if (dir.empty()) {
+        nx::log("gpu driver: internal directory unknown, using system driver");
+        return nullptr;
+    }
+    if (dir.back() != '/') dir += '/';
+
     std::string name;
-    {
+    if (const char* env_n = getenv("NX_GPU_DRIVER_NAME"); env_n && env_n[0]) {
+        name = env_n;
+    } else {
         std::ifstream f(dir + "active.txt");
         std::getline(f, name);
     }
     while (!name.empty() && (name.back() == '\r' || name.back() == '\n' || name.back() == ' ')) name.pop_back();
-    if (name.empty()) return nullptr;
+    if (name.empty() || name == "system" || name == "default") {
+        nx::log("gpu driver: active driver empty/system, using system driver");
+        return nullptr;
+    }
+
+    std::string full_path = dir + name;
+    if (access(full_path.c_str(), R_OK) != 0) {
+        nx::log("gpu driver: active driver not readable: %s (errno %d)", full_path.c_str(), errno);
+        return nullptr;
+    }
+
+    // Determine whether this driver is a Mali / PanVK / Mesa ICD
+    bool is_mali_driver = false;
+    std::string lower_name = name;
+    std::transform(lower_name.begin(), lower_name.end(), lower_name.begin(), ::tolower);
+    if (lower_name.find("pan") != std::string::npos ||
+        lower_name.find("mali") != std::string::npos ||
+        lower_name.find("bifrost") != std::string::npos ||
+        lower_name.find("valhall") != std::string::npos ||
+        lower_name.find("midgard") != std::string::npos) {
+        is_mali_driver = true;
+    }
+
+    {
+        std::ifstream meta_file(dir + "meta.json");
+        if (meta_file.is_open()) {
+            std::string meta_content((std::istreambuf_iterator<char>(meta_file)),
+                                      std::istreambuf_iterator<char>());
+            std::string lower_meta = meta_content;
+            std::transform(lower_meta.begin(), lower_meta.end(), lower_meta.begin(), ::tolower);
+            if (lower_meta.find("panvk") != std::string::npos ||
+                lower_meta.find("panfrost") != std::string::npos ||
+                lower_meta.find("mali") != std::string::npos) {
+                is_mali_driver = true;
+            }
+        }
+    }
+
+    void* h = nullptr;
+    void* gipa = nullptr;
+
+    if (is_mali_driver) {
+        nx::log("gpu driver: opening Mali/PanVK ICD directly: %s", full_path.c_str());
+        h = dlopen(full_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (h) {
+            gipa = dlsym(h, "vk_icdGetInstanceProcAddr");
+            if (!gipa) gipa = dlsym(h, "vkGetInstanceProcAddr");
+            if (gipa) {
+                nx::log("gpu driver: direct Mali ICD opened successfully, gipa=%p", gipa);
+                g_custom_gipa = gipa;
+                return h;
+            } else {
+                nx::log("gpu driver: direct dlopen succeeded but neither vk_icdGetInstanceProcAddr nor vkGetInstanceProcAddr found");
+                dlclose(h);
+                h = nullptr;
+            }
+        } else {
+            nx::log("gpu driver: direct dlopen of %s failed: %s", full_path.c_str(), dlerror());
+        }
+    }
+
+    // Try adrenotools for Adreno/Turnip or as fallback
     Dl_info info{};
-    if (!dladdr(reinterpret_cast<void*>(&open_custom_vulkan), &info) || !info.dli_fname) return nullptr;
-    std::string libdir = info.dli_fname;  // .../lib/arm64/libp5r.so: the hook libraries are next to it
-    libdir = libdir.substr(0, libdir.rfind('/') + 1);
-    nx::log("gpu driver: opening custom driver %s%s (hooks in %s)", dir.c_str(), name.c_str(), libdir.c_str());
-    void* h = adrenotools_open_libvulkan(RTLD_NOW | RTLD_LOCAL, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, libdir.c_str(),
-                                         dir.c_str(), name.c_str(), nullptr, nullptr);
+    if (dladdr(reinterpret_cast<void*>(&open_custom_vulkan), &info) && info.dli_fname) {
+        std::string libdir = info.dli_fname;
+        libdir = libdir.substr(0, libdir.rfind('/') + 1);
+        nx::log("gpu driver: trying adrenotools for %s (hooks in %s)", full_path.c_str(), libdir.c_str());
+        h = adrenotools_open_libvulkan(RTLD_NOW | RTLD_LOCAL, ADRENOTOOLS_DRIVER_CUSTOM, nullptr, libdir.c_str(),
+                                       dir.c_str(), name.c_str(), nullptr, nullptr);
+        if (h) {
+            gipa = dlsym(h, "vkGetInstanceProcAddr");
+            if (!gipa) gipa = dlsym(h, "vk_icdGetInstanceProcAddr");
+            if (gipa) {
+                nx::log("gpu driver: adrenotools custom driver opened successfully, gipa=%p", gipa);
+                g_custom_gipa = gipa;
+                return h;
+            } else {
+                nx::log("gpu driver: adrenotools opened library but no GIPA found");
+                dlclose(h);
+                h = nullptr;
+            }
+        } else {
+            nx::log("gpu driver: adrenotools returned null");
+        }
+    }
+
+    // Generic direct dlopen fallback if neither was successful
+    if (!h) {
+        nx::log("gpu driver: trying generic direct dlopen fallback: %s", full_path.c_str());
+        h = dlopen(full_path.c_str(), RTLD_NOW | RTLD_LOCAL);
+        if (h) {
+            gipa = dlsym(h, "vkGetInstanceProcAddr");
+            if (!gipa) gipa = dlsym(h, "vk_icdGetInstanceProcAddr");
+            if (gipa) {
+                nx::log("gpu driver: generic direct dlopen succeeded, gipa=%p", gipa);
+                g_custom_gipa = gipa;
+                return h;
+            } else {
+                nx::log("gpu driver: generic direct dlopen has no GIPA symbol");
+                dlclose(h);
+                h = nullptr;
+            }
+        } else {
+            nx::log("gpu driver: generic direct dlopen of %s failed: %s", full_path.c_str(), dlerror());
+        }
+    }
+
     nx::log("gpu driver: %s", h ? "custom driver opened" : "failed, the system driver is used");
     return h;
 }
@@ -430,13 +684,21 @@ void* open_custom_vulkan() {
 
 void* vulkan_get_instance_proc_addr() {
     static void* gipa = []() -> void* {  // once: the custom driver is opened only once
-        void* lib = nullptr;
 #if defined(NX_CUSTOM_DRIVER)
-        lib = open_custom_vulkan();
-        if (lib && !dlsym(lib, "vkGetInstanceProcAddr")) lib = nullptr;
+        void* custom_lib = open_custom_vulkan();
+        if (custom_lib && g_custom_gipa) {
+            return g_custom_gipa;
+        }
 #endif
-        if (!lib) lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-        return lib ? dlsym(lib, "vkGetInstanceProcAddr") : nullptr;
+        nx::log("gpu driver: loading system libvulkan.so");
+        void* lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
+        if (!lib) {
+            nx::log("gpu driver: failed to open system libvulkan.so: %s", dlerror());
+            return nullptr;
+        }
+        void* p = dlsym(lib, "vkGetInstanceProcAddr");
+        if (!p) p = dlsym(lib, "vk_icdGetInstanceProcAddr");
+        return p;
     }();
     return gipa;
 }
@@ -516,6 +778,8 @@ void crash(int sig, siginfo_t* info, void* uc) {
 }
 
 void game_thread(void*) {
+    nx::plat::set_thread_priority(-4);
+    nx::plat::perf_hint_thread();
     try {
         nx::boot();
     } catch (const nx::LongJmp& j) {
@@ -552,16 +816,29 @@ void request_frame_rate(ANativeWindow* w) {
 void on_cmd(android_app* app, int32_t cmd) {
     using namespace nx::plat;
     switch (cmd) {
-        case APP_CMD_INIT_WINDOW:
+        case APP_CMD_INIT_WINDOW: {
             g_window = app->window;
             g_window_gen++;
             g_visible = true;
+            uint32_t rw = 0, rh = 0;
+            window_size(rw, rh);
+            if (rw && rh && app->window) {
+                int32_t sw = ANativeWindow_getWidth(app->window);
+                int32_t sh = ANativeWindow_getHeight(app->window);
+                bool portrait = sw > 0 && sh > 0 && sw < sh;
+                int32_t bw = int32_t(portrait ? std::min(rw, rh) : std::max(rw, rh));
+                int32_t bh = int32_t(portrait ? std::max(rw, rh) : std::min(rw, rh));
+                ANativeWindow_setBuffersGeometry(app->window, bw, bh, 0);
+                nx::log("android: ANativeWindow buffer geometry set to %dx%d (screen %dx%d)", bw, bh, sw, sh);
+            }
             request_frame_rate(app->window);
             request_immersive();
             break;
+        }
         case APP_CMD_TERM_WINDOW:  // the window goes away once this returns
             g_window = nullptr;
             g_visible = false;
+            nx::nvn::pipeline_cache_save();
             break;
         case APP_CMD_GAINED_FOCUS:
             g_visible = g_window != nullptr;
@@ -571,6 +848,11 @@ void on_cmd(android_app* app, int32_t cmd) {
             break;
         case APP_CMD_PAUSE:  // home, app switcher, screen off: the game holds (no window), so does its sound
             audio_pause(true);
+            nx::nvn::pipeline_cache_save();
+            break;
+        case APP_CMD_STOP:
+        case APP_CMD_DESTROY:
+            nx::nvn::pipeline_cache_save();
             break;
         case APP_CMD_RESUME:
             audio_pause(false);
@@ -692,6 +974,9 @@ static bool has_data(const std::string& root) { return access((root + kDataProbe
 extern "C" void android_main(android_app* app) {
     using namespace nx::plat;
     g_app = app;
+    if (app && app->activity && app->activity->internalDataPath && g_internal_dir.empty()) {
+        g_internal_dir = app->activity->internalDataPath;
+    }
     // Game data: Internal storage/<game title> (put there by the player, needs all-files access) or the app's own
     // external files folder (adb push).
     // The folder picked on the home screen (games/<game>/java Home.java writes <files>/data_root.txt) comes first.
@@ -730,8 +1015,8 @@ extern "C" void android_main(android_app* app) {
             if (line.rfind("NX_", 0) == 0 && eq != std::string::npos) {
                 const std::string key = line.substr(0, eq);
                 const std::string value = line.substr(eq + 1);
-                // Launcher and NativeActivity share a process: update stretch even if a previous launch set it to "1".
-                setenv(key.c_str(), value.c_str(), key == "NX_STRETCH" ? 1 : 0);
+                // Launcher and NativeActivity share a process: update NX_* keys from config.txt across launches.
+                setenv(key.c_str(), value.c_str(), 1);
             }
         }
         // NX_HANDHELD=0 in config.txt (the launcher's TV mode): docked, 1080p. svc_am.cpp tests only whether the variable
@@ -745,8 +1030,17 @@ extern "C" void android_main(android_app* app) {
     // memset under each allocation and madvise churn (docs/nvn/android-perf/PLAN.md, phase 2). NX_MALLOC_TUNE=0: as
     // the system set it.
     if (const char* e = getenv("NX_MALLOC_TUNE"); !(e && e[0] == '0')) {
-        int zero = mallopt(M_BIONIC_ZERO_INIT, 0), decay = mallopt(M_DECAY_TIME, 1);
-        nx::log("heap: zero-fill off (%d), page release delayed (%d)", zero, decay);
+        int zero = mallopt(M_BIONIC_ZERO_INIT, 1), decay = mallopt(M_DECAY_TIME, 1);
+#ifndef M_CACHE_COUNT_MAX
+#define M_CACHE_COUNT_MAX (-200)
+#endif
+#ifndef M_CACHE_SIZE_MAX
+#define M_CACHE_SIZE_MAX (-201)
+#endif
+        int cache_cnt = mallopt(M_CACHE_COUNT_MAX, 256);
+        int cache_sz = mallopt(M_CACHE_SIZE_MAX, 16 << 20);
+        nx::log("heap: zero-fill off (%d), page release delayed (%d), scudo cache (%d, %d)",
+                zero, decay, cache_cnt, cache_sz);
     }
     start_memory_guard();
     gpu_turbo();
@@ -763,7 +1057,7 @@ extern "C" void android_main(android_app* app) {
     struct sigaction sa{};
     sa.sa_sigaction = crash;
     sa.sa_flags = SA_SIGINFO | SA_ONSTACK;
-    for (int s : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT}) sigaction(s, &sa, &g_previous[s]);
+    for (int s : {SIGSEGV, SIGBUS, SIGILL, SIGFPE, SIGABRT, SIGTRAP}) sigaction(s, &sa, &g_previous[s]);
 
     nx::log("%s (Switch recomp) on Android, data at %s (own folder %s: %s)", nx::game::kInfo.title, g_root.c_str(),
             own.c_str(), has_data(own) ? "has the data" : kDataProbe);

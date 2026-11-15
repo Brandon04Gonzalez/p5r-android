@@ -27,6 +27,7 @@ namespace {
 
 std::mutex g_log_lock;
 FILE* g_log_file = nullptr;
+std::vector<std::string> g_early_logs;
 
 std::vector<LoadedModule> g_modules;
 std::unordered_map<std::string, uint64_t> g_exports;
@@ -50,29 +51,56 @@ thread_local const char* t_missing_name = nullptr;
 // ---- logging --------------------------------------------------------------------------------------------------
 
 void log(const char* fmt, ...) {
+#if defined(__ANDROID__)
+    // Diagnostic build: runtime logging enabled by default to capture engine/GPU diagnostics.
+    // Set NX_ENABLE_LOG=0 to disable logging.
+    static const bool s_enabled = [] {
+        const char* e = std::getenv("NX_ENABLE_LOG");
+        if (!e) return true;
+        return e[0] != '0' && std::strcmp(e, "false") != 0;
+    }();
+    if (!s_enabled) return;
+#endif
     char buf[2048];
     va_list ap;
     va_start(ap, fmt);
     vsnprintf(buf, sizeof buf, fmt, ap);
     va_end(ap);
-    std::lock_guard lk(g_log_lock);
-    if (!g_log_file && plat::kDiagnostics) {  // NX_RELEASE: the system log only
-        const char* path = std::getenv("NX_LOG");
-#if defined(__ANDROID__)
-        std::string def = plat::data_root() + "/nx.log";  // next to the data, readable from the phone
-#else
-        std::string def = plat::data_root() + "/../nx.log";
-#endif
-        std::string file = path ? path : def;
-        // Keep the previous session's log (a problem report should survive reopening the game).
-        std::remove((file + ".prev").c_str());
-        std::rename(file.c_str(), (file + ".prev").c_str());
-        g_log_file = std::fopen(file.c_str(), "w");
-    }
     plat::log_line(buf);
-    if (g_log_file) {
-        std::fprintf(g_log_file, "%s\n", buf);
-        std::fflush(g_log_file);
+    const char* path = std::getenv("NX_LOG");
+    std::string default_path;
+    if (!path) {
+        std::string root = plat::data_root();
+        if (!root.empty()) {
+            default_path = root + "/nx.log";
+            path = default_path.c_str();
+        }
+    }
+    if (path) {
+        std::lock_guard lk(g_log_lock);
+        if (!g_log_file) {
+            std::string file = path;
+            // Keep the previous session's log (a problem report should survive reopening the game).
+            std::remove((file + ".prev").c_str());
+            std::rename(file.c_str(), (file + ".prev").c_str());
+            g_log_file = std::fopen(file.c_str(), "w");
+            if (g_log_file && !g_early_logs.empty()) {
+                for (const auto& line : g_early_logs) {
+                    std::fprintf(g_log_file, "%s\n", line.c_str());
+                }
+                g_early_logs.clear();
+                g_early_logs.shrink_to_fit();
+            }
+        }
+        if (g_log_file) {
+            std::fprintf(g_log_file, "%s\n", buf);
+            std::fflush(g_log_file);
+        }
+    } else {
+        std::lock_guard lk(g_log_lock);
+        if (!g_log_file && g_early_logs.size() < 256) {
+            g_early_logs.push_back(buf);
+        }
     }
 }
 

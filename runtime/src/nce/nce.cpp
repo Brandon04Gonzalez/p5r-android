@@ -370,6 +370,7 @@ thread_local Block* t_block = nullptr;
 
 Block* block() {
     if (Block* b = t_block) return b;
+    plat::perf_hint_thread();
     auto* b = static_cast<Block*>(std::aligned_alloc(64, (sizeof(Block) + 63) & ~size_t(63)));
     std::memset(b, 0, sizeof *b);
     b->magic = kMagic;

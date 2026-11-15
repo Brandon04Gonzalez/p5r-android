@@ -91,9 +91,9 @@ bool raster_command(const Cmd& c) {
             uint8_t* v = c.op == Cmd::SetStencilRef    ? s.stencil_ref
                          : c.op == Cmd::SetStencilMask ? s.stencil_write_mask
                                                        : s.stencil_compare_mask;
-            // With inverted viewport height on Vulkan, 2D UI quads have flipped primitive
-            // winding in framebuffer space. Always update both front and back slots uniformly.
-            v[0] = v[1] = uint8_t(c.n);
+            // Apply to both faces when front-only or back-only is set, because negative-height viewport flips face
+            // orientation relative to NVN when front_face is not explicitly re-specified.
+            if (c.mask & 3) v[0] = v[1] = uint8_t(c.n);
             return true;
         }
         case Cmd::SetPolygonOffsetClamp:
@@ -108,15 +108,20 @@ bool raster_command(const Cmd& c) {
                 log("nvn: depth bounds test enabled (%g..%g), not applied", c.f[0], c.f[1]);
             return true;
         }
-        case Cmd::SetDepthClamp: s.depth_clamp = c.n != 0; return true;
+        case Cmd::SetDepthClamp:
+            if (s.depth_clamp != (c.n != 0)) {
+                s.depth_clamp = c.n != 0;
+                replay::g_pipeline_state_version++;
+            }
+            return true;
         default: return false;
     }
 }
 
-// Before each draw (every pipeline declares these dynamic, nvn_pipeline.cpp, so they must all be set).
-void raster_dynamic(VkCommandBuffer cb, bool slack) {
+void stencil_dynamic(VkCommandBuffer cb) {
     const State& s = g_state;
-    auto set = [&](PFN_vkCmdSetStencilReference fn, const uint8_t* v) {  // the three setters share the signature
+    auto set = [&](PFN_vkCmdSetStencilReference fn, const uint8_t* v) {
+        // Uniformly bind stencil state to FRONT_AND_BACK so inverted-winding UI primitives never miss.
         fn(cb, VK_STENCIL_FACE_FRONT_AND_BACK, v[0]);
     };
     static const bool old = std::getenv("NX_OLD_STENCIL") != nullptr;  // bisecting: reference 0, masks 0xFF
@@ -124,6 +129,10 @@ void raster_dynamic(VkCommandBuffer cb, bool slack) {
     set(p_vkCmdSetStencilReference, old ? zero : s.stencil_ref);
     set(p_vkCmdSetStencilCompareMask, old ? all : s.stencil_compare_mask);
     set(p_vkCmdSetStencilWriteMask, old ? all : s.stencil_write_mask);
+}
+
+void depth_bias_dynamic(VkCommandBuffer cb, bool slack) {
+    const State& s = g_state;
     // Depth bias. NVN's call has glPolygonOffsetClamp's meaning, which is Vulkan's: units in minimum resolvable
     // depth differences (r), factor per unit of slope. Ryujinx and yuzu halve the units, but that is of the Maxwell
     // register the driver writes (units * 2); the API value needs no scaling. What does differ: D24 targets are
@@ -137,6 +146,12 @@ void raster_dynamic(VkCommandBuffer cb, bool slack) {
     float units = s.bias_units * units_scale, factor = s.bias_factor;
     if (slack) units -= equal_slack_units(), factor -= equal_slack_units() / 4.0f, clamp = 0.0f;
     p_vkCmdSetDepthBias(cb, units, clamp, factor);
+}
+
+// Before each draw (every pipeline declares these dynamic, nvn_pipeline.cpp, so they must all be set).
+void raster_dynamic(VkCommandBuffer cb, bool slack) {
+    stencil_dynamic(cb);
+    depth_bias_dynamic(cb, slack);
 }
 
 }  // namespace replay

@@ -119,16 +119,17 @@ struct Pass {
     VkExtent2D extent{};
     VkSurfaceTransformFlagBitsKHR transform = VK_SURFACE_TRANSFORM_IDENTITY_BIT_KHR;
     bool failed = false;
-    // FSR 1 (NX_FSR=1): EASU draws the shown part of the texture, upscaled, into `inter` (the size of the picture on
-    // the target); the main pass then sharpens it (RCAS) into the swapchain image.
-    VkRenderPass easu_pass = VK_NULL_HANDLE;
-    VkPipeline easu = VK_NULL_HANDLE, rcas = VK_NULL_HANDLE;
-    VkImage inter = VK_NULL_HANDLE;
-    VkDeviceMemory inter_memory = VK_NULL_HANDLE;
-    VkImageView inter_view = VK_NULL_HANDLE;
-    VkFramebuffer inter_fb = VK_NULL_HANDLE;
-    uint32_t inter_w = 0, inter_h = 0;
+    // Single-pass Mobile FSR 1 (NX_FSR=1): combined EASU + RCAS in g.render_pass across all display orientations.
+    VkPipeline rcas = VK_NULL_HANDLE;
     bool fsr_logged = false;
+    struct PresentSetEntry {
+        uint64_t epoch = 0;
+        VkImageView view = VK_NULL_HANDLE;
+        VkBuffer ubo_buf = VK_NULL_HANDLE;
+        VkDescriptorSet set = VK_NULL_HANDLE;
+    };
+    PresentSetEntry set_cache[8] = {};
+    uint32_t set_cache_next = 0;
 } g;
 
 bool fsr_on() {
@@ -147,41 +148,6 @@ float fsr_sharpness() {  // stops of sharpening: 0 the most, 2 none (FSR's own d
     return v;
 }
 
-// The intermediate image for a picture of w x h pixels on the target, made again when the size changes.
-bool fsr_inter(uint32_t w, uint32_t h) {
-    if (g.inter && g.inter_w == w && g.inter_h == h) return true;
-    VkDevice d = vk_device();
-    if (g.inter) {  // a new size means a new window: the swapchain was remade, which waited for the queue
-        p_vkDestroyFramebuffer(d, g.inter_fb, nullptr);
-        p_vkDestroyImageView(d, g.inter_view, nullptr);
-        p_vkDestroyImage(d, g.inter, nullptr);
-        p_vkFreeMemory(d, g.inter_memory, nullptr);
-        g.inter = VK_NULL_HANDLE, g.inter_view = VK_NULL_HANDLE, g.inter_fb = VK_NULL_HANDLE;
-        g.inter_memory = VK_NULL_HANDLE;
-    }
-    VkImageCreateInfo ci{VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
-    ci.imageType = VK_IMAGE_TYPE_2D, ci.format = VK_FORMAT_R16G16B16A16_SFLOAT, ci.extent = {w, h, 1};
-    ci.mipLevels = 1, ci.arrayLayers = 1, ci.samples = VK_SAMPLE_COUNT_1_BIT, ci.tiling = VK_IMAGE_TILING_OPTIMAL;
-    ci.usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;
-    if (p_vkCreateImage(d, &ci, nullptr, &g.inter) != VK_SUCCESS) return false;
-    VkMemoryRequirements req{};
-    p_vkGetImageMemoryRequirements(d, g.inter, &req);
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    ai.allocationSize = req.size, ai.memoryTypeIndex = memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
-    if (p_vkAllocateMemory(d, &ai, nullptr, &g.inter_memory) != VK_SUCCESS) return false;
-    p_vkBindImageMemory(d, g.inter, g.inter_memory, 0);
-    VkImageViewCreateInfo vi{VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO};
-    vi.image = g.inter, vi.viewType = VK_IMAGE_VIEW_TYPE_2D, vi.format = ci.format;
-    vi.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
-    if (p_vkCreateImageView(d, &vi, nullptr, &g.inter_view) != VK_SUCCESS) return false;
-    VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
-    fi.renderPass = g.easu_pass, fi.attachmentCount = 1, fi.pAttachments = &g.inter_view;
-    fi.width = w, fi.height = h, fi.layers = 1;
-    if (p_vkCreateFramebuffer(d, &fi, nullptr, &g.inter_fb) != VK_SUCCESS) return false;
-    g.inter_w = w, g.inter_h = h;
-    return true;
-}
-
 VkShaderModule module(const uint32_t* code, size_t bytes) {
     VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
     ci.codeSize = bytes;
@@ -196,12 +162,33 @@ void destroy_targets() {
     for (VkFramebuffer f : g.framebuffers) p_vkDestroyFramebuffer(d, f, nullptr);
     for (VkImageView v : g.views) p_vkDestroyImageView(d, v, nullptr);
     g.framebuffers.clear(), g.views.clear();
-    if (g.inter_fb) p_vkDestroyFramebuffer(d, g.inter_fb, nullptr);
-    if (g.inter_view) p_vkDestroyImageView(d, g.inter_view, nullptr);
-    if (g.inter) p_vkDestroyImage(d, g.inter, nullptr);
-    if (g.inter_memory) p_vkFreeMemory(d, g.inter_memory, nullptr);
-    g.inter_fb = VK_NULL_HANDLE, g.inter_view = VK_NULL_HANDLE, g.inter = VK_NULL_HANDLE;
-    g.inter_memory = VK_NULL_HANDLE, g.inter_w = g.inter_h = 0;
+    std::memset(g.set_cache, 0, sizeof g.set_cache);
+    g.set_cache_next = 0;
+}
+
+VkDescriptorSet get_present_set(VkImageView view, VkBuffer ubo_buf) {
+    const uint64_t ep = async_gpu() ? frame_descriptor_epoch(false) : 0;
+    if (ep) {
+        for (const auto& c : g.set_cache) {
+            if (c.epoch == ep && c.view == view && c.ubo_buf == ubo_buf && c.set != VK_NULL_HANDLE)
+                return c.set;
+        }
+    }
+    VkDescriptorSet set = descriptor_set(g.set_layout);
+    if (!set) return VK_NULL_HANDLE;
+    VkDescriptorImageInfo ii{g.sampler, view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkDescriptorBufferInfo bi{ubo_buf, 0, kOverlayBytes};
+    VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
+    w[0].dstSet = set, w[0].descriptorCount = 1, w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
+    w[0].pImageInfo = &ii;
+    w[1].dstSet = set, w[1].dstBinding = 1, w[1].descriptorCount = 1, w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+    w[1].pBufferInfo = &bi;
+    p_vkUpdateDescriptorSets(vk_device(), 2, w, 0, nullptr);
+    if (ep) {
+        g.set_cache[g.set_cache_next & 7] = {ep, view, ubo_buf, set};
+        g.set_cache_next++;
+    }
+    return set;
 }
 
 // A full-target triangle drawn with the fragment shader `code` in render pass `pass` (g.layout). With `vertex`: that
@@ -243,46 +230,15 @@ bool build_pipeline(VkRenderPass pass, const uint32_t* code, size_t bytes, VkPip
     gp.pVertexInputState = &vin, gp.pInputAssemblyState = &ia, gp.pViewportState = &vp;
     gp.pRasterizationState = &rs, gp.pMultisampleState = &ms, gp.pColorBlendState = &cb, gp.pDynamicState = &ds;
     gp.layout = g.layout, gp.renderPass = pass;
-    VkResult r = p_vkCreateGraphicsPipelines(d, VK_NULL_HANDLE, 1, &gp, nullptr, out);
+    VkResult r = p_vkCreateGraphicsPipelines(d, pipeline_cache(), 1, &gp, nullptr, out);
     p_vkDestroyShaderModule(d, vs, nullptr);
     p_vkDestroyShaderModule(d, fs, nullptr);
     return r == VK_SUCCESS;
 }
 
-// FSR's render pass (RGBA16F, left readable by the main pass) and the two pipelines.
+// Single-pass Mobile FSR 1.0 pipeline (built directly on g.render_pass; no intermediate RGBA16F pass needed).
 bool make_fsr() {
-    VkDevice d = vk_device();
-    VkAttachmentDescription color{};
-    color.format = VK_FORMAT_R16G16B16A16_SFLOAT;
-    color.samples = VK_SAMPLE_COUNT_1_BIT;
-    color.loadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color.storeOp = VK_ATTACHMENT_STORE_OP_STORE;
-    color.stencilLoadOp = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
-    color.stencilStoreOp = VK_ATTACHMENT_STORE_OP_DONT_CARE;
-    color.initialLayout = VK_IMAGE_LAYOUT_UNDEFINED;
-    color.finalLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-    VkAttachmentReference ref{0, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
-    VkSubpassDescription sub{};
-    sub.pipelineBindPoint = VK_PIPELINE_BIND_POINT_GRAPHICS;
-    sub.colorAttachmentCount = 1;
-    sub.pColorAttachments = &ref;
-    VkSubpassDependency dep[2] = {};
-    dep[0].srcSubpass = VK_SUBPASS_EXTERNAL, dep[0].dstSubpass = 0;  // the last frame's RCAS has read it
-    dep[0].srcStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dep[0].dstStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep[0].dstAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dep[1].srcSubpass = 0, dep[1].dstSubpass = VK_SUBPASS_EXTERNAL;  // RCAS reads what EASU wrote
-    dep[1].srcStageMask = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT;
-    dep[1].dstStageMask = VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT;
-    dep[1].srcAccessMask = VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT;
-    dep[1].dstAccessMask = VK_ACCESS_SHADER_READ_BIT;
-    VkRenderPassCreateInfo rpi{VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO};
-    rpi.attachmentCount = 1, rpi.pAttachments = &color;
-    rpi.subpassCount = 1, rpi.pSubpasses = &sub;
-    rpi.dependencyCount = 2, rpi.pDependencies = dep;
-    if (p_vkCreateRenderPass(d, &rpi, nullptr, &g.easu_pass) != VK_SUCCESS) return false;
-    return build_pipeline(g.easu_pass, kEasu, sizeof kEasu, &g.easu) &&
-           build_pipeline(g.render_pass, kRcas, sizeof kRcas, &g.rcas);
+    return build_pipeline(g.render_pass, kRcas, sizeof kRcas, &g.rcas);
 }
 
 bool make_pipeline(VkFormat format) {
@@ -318,7 +274,7 @@ bool make_pipeline(VkFormat format) {
     if (p_vkCreateSampler(d, &si, nullptr, &g.sampler) != VK_SUCCESS) return false;
     VkDescriptorSetLayoutBinding b[2] = {
         {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1, VK_SHADER_STAGE_FRAGMENT_BIT, &g.sampler},
-        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
+        {1, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 1, VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, nullptr}};
     VkDescriptorSetLayoutCreateInfo dli{VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO};
     dli.bindingCount = 2, dli.pBindings = b;
     if (p_vkCreateDescriptorSetLayout(d, &dli, nullptr, &g.set_layout) != VK_SUCCESS) return false;
@@ -366,10 +322,8 @@ bool present_pass_targets(VkFormat format, const std::vector<VkImage>& images, V
         if (g.overlay) p_vkDestroyPipeline(d, g.overlay, nullptr);
         p_vkDestroyRenderPass(d, g.render_pass, nullptr);
         g.pipeline = g.overlay = VK_NULL_HANDLE, g.render_pass = VK_NULL_HANDLE;
-        if (g.easu) p_vkDestroyPipeline(d, g.easu, nullptr);
         if (g.rcas) p_vkDestroyPipeline(d, g.rcas, nullptr);
-        if (g.easu_pass) p_vkDestroyRenderPass(d, g.easu_pass, nullptr);
-        g.easu = g.rcas = VK_NULL_HANDLE, g.easu_pass = VK_NULL_HANDLE;
+        g.rcas = VK_NULL_HANDLE;
     }
     if (!g.pipeline && !make_pipeline(format)) {
         log("nvn/vk: present pass unavailable: frames are blitted");
@@ -400,21 +354,6 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
         src.view_type != VK_IMAGE_VIEW_TYPE_2D || !(src.aspect & VK_IMAGE_ASPECT_COLOR_BIT))
         return false;
     transition(cb, src, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-    // The set and the circles' uniform data come from this submit's slot (descriptor pool and upload ring, reset when
-    // the slot is retired): nothing a frame still in flight reads is written. Per swapchain image they were not safe
-    // (MAILBOX can hand an image back before the frame that last drew into it finished; review of DEBUG-2.md #88).
-    VkDescriptorSet set = descriptor_set(g.set_layout);
-    Upload ubo = upload_alloc(kOverlayBytes, 256);
-    std::memset(ubo.ptr, 0, kOverlayBytes);
-    std::memcpy(static_cast<uint8_t*>(ubo.ptr) + 16 * kOverlayMax, kFont, sizeof kFont);
-    VkDescriptorImageInfo ii{g.sampler, src.view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-    VkDescriptorBufferInfo bi{ubo.buffer, ubo.offset, kOverlayBytes};
-    VkWriteDescriptorSet w[2] = {{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}, {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET}};
-    w[0].dstSet = set, w[0].descriptorCount = 1, w[0].descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER;
-    w[0].pImageInfo = &ii;
-    w[1].dstSet = set, w[1].dstBinding = 1, w[1].descriptorCount = 1, w[1].descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-    w[1].pBufferInfo = &bi;
-    p_vkUpdateDescriptorSets(vk_device(), 2, w, 0, nullptr);
 
     Push p{};
     // Host uv -> upright uv, undoing the clockwise turn the display applies (as vk_present.cpp).
@@ -462,42 +401,29 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
         uint32_t label = (plat::kGlyphDigit0 + v / 10) | (plat::kGlyphDigit0 + v % 10) << 5;
         shapes[count++] = {0.20f, 0.05f, 0.035f, 0.0f, label};
     }
-    auto* dst = reinterpret_cast<float*>(ubo.ptr);
-    for (size_t k = 0; k < count; k++)
-        dst[4 * k] = shapes[k].x, dst[4 * k + 1] = shapes[k].y, dst[4 * k + 2] = shapes[k].r,
-        dst[4 * k + 3] = std::clamp(shapes[k].alpha, 0.0f, 1.0f) + 4.0f * float(shapes[k].label);  // overlay.frag
+    // The set is cached per (descriptor epoch, view, upload buffer) while dynamic UBO offsets change per frame.
+    Upload ubo = upload_alloc(kOverlayBytes, 256);
+    if (count) {
+        std::memset(ubo.ptr, 0, kOverlayBytes);
+        std::memcpy(static_cast<uint8_t*>(ubo.ptr) + 16 * kOverlayMax, kFont, sizeof kFont);
+        auto* dst = reinterpret_cast<float*>(ubo.ptr);
+        for (size_t k = 0; k < count; k++)
+            dst[4 * k] = shapes[k].x, dst[4 * k + 1] = shapes[k].y, dst[4 * k + 2] = shapes[k].r,
+            dst[4 * k + 3] = std::clamp(shapes[k].alpha, 0.0f, 1.0f) + 4.0f * float(shapes[k].label);  // overlay.frag
+    }
+    VkDescriptorSet set = get_present_set(src.view, ubo.buffer);
+    if (!set) return false;
+    uint32_t dyn_off = uint32_t(ubo.offset);
     p.off[3] = tw / th;
 
-    // FSR 1: upscale the shown part into `inter` (the picture's size on the target), then sharpen it in the main pass.
+    // Single-pass Mobile FSR 1.0: upscale and sharpen directly in the swapchain pass across all display orientations.
     uint32_t out_w = uint32_t(bw * tw + 0.5f), out_h = uint32_t(bh * th + 0.5f);
-    VkDescriptorSet rcas_set = VK_NULL_HANDLE;
-    if (g.easu && g.rcas && r == 0 && out_w > cw * 1.01f && out_h > ch * 1.01f && fsr_inter(out_w, out_h)) {
-        if (!g.fsr_logged)
-            log("nvn/vk: FSR 1: %.0fx%.0f -> %ux%u (sharpness %.2f stops)", cw, ch, out_w, out_h, fsr_sharpness()),
-                g.fsr_logged = true;
-        struct { float a[4], b[4], c[4], d[4]; } e{};
-        e.a[0] = cw / float(out_w), e.a[1] = ch / float(out_h);
-        e.a[2] = 0.5f * e.a[0] - 0.5f, e.a[3] = 0.5f * e.a[1] - 0.5f;
-        e.b[0] = cx, e.b[1] = cy, e.b[2] = cw, e.b[3] = ch;
-        VkRenderPassBeginInfo eb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
-        eb.renderPass = g.easu_pass, eb.framebuffer = g.inter_fb, eb.renderArea = {{0, 0}, {out_w, out_h}};
-        p_vkCmdBeginRenderPass(cb, &eb, VK_SUBPASS_CONTENTS_INLINE);
-        VkViewport ev{0, 0, float(out_w), float(out_h), 0, 1};
-        VkRect2D es{{0, 0}, {out_w, out_h}};
-        p_vkCmdSetViewport(cb, 0, 1, &ev);
-        p_vkCmdSetScissor(cb, 0, 1, &es);
-        p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.easu);
-        p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.layout, 0, 1, &set, 0, nullptr);
-        p_vkCmdPushConstants(cb, g.layout, kPushStages, 0, sizeof e, &e);
-        p_vkCmdDraw(cb, 3, 1, 0, 0);
-        p_vkCmdEndRenderPass(cb);
-        rcas_set = descriptor_set(g.set_layout);
-        VkDescriptorImageInfo ri{g.sampler, g.inter_view, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
-        VkWriteDescriptorSet rw[2] = {w[0], w[1]};
-        rw[0].dstSet = rcas_set, rw[0].pImageInfo = &ri;
-        rw[1].dstSet = rcas_set;
-        p_vkUpdateDescriptorSets(vk_device(), 2, rw, 0, nullptr);
-        p.crop[0] = float(out_w), p.crop[1] = float(out_h), p.crop[2] = std::exp2(-fsr_sharpness()), p.crop[3] = 0;
+    const bool use_fsr = fsr_on() && g.rcas != VK_NULL_HANDLE && out_w >= cw * 0.95f && out_h >= ch * 0.95f;
+    p.off[2] = std::exp2(-fsr_sharpness());
+    if (use_fsr && !g.fsr_logged) {
+        log("nvn/vk: FSR 1 (single-pass mobile): %.0fx%.0f -> %ux%u (sharpness %.2f stops)",
+            cw, ch, out_w, out_h, fsr_sharpness());
+        g.fsr_logged = true;
     }
 
     VkRenderPassBeginInfo rb{VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO};
@@ -507,9 +433,8 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
     VkRect2D sc{{0, 0}, g.extent};
     p_vkCmdSetViewport(cb, 0, 1, &v);
     p_vkCmdSetScissor(cb, 0, 1, &sc);
-    p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, rcas_set ? g.rcas : g.pipeline);
-    VkDescriptorSet main_set = rcas_set ? rcas_set : set;
-    p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.layout, 0, 1, &main_set, 0, nullptr);
+    p_vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, use_fsr ? g.rcas : g.pipeline);
+    p_vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, g.layout, 0, 1, &set, 1, &dyn_off);
     p_vkCmdPushConstants(cb, g.layout, kPushStages, 0, sizeof p, &p);
     p_vkCmdDraw(cb, 3, 1, 0, 0);
     if (count && g.overlay) {  // the touch controls: a quad per circle, blended over the picture (overlay.frag)

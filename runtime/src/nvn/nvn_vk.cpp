@@ -157,12 +157,19 @@ bool init() {
     VkPhysicalDeviceProperties props{};
     p_vkGetPhysicalDeviceProperties(g_physical, &props);
     g_device_props = props;
-    if (is_xclipse()) log("nvn/vk: Samsung Xclipse GPU detected");
-    if (is_mali()) log("nvn/vk: ARM Mali GPU detected (emulating R11G11B10F as RGBA16F to prevent green/purple flickering)");
+    if (is_xclipse()) log("nvn/vk: Samsung Xclipse GPU detected (forcing CPU BC texture decode for compatibility)");
+    if (is_mali()) log("nvn/vk: ARM Mali GPU detected");
     if (is_adreno_8xx()) log("nvn/vk: Qualcomm Adreno 8xx GPU detected (disabling chunked submits to avoid battle hang)");
     if (is_powervr()) log("nvn/vk: PowerVR GPU detected (pipelines with an unused colour slot skip the pipeline cache)");
     p_vkGetPhysicalDeviceMemoryProperties(g_physical, &g_memory);
+#if defined(__ANDROID__)
+    // All Android mobile SoCs (Mali, Adreno, PowerVR) share system memory with the CPU.
+    // Some vendor Mali drivers report VK_PHYSICAL_DEVICE_TYPE_OTHER instead of INTEGRATED_GPU;
+    // forcing true guarantees pipelined fence submission (pipelined(), nvn_frames.cpp) without synchronous CPU stalls.
+    g_integrated = true;
+#else
     g_integrated = props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+#endif
     // An integrated GPU shares the package's power budget with the CPU: ask the desktop for its performance profile
     // (NX_POWER_PROFILE=1: also with a discrete GPU; 0: never). frame_stats.cpp.
     if (g_integrated || (std::getenv("NX_POWER_PROFILE") && std::getenv("NX_POWER_PROFILE")[0] == '1'))
@@ -285,6 +292,7 @@ bool init() {
     dci.pNext = &features;
     if (!check(p_create_device(g_physical, &dci, nullptr, &g_device), "vkCreateDevice")) return false;
     p_vkGetDeviceQueue(g_device, g_family, 0, &g_queue);
+    pipeline_cache();
     if (display_timing) {
         auto gdpa = reinterpret_cast<PFN_vkGetDeviceProcAddr>(
             reinterpret_cast<PFN_vkGetInstanceProcAddr>(g_gipa)(g_instance, "vkGetDeviceProcAddr"));
@@ -341,7 +349,8 @@ bool init() {
         frame_init(g_pool, g_family, g_upload, g_upload_ptr, g_upload_size);  // the upload buffer: the slots' ring
     else
         g_descriptors = make_descriptor_pool();
-    log("nvn/vk: %s, Vulkan %u.%u, queue family %u", props.deviceName, VK_API_VERSION_MAJOR(props.apiVersion),
+    log("nvn/vk: %s (vendor %#x, driver %#x), Vulkan %u.%u, queue family %u", props.deviceName,
+        props.vendorID, props.driverVersion, VK_API_VERSION_MAJOR(props.apiVersion),
         VK_API_VERSION_MINOR(props.apiVersion), g_family);
     g_failed = false;
     g_ready = true;
@@ -444,6 +453,8 @@ bool make_swapchain() {
     if (!std::getenv("NX_FIFO")) {
         if (has(VK_PRESENT_MODE_MAILBOX_KHR))
             ci.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+        else if (has(VK_PRESENT_MODE_FIFO_RELAXED_KHR))
+            ci.presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
         else if (has(VK_PRESENT_MODE_IMMEDIATE_KHR))
             ci.presentMode = VK_PRESENT_MODE_IMMEDIATE_KHR;
     }
@@ -484,7 +495,10 @@ bool is_xclipse() {
     return std::strstr(g_device_props.deviceName, "Xclipse") != nullptr || g_device_props.vendorID == 0x144d;
 }
 bool is_mali() {
-    return std::strstr(g_device_props.deviceName, "Mali") != nullptr || g_device_props.vendorID == 0x13b5;
+    return std::strstr(g_device_props.deviceName, "Mali") != nullptr ||
+           std::strstr(g_device_props.deviceName, "Panfrost") != nullptr ||
+           std::strstr(g_device_props.deviceName, "PanVK") != nullptr ||
+           g_device_props.vendorID == 0x13b5;
 }
 bool is_adreno() {
     return std::strstr(g_device_props.deviceName, "Adreno") != nullptr || g_device_props.vendorID == 0x5143;
@@ -538,11 +552,16 @@ VkDescriptorSet descriptor_set(VkDescriptorSetLayout layout) {
     return set;
 }
 
+VkDescriptorSet ssbo_descriptor_set(VkDescriptorSetLayout layout) {
+    if (async_gpu()) return frame_ssbo_descriptor_set(layout);
+    return descriptor_set(layout);
+}
+
 VkDescriptorPool make_descriptor_pool() {
-    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 65536}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 16384},
+    VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 65536}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 65536},
                                     {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 65536}, {VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, 4096},
                                     {VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, 1024}, {VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, 1024},
-                                    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 65536}};
+                                    {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 65536}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, 65536}};
     VkDescriptorPoolCreateInfo dpi{VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO};
     dpi.maxSets = 32768;
     dpi.poolSizeCount = uint32_t(sizeof sizes / sizeof sizes[0]);
@@ -822,10 +841,14 @@ void gpu_present(uint64_t texture, const int32_t* crop, uint64_t origin_ns) {
     if (dump) transition(g_cb, *src, VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL);  // the present pass left it sampled
     dump = dump && frame_dump_record(g_cb, *src);
     VkSemaphore rendered = async_gpu() ? frame_rendered_semaphore(index) : g_rendered;
+    // Reset cross-submit compute regions at the end of the frame; written_take()
+    // inside frame_submit() will collect any remaining untaken regions first.
+    // Submit the frame's render work with signal = image_ready.
     if (async_gpu())  // the blit's fence is not waited for (vkQueuePresentKHR waits on `rendered`); a dumped frame is
         frame_submit(acquired, rendered, {}, dump);
     else
         end_and_wait(acquired, rendered);
+    replay::written_reset();
     if (dump) frame_dump_write(*src, presents);
     if (due) debug_dump_textures(presents);
     debug_hud_dump(presents);  // dump_hud (nvn_debug.cpp): only when a frame was armed

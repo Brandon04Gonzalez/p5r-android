@@ -7,6 +7,7 @@
 #include "platform.h"
 
 #if defined(__ANDROID__)
+#include <android/log.h>
 #include <dlfcn.h>
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -31,12 +32,14 @@ namespace {
 using GetManager = void* (*)();
 using CreateSession = void* (*)(void*, const int32_t*, size_t, int64_t);
 using ReportActual = int (*)(void*, int64_t);
+using UpdateTarget = void (*)(void*, int64_t);
 using CloseSession = void (*)(void*);
 
 struct Api {
     GetManager get_manager = nullptr;
     CreateSession create = nullptr;
     ReportActual report = nullptr;
+    UpdateTarget update_target = nullptr;
     CloseSession close = nullptr;
     bool ok = false;
 };
@@ -45,14 +48,31 @@ const Api& api() {
     static const Api a = [] {
         Api x;
         const char* e = std::getenv("NX_ADPF");
-        if (e && e[0] == '0') return x;
+        if (e && e[0] == '0') {
+            __android_log_print(ANDROID_LOG_INFO, "P5R-ADPF", "ADPF disabled via NX_ADPF=0");
+            return x;
+        }
         void* lib = dlopen("libandroid.so", RTLD_NOW);
-        if (!lib) return x;
-        x.get_manager = reinterpret_cast<GetManager>(dlsym(lib, "APerformanceHint_getManager"));
-        x.create = reinterpret_cast<CreateSession>(dlsym(lib, "APerformanceHint_createSession"));
-        x.report = reinterpret_cast<ReportActual>(dlsym(lib, "APerformanceHint_reportActualWorkDuration"));
-        x.close = reinterpret_cast<CloseSession>(dlsym(lib, "APerformanceHint_closeSession"));
+        if (!lib) {
+            __android_log_print(ANDROID_LOG_WARN, "P5R-ADPF", "dlopen(libandroid.so) failed");
+            return x;
+        }
+        auto find_sym = [&](const char* n1, const char* n2) {
+            void* s = dlsym(lib, n1);
+            if (!s && n2) s = dlsym(lib, n2);
+            return s;
+        };
+        x.get_manager = reinterpret_cast<GetManager>(find_sym("APerformanceHint_getManager", "APerformanceHintManager_getInstance"));
+        x.create = reinterpret_cast<CreateSession>(find_sym("APerformanceHint_createSession", "APerformanceHintManager_createSession"));
+        x.report = reinterpret_cast<ReportActual>(find_sym("APerformanceHint_reportActualWorkDuration", "APerformanceHintManager_reportActualWorkDuration"));
+        x.update_target = reinterpret_cast<UpdateTarget>(find_sym("APerformanceHint_updateTargetWorkDuration", "APerformanceHintManager_updateTargetWorkDuration"));
+        x.close = reinterpret_cast<CloseSession>(find_sym("APerformanceHint_closeSession", "APerformanceHintManager_closeSession"));
         x.ok = x.get_manager && x.create && x.report && x.close;
+        if (x.ok) {
+            __android_log_print(ANDROID_LOG_INFO, "P5R-ADPF", "ADPF dynamic symbols resolved successfully");
+        } else {
+            __android_log_print(ANDROID_LOG_WARN, "P5R-ADPF", "ADPF symbols not available on this Android version");
+        }
         return x;
     }();
     return a;
@@ -108,16 +128,19 @@ void perf_hint_frame(int64_t ns) {
     const Api& a = api();
     if (!a.ok || ns <= 0) return;
     std::lock_guard lk(g_lock);
+    const char* cap = std::getenv("NX_FPS_CAP");
+    int64_t target = cap && std::atoi(cap) > 0 && std::atoi(cap) <= 30 ? 33'333'333 : 16'666'667;
     if (g_dirty && !g_tids.empty()) {  // a new thread made part of the frame: a session with all of them
         if (g_session) a.close(g_session);
-        // The ADPF target is the frame period: 33.3 ms when NX_FPS_CAP holds the game at 30 fps (nvn_queue.cpp).
-        const char* cap = std::getenv("NX_FPS_CAP");
-        int64_t target = cap && std::atoi(cap) > 0 && std::atoi(cap) <= 30 ? 33'333'333 : 16'666'667;
         g_session = a.create(a.get_manager(), g_tids.data(), g_tids.size(), target);
         g_dirty = false;
         log("adpf: %s for %zu threads", g_session ? "session made" : "no session", g_tids.size());
+        __android_log_print(ANDROID_LOG_INFO, "P5R-ADPF", "ADPF hint session %s for %zu threads (target %lld ns)",
+                            g_session ? "created" : "failed to create", g_tids.size(), (long long)target);
     }
-    if (g_session) a.report(g_session, ns);
+    if (g_session) {
+        a.report(g_session, ns);
+    }
 }
 #else
 void gpu_turbo() {}

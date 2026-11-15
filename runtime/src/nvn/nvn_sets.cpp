@@ -8,8 +8,17 @@
 #include <memory>
 #include <string>
 
+#if defined(__aarch64__)
+#include <arm_acle.h>
+#if defined(__linux__) || defined(__ANDROID__)
+#include <sys/auxv.h>
+#endif
+#define HAS_ARM_CRC32 1
+#endif
+
 #include "nvn_draw_state.h"
 #include "nvn_ultrawide.h"
+#include "nvn_vk.h"
 
 namespace nx::nvn::replay {
 
@@ -155,9 +164,9 @@ struct HandleSlot {
     ViewInfo view;
     VkSampler vk_sampler[4] = {};  // sampler_for(sampler, shadow, biased) by shadow + 2 * biased, once a binding asked
 };
-constexpr uint32_t kHandleSlots = 2048;  // a course frame names a few hundred handles
+constexpr uint32_t kHandleSlots = 8192;  // keeps handle slots across submits when epoch/mark are unchanged
 HandleSlot g_handle_slots[kHandleSlots];
-uint64_t g_handle_generation = 1, g_handle_mark = 0;
+uint64_t g_handle_generation = 1, g_handle_mark = 0, g_handle_epoch = 0;
 uint32_t g_handle_used = 0;
 uint64_t g_handle_hits = 0, g_handle_misses = 0, g_sets_skipped = 0;
 
@@ -168,7 +177,11 @@ void handles_reset() { g_handle_generation++, g_handle_used = 0; }
 HandleSlot* handle_slot(uint64_t handle) {
     uint64_t mark = t_replay_mark;
     if (!mark || draw_slow(kSlowHandles)) return nullptr;
-    if (mark != g_handle_mark || g_handle_used > kHandleSlots / 2) handles_reset(), g_handle_mark = mark;
+    if (mark != g_handle_mark || g_handle_used > kHandleSlots / 2) {
+        handles_reset();
+        g_handle_mark = mark;
+        g_handle_epoch = current_epoch();
+    }
     handle &= 0xFFFFFFFFull;  // 20 bits of texture id, 12 of sampler id
     uint64_t tp = g_state.texture_pool, sp = g_state.sampler_pool;
     uint64_t h = (handle + 1) * 0x9E3779B97F4A7C15ull ^ tp * 0xC2B2AE3D27D4EB4Full ^ sp * 0x165667B19E3779F9ull;
@@ -180,10 +193,12 @@ HandleSlot* handle_slot(uint64_t handle) {
             return &s;
         }
         s = HandleSlot{};
-        s.generation = g_handle_generation, s.handle = handle, s.texture_pool = tp, s.sampler_pool = sp;
+        s.handle = handle, s.texture_pool = tp, s.sampler_pool = sp;
         lookup_handle(handle, s.texture, s.sampler, &s.view, &s.has_sampler);
         s.object = s.texture ? get<Texture>(s.texture) : nullptr;
-        g_handle_used++, g_handle_misses++;
+        s.generation = s.object ? g_handle_generation : 0;
+        if (s.object) g_handle_used++;
+        g_handle_misses++;
         return &s;
     }
 }
@@ -201,11 +216,14 @@ struct ConstantsBlock {
     int hw = 0;         // the key: the Maxwell stage (vertex 0, fragment 4) and the stage's storage bindings,
     Range storage[16];  // all driver_constants reads outside compute
     std::array<uint8_t, 0x1000> bytes;
+    uint64_t upload_gen = 0;
+    VkDescriptorBufferInfo upload_info{};
 };
-constexpr size_t kBlocks = 32;  // more distinct ones in a submit: copied per draw, as before
+constexpr size_t kBlocks = 256;  // was 32: prevents >32 skinned vertex SSBO states in a submit from falling back to 4 KB/draw copies
 std::vector<std::unique_ptr<SupportBlock>> g_support;
 std::vector<std::unique_ptr<ConstantsBlock>> g_constants;
 size_t g_support_used = 0, g_constants_used = 0;
+static thread_local ConstantsBlock* s_last_const_block[2] = {};
 
 const SupportBuffer* support_block(float width, float height, float scale) {
     for (size_t k = 0; k < g_support_used; k++)
@@ -221,20 +239,30 @@ const SupportBuffer* support_block(float width, float height, float scale) {
     return &b.sb;
 }
 
-const uint8_t* constants_block(ShaderStage stage, int st) {
+ConstantsBlock* constants_block_obj(ShaderStage stage, int st) {
     if (stage == ShaderStage::Compute) return nullptr;  // its table also lists the uniform blocks; a few per frame
     int hw = stage == ShaderStage::Fragment ? 4 : 0;
     const Range* key = g_state.storage[st];
-    for (size_t k = 0; k < g_constants_used; k++)
-        if (g_constants[k]->hw == hw && std::memcmp(g_constants[k]->storage, key, sizeof g_constants[k]->storage) == 0)
-            return g_constants[k]->bytes.data();
+    if (st >= 0 && st < 2 && s_last_const_block[st] &&
+        s_last_const_block[st]->hw == hw &&
+        std::memcmp(s_last_const_block[st]->storage, key, sizeof(s_last_const_block[st]->storage)) == 0) {
+        return s_last_const_block[st];
+    }
+    for (size_t k = 0; k < g_constants_used; k++) {
+        if (g_constants[k]->hw == hw && std::memcmp(g_constants[k]->storage, key, sizeof g_constants[k]->storage) == 0) {
+            if (st >= 0 && st < 2) s_last_const_block[st] = g_constants[k].get();
+            return g_constants[k].get();
+        }
+    }
     if (g_constants_used == kBlocks) return nullptr;
     if (g_constants_used == g_constants.size()) g_constants.push_back(std::make_unique<ConstantsBlock>());
     ConstantsBlock& b = *g_constants[g_constants_used++];
     b.hw = hw;
     std::memcpy(b.storage, key, sizeof b.storage);
     b.bytes = driver_constants(stage, st);
-    return b.bytes.data();
+    b.upload_gen = 0;
+    if (st >= 0 && st < 2) s_last_const_block[st] = &b;
+    return &b;
 }
 
 // The buffer a descriptor points to: `bytes` copied into the upload buffer (at least 16 bytes, zero padded).
@@ -302,8 +330,13 @@ struct Descriptors {
     std::vector<VkDescriptorBufferInfo> buffers;
     std::vector<VkDescriptorImageInfo> images;
     std::vector<SetWrite> key;  // scratch for the set cache
+    SetWrite set_keys[4][64];
+    uint8_t set_counts[4] = {};
+    bool direct_keys = false;
     uint64_t dynamic = 0;              // set 0 bindings given a dynamic offset (ProgramLayout::dynamic)
     uint32_t dynamic_offset[64] = {};  // their ring offsets, by binding
+    uint64_t dynamic_ssbo = 0;         // set 1 bindings given a dynamic offset (ProgramLayout::dynamic_ssbo)
+    uint32_t dynamic_ssbo_offset[64] = {};
 };
 Descriptors g_sets;
 
@@ -318,11 +351,38 @@ struct CachedSet {
     uint32_t at = 0, n = 0;  // its writes in g_set_arena
     VkDescriptorSet set = VK_NULL_HANDLE;
 };
-constexpr uint32_t kSetSlots = 32768;
+constexpr uint32_t kSetSlots = 32768;  // was 8192: supports dense draw scenes without early cutoff
 CachedSet g_set_cache[kSetSlots];
 std::vector<SetWrite> g_set_arena;
 uint64_t g_set_generation = 1, g_set_hits = 0, g_set_misses = 0;
 uint32_t g_set_used = 0;
+
+constexpr uint32_t kSet1Slots = 32768;  // separate Set 1 (SSBO) cache so compute skinning ring churn never wipes Set 0 / Set 2
+CachedSet g_set1_cache[kSet1Slots];
+std::vector<SetWrite> g_set1_arena;
+uint64_t g_set1_generation = 1;
+uint32_t g_set1_used = 0;
+
+#if defined(HAS_ARM_CRC32)
+__attribute__((target("crc")))
+static inline uint64_t hash_step_crc32(uint64_t h, uint64_t v) {
+    uint32_t lo = __crc32cd(static_cast<uint32_t>(h), v);
+    uint32_t hi = __crc32cd(static_cast<uint32_t>(h >> 32), v ^ 0x9E3779B97F4A7C15ull);
+    return (uint64_t(hi) << 32) | lo;
+}
+#endif
+
+static inline uint64_t hash_step(uint64_t h, uint64_t v) {
+#if defined(HAS_ARM_CRC32)
+#if defined(__linux__) || defined(__ANDROID__)
+    static const bool s_has_crc32 = (getauxval(AT_HWCAP) & (1UL << 7)) != 0;
+    if (__builtin_expect(s_has_crc32, 1)) return hash_step_crc32(h, v);
+#else
+    return hash_step_crc32(h, v);
+#endif
+#endif
+    return (h ^ v) * 0x100000001B3ull ^ (h >> 31);
+}
 
 bool set_cache_on() {
     static const bool on = [] {
@@ -339,54 +399,223 @@ uint64_t handle_bits(H h) {
     return v;
 }
 
+template <typename H>
+H bits_handle(uint64_t v) {
+    H h{};
+    std::memcpy(&h, &v, sizeof h < sizeof v ? sizeof h : sizeof v);
+    return h;
+}
+
+void append_write_from_key(Descriptors& d, uint32_t k, const SetWrite& sw, VkDescriptorSet dst_set) {
+    VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+    w.dstSet = dst_set;
+    w.dstBinding = sw.binding;
+    w.descriptorCount = 1;
+    w.descriptorType = VkDescriptorType(sw.type);
+    if (k < 2) {
+        d.buffers.push_back({bits_handle<VkBuffer>(sw.a), sw.b, sw.c});
+        w.pBufferInfo = &d.buffers.back();
+    } else {
+        d.images.push_back({bits_handle<VkSampler>(sw.b), bits_handle<VkImageView>(sw.a), VkImageLayout(sw.c)});
+        w.pImageInfo = &d.images.back();
+    }
+    d.writes.push_back(w);
+}
+
+static bool set2_reuse_on() {
+    static int s_state = -1;
+    int st = s_state;
+    if (__builtin_expect(st < 0, 0)) {
+        const char* e = std::getenv("NX_SET2_REUSE");
+        st = (e && e[0] == '0') ? 0 : 1;
+        s_state = st;
+    }
+    return st != 0;
+}
+
+static thread_local VkDescriptorSetLayout s_last_set2_layout = VK_NULL_HANDLE;
+static thread_local uint64_t s_last_set2_gen = 0;
+static thread_local VkDescriptorSet s_last_set2 = VK_NULL_HANDLE;
+static thread_local uint64_t s_last_set2_serial = ~0ull;  // g_textures.serial the stored set was built for
+
+struct LastResolvedSet {
+    VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+    uint64_t gen = 0;
+    VkDescriptorSet set = VK_NULL_HANDLE;
+    uint32_t arena_at = 0, arena_n = 0;
+};
+static thread_local LastResolvedSet s_last_resolved[4];
+
+struct SlotBufferCache {
+    uint64_t address = 0;
+    const uint8_t* host_p = nullptr;
+    uint64_t copy_size = 0;
+    uint64_t size = 0;
+    uint64_t min_size = 0;
+    uint64_t gen = 0;
+    bool overlaps = false;
+    VkDescriptorBufferInfo info{};
+};
+static thread_local SlotBufferCache s_ubo_cache[2][18] = {};
+static thread_local SlotBufferCache s_ssbo_cache[2][16] = {};
+
+struct SupportUploadCache {
+    float vw = -1.0f, vh = -1.0f, scale = -1.0f;
+    uint64_t gen = 0;
+    VkDescriptorBufferInfo info{};
+};
+static thread_local SupportUploadCache s_support_cache{};
+
+struct ConstDataCache {
+    const ShaderInfo* shader = nullptr;
+    uint64_t gen = 0;
+    VkDescriptorBufferInfo info{};
+};
+static thread_local ConstDataCache s_const_data_cache[2]{};
+
 // d.sets from the cache or newly made, the writes of the cached ones dropped and the rest pointed at their new sets.
 void resolve_sets(const ProgramLayout& layout) {
     Descriptors& d = g_sets;
-    for (uint32_t k = 0; k < 4; k++) {
-        d.key.clear();
-        uint64_t h = handle_bits(layout.sets[k]) * 0x9E3779B97F4A7C15ull;
+    uint16_t set_indices[4][64];
+    uint8_t legacy_counts[4] = {};
+    bool overflow = false;
+    if (!d.direct_keys) {
+        if (d.writes.empty()) {
+            for (uint32_t k = 0; k < 4; k++) {
+                if (k == 2 && d.sets[2] != VK_NULL_HANDLE) continue;
+                d.sets[k] = VK_NULL_HANDLE;
+            }
+            return;
+        }
         for (size_t i = 0; i < d.writes.size(); i++) {
-            if (d.set_index[i] != k) continue;
-            const VkWriteDescriptorSet& w = d.writes[i];
-            SetWrite e;
-            e.binding = w.dstBinding, e.type = uint32_t(w.descriptorType);
-            if (w.pBufferInfo)
-                e.a = handle_bits(w.pBufferInfo->buffer), e.b = w.pBufferInfo->offset, e.c = w.pBufferInfo->range;
-            else if (w.pImageInfo)
-                e.a = handle_bits(w.pImageInfo->imageView), e.b = handle_bits(w.pImageInfo->sampler),
-                e.c = uint64_t(w.pImageInfo->imageLayout);
-            for (uint64_t v : {uint64_t(e.binding) << 32 | e.type, e.a, e.b, e.c})
-                h = (h ^ v) * 0x100000001B3ull, h ^= h >> 31;
-            d.key.push_back(e);
+            uint8_t s = d.set_index[i];
+            if (s < 4) {
+                if (legacy_counts[s] < 64) {
+                    set_indices[s][legacy_counts[s]++] = static_cast<uint16_t>(i);
+                } else {
+                    overflow = true;
+                    break;
+                }
+            }
+        }
+    }
+    for (uint32_t k = 0; k < 4; k++) {
+        if (k == 2 && d.sets[2] != VK_NULL_HANDLE) {
+            g_set_hits++;
+            continue;
         }
         d.sets[k] = VK_NULL_HANDLE;
-        if (d.key.empty()) continue;
+        const SetWrite* key_ptr = nullptr;
+        uint32_t key_n = 0;
+        if (d.direct_keys) {
+            key_n = d.set_counts[k];
+            if (!key_n) continue;
+            key_ptr = d.set_keys[k];
+        } else {
+            if (!overflow && !legacy_counts[k]) continue;
+            d.key.clear();
+            auto push_from_write = [&](const VkWriteDescriptorSet& w) {
+                SetWrite e;
+                e.binding = w.dstBinding, e.type = uint32_t(w.descriptorType);
+                if (w.pBufferInfo)
+                    e.a = handle_bits(w.pBufferInfo->buffer), e.b = w.pBufferInfo->offset, e.c = w.pBufferInfo->range;
+                else if (w.pImageInfo)
+                    e.a = handle_bits(w.pImageInfo->imageView), e.b = handle_bits(w.pImageInfo->sampler),
+                    e.c = uint64_t(w.pImageInfo->imageLayout);
+                d.key.push_back(e);
+            };
+            if (!overflow) {
+                d.key.reserve(legacy_counts[k]);
+                for (uint8_t j = 0; j < legacy_counts[k]; j++) push_from_write(d.writes[set_indices[k][j]]);
+            } else {
+                for (size_t i = 0; i < d.writes.size(); i++)
+                    if (d.set_index[i] == k) push_from_write(d.writes[i]);
+            }
+            if (d.key.empty()) continue;
+            key_ptr = d.key.data();
+            key_n = uint32_t(d.key.size());
+        }
+
+        const bool is_set1 = (k == 1);
+        const uint64_t cur_set_gen = is_set1 ? g_set1_generation : g_set_generation;
+        CachedSet* const cache_table = is_set1 ? g_set1_cache : g_set_cache;
+        const uint32_t cache_mask = (is_set1 ? kSet1Slots : kSetSlots) - 1;
+        const uint32_t cache_limit = (is_set1 ? kSet1Slots : kSetSlots) / 2;
+        uint32_t& cache_used = is_set1 ? g_set1_used : g_set_used;
+        std::vector<SetWrite>& cache_arena = is_set1 ? g_set1_arena : g_set_arena;
+
+        LastResolvedSet& last_r = s_last_resolved[k];
+        if (last_r.gen == cur_set_gen && last_r.layout == layout.sets[k] &&
+            last_r.set != VK_NULL_HANDLE && last_r.arena_n == key_n &&
+            last_r.arena_at + last_r.arena_n <= cache_arena.size() &&
+            std::memcmp(&cache_arena[last_r.arena_at], key_ptr, key_n * sizeof(SetWrite)) == 0) {
+            d.sets[k] = last_r.set;
+            g_set_hits++;
+            continue;
+        }
+
+        uint64_t h = handle_bits(layout.sets[k]) * 0x9E3779B97F4A7C15ull;
+        for (uint32_t j = 0; j < key_n; j++) {
+            const SetWrite& e = key_ptr[j];
+            for (uint64_t v : {uint64_t(e.binding) << 32 | e.type, e.a, e.b, e.c})
+                h = hash_step(h, v);
+        }
+
         CachedSet* slot = nullptr;
+        uint32_t hit_at = 0, hit_n = 0;
         for (uint32_t probe = uint32_t(h >> 32);; probe++) {
-            CachedSet& c = g_set_cache[probe & (kSetSlots - 1)];
-            if (c.generation != g_set_generation) {
+            CachedSet& c = cache_table[probe & cache_mask];
+            if (c.generation != cur_set_gen) {
                 slot = &c;
                 break;
             }
-            if (c.hash == h && c.layout == layout.sets[k] && c.n == d.key.size() &&
-                std::memcmp(&g_set_arena[c.at], d.key.data(), d.key.size() * sizeof(SetWrite)) == 0) {
-                d.sets[k] = c.set, g_set_hits++;
+            if (c.hash == h && c.layout == layout.sets[k] && c.n == key_n &&
+                std::memcmp(&cache_arena[c.at], key_ptr, key_n * sizeof(SetWrite)) == 0) {
+                d.sets[k] = c.set, hit_at = c.at, hit_n = c.n, g_set_hits++;
                 break;
             }
         }
-        if (d.sets[k]) continue;
-        d.sets[k] = descriptor_set(layout.sets[k]), g_set_misses++;
-        for (size_t i = 0; i < d.writes.size(); i++)
-            if (d.set_index[i] == k) d.writes[i].dstSet = d.sets[k];
-        if (!d.sets[k] || g_set_used >= kSetSlots / 2) continue;
-        *slot = {g_set_generation, h, layout.sets[k], uint32_t(g_set_arena.size()), uint32_t(d.key.size()), d.sets[k]};
-        g_set_arena.insert(g_set_arena.end(), d.key.begin(), d.key.end());
-        g_set_used++;
+        if (d.sets[k]) {
+            last_r = {layout.sets[k], cur_set_gen, d.sets[k], hit_at, hit_n};
+            continue;
+        }
+        d.sets[k] = is_set1 ? ssbo_descriptor_set(layout.sets[k]) : descriptor_set(layout.sets[k]);
+        g_set_misses++;
+
+        if (d.direct_keys) {
+            if (d.sets[k]) {
+                if (d.buffers.capacity() < 256) d.buffers.reserve(256);
+                if (d.images.capacity() < 256) d.images.reserve(256);
+                if (d.writes.capacity() < 512) d.writes.reserve(512);
+                for (uint32_t j = 0; j < key_n; j++) append_write_from_key(d, k, key_ptr[j], d.sets[k]);
+            }
+        } else if (!overflow) {
+            for (uint8_t j = 0; j < legacy_counts[k]; j++)
+                d.writes[set_indices[k][j]].dstSet = d.sets[k];
+        } else {
+            for (size_t i = 0; i < d.writes.size(); i++)
+                if (d.set_index[i] == k) d.writes[i].dstSet = d.sets[k];
+        }
+
+        if (!d.sets[k] || cache_used >= cache_limit) continue;
+        const uint32_t new_at = uint32_t(cache_arena.size());
+        *slot = {cur_set_gen, h, layout.sets[k], new_at, key_n, d.sets[k]};
+        cache_arena.insert(cache_arena.end(), key_ptr, key_ptr + key_n);
+        cache_used++;
+        last_r = {layout.sets[k], cur_set_gen, d.sets[k], new_at, key_n};
     }
-    size_t kept = 0;  // the writes of new sets only
-    for (size_t i = 0; i < d.writes.size(); i++)
-        if (d.writes[i].dstSet) d.writes[kept++] = d.writes[i];
-    d.writes.resize(kept);
+    if (d.sets[2] != VK_NULL_HANDLE) {
+        s_last_set2 = d.sets[2];
+        s_last_set2_layout = layout.sets[2];
+        s_last_set2_gen = g_set_generation;
+        s_last_set2_serial = g_textures.serial;
+    }
+    if (!d.direct_keys) {
+        size_t kept = 0;  // the writes of new sets only
+        for (size_t i = 0; i < d.writes.size(); i++)
+            if (d.writes[i].dstSet) d.writes[kept++] = d.writes[i];
+        d.writes.resize(kept);
+    }
 }
 
 }  // namespace
@@ -411,34 +640,64 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
         d = Descriptors{};
     else
         d.writes.clear(), d.set_index.clear(), d.buffers.clear(), d.images.clear();
+    d.set_counts[0] = d.set_counts[1] = d.set_counts[2] = d.set_counts[3] = 0;
     d.dynamic = 0;
+    d.dynamic_ssbo = 0;
     const bool every_set = draw_slow(kSlowEmptySets), shared = !draw_slow(kSlowUploads), cached = set_cache_on();
-    for (int k = 0; k < 4; k++) d.sets[k] = every_set ? descriptor_set(layout.sets[k]) : VK_NULL_HANDLE;
+    d.direct_keys = cached && !every_set;
+    auto alloc_set_k = [&](uint32_t k) {
+        return k == 1 ? ssbo_descriptor_set(layout.sets[k]) : descriptor_set(layout.sets[k]);
+    };
+    for (int k = 0; k < 4; k++) d.sets[k] = every_set ? alloc_set_k(uint32_t(k)) : VK_NULL_HANDLE;
     auto set_of = [&](uint32_t k) {  // with the set cache, made (or found) in bind_sets
         d.set_index.push_back(uint8_t(k));
         if (cached) return VkDescriptorSet(VK_NULL_HANDLE);
-        if (!d.sets[k]) d.sets[k] = descriptor_set(layout.sets[k]);
+        if (!d.sets[k]) d.sets[k] = alloc_set_k(k);
         return d.sets[k];
     };
     auto& writes = d.writes;
     auto& buffers = d.buffers;
     auto& images = d.images;
-    buffers.reserve(1024), images.reserve(1024), writes.reserve(2048);  // pointers into them are kept
-    float vw = g_state.has_viewport ? float(g_state.viewport[2]) : 1280.0f;
-    float vh = g_state.has_viewport ? float(g_state.viewport[3]) : 720.0f;
+    if (!d.direct_keys) buffers.reserve(1024), images.reserve(1024), writes.reserve(2048);  // pointers into them are kept
+    auto materialize_fallback = [&]() {
+        if (!d.direct_keys) return;
+        d.direct_keys = false;
+        buffers.reserve(1024), images.reserve(1024), writes.reserve(2048);
+        for (uint32_t sk = 0; sk < 4; sk++) {
+            for (uint8_t j = 0; j < d.set_counts[sk]; j++)
+                append_write_from_key(d, sk, d.set_keys[sk][j], set_of(sk));
+            d.set_counts[sk] = 0;
+        }
+    };
+    VkExtent2D pe = pass_extent();
+    float fallback_w = g_low_3d_target ? (pe.width ? float(pe.width) : 720.0f) : 1280.0f;
+    float fallback_h = g_low_3d_target ? (pe.height ? float(pe.height) : 405.0f) : 720.0f;
+    float vw = g_state.has_viewport ? float(g_state.viewport[2]) : fallback_w;
+    float vh = g_state.has_viewport ? float(g_state.viewport[3]) : fallback_h;
     if (g_uw_wide && g_state.has_viewport) {  // NX_ULTRAWIDE: the viewport the shaders see is the widened one
         int32_t x = g_state.viewport[0], w = g_state.viewport[2];
         uw_span(x, w, UINT32_MAX);
         vw = float(w);
     }
-    const float scale = g_hud_target ? hud_scale() : 1.0f;  // NX_HUD_1080: the shaders' render scale (gl_FragCoord)
+    if (g_low_3d_target && g_state.has_viewport) {
+        vw *= 0.75f;
+        vh *= 0.75f;
+    }
+    const float scale = g_hud_target ? hud_scale() : g_low_3d_target ? 0.75f : 1.0f;  // NX_HUD_1080 / NX_LOW_3D: the shaders' render scale (gl_FragCoord)
+    const uint64_t cur_gen = dedup_generation();
     SupportBuffer sb;  // built when a binding gets a copy of its own
     bool sb_built = false;
     auto support = [&]() -> VkDescriptorBufferInfo {
+        if (shared && s_support_cache.gen == cur_gen &&
+            s_support_cache.vw == vw && s_support_cache.vh == vh && s_support_cache.scale == scale) {
+            return s_support_cache.info;
+        }
         const SupportBuffer* block = shared ? support_block(vw, vh, scale) : nullptr;
         if (block) {
             Upload u = dedup_upload(reinterpret_cast<const uint8_t*>(block), sizeof sb, sizeof sb, 256);
-            return {u.buffer, u.offset, sizeof sb};
+            VkDescriptorBufferInfo info{u.buffer, u.offset, sizeof sb};
+            s_support_cache = {vw, vh, scale, cur_gen, info};
+            return info;
         }
         if (!sb_built) {
             sb = support_buffer_defaults();
@@ -457,25 +716,46 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
     };
     // The written ranges first (nvn_written.cpp): two bindings of one dispatch that meet get one copy, and bindings
     // that read what the dispatch writes see it, as on the GPU.
-    for (const ShaderInfo* s : shaders)
+    if (shaders.size() == 1 && shaders[0]->stage == ShaderStage::Compute) {
+        const ShaderInfo* s = shaders[0];
         for (const DescriptorBinding& b : s->refl.bindings) {
+            if (b.set >= 2) break;
             const uint8_t* p;
             uint64_t size;
-            if (b.set < 2 && b.nvn.source == NvnSource::StorageBuffer && storage(s, b, api_stage(s->stage), p, size) &&
+            if (b.nvn.source == NvnSource::StorageBuffer && storage(s, b, 5, p, size) &&
                 p && size && !written_separate())
-                written_bind(cb, p, size, std::max<uint64_t>((size + 15) & ~15ull, 0x10000));
+                written_bind(cb, p, size, std::max<uint64_t>((size + 15) & ~15ull, pad_min(0x10000)));
         }
+    }
     for (const ShaderInfo* s : shaders) {
         int st = api_stage(s->stage);
         for (const DescriptorBinding& b : s->refl.bindings) {
-            if (b.set >= 2) continue;
+            if (b.set >= 2) break;  // bindings are sorted by (set, binding)
             VkDescriptorBufferInfo info{};
             switch (b.nvn.source) {
                 case NvnSource::SupportBuffer: info = support(); break;
-                case NvnSource::ConstantData: info = buffer_of(cb, s->constants.data(), s->constants.size()); break;
+                case NvnSource::ConstantData: {
+                    if (shared && st < 2 && s_const_data_cache[st].shader == s && s_const_data_cache[st].gen == cur_gen) {
+                        info = s_const_data_cache[st].info;
+                    } else {
+                        info = buffer_of(cb, s->constants.data(), s->constants.size());
+                        if (shared && st < 2) s_const_data_cache[st] = {s, cur_gen, info};
+                    }
+                    break;
+                }
                 case NvnSource::UniformBlock:
                 case NvnSource::UniformAsStorage: {
                     const Range& r = b.nvn.index >= 0 && b.nvn.index < 18 ? g_state.uniforms[st][b.nvn.index] : Range{};
+                    bool indexed = b.set == 0 && b.binding < 64 && (dynamic_uniform_bindings(s) >> b.binding & 1);
+                    const uint64_t want_min = pad_min(indexed ? 0x10000 : 0x1000);
+                    if (shared && st < 2 && b.nvn.index >= 0 && b.nvn.index < 18 && r.address) {
+                        SlotBufferCache& slot = s_ubo_cache[st][b.nvn.index];
+                        if (slot.address == r.address && slot.size == r.size && slot.min_size == want_min &&
+                            slot.gen == cur_gen) {
+                            info = slot.info;
+                            break;
+                        }
+                    }
                     const uint8_t* p = r.address ? guest_bytes(r.address) : nullptr;
                     // Reads past the bound size return 0 on Maxwell and garbage on Metal (a UI shader read c3[10]
                     // of a 0x90-byte block and wrote Inf): the bound data goes in a zero-padded 4 KB at least.
@@ -500,24 +780,46 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
                                 (unsigned long long)nz, (long long)first, line.c_str());
                         }
                     }
-                    bool indexed = b.set == 0 && b.binding < 64 && (dynamic_uniform_bindings(s) >> b.binding & 1);
-                    info = buffer_of(cb, p, p ? std::min<uint64_t>(r.size, 0x10000) : 0, pad_min(indexed ? 0x10000 : 0x1000));
+                    const uint64_t copy_sz = p ? std::min<uint64_t>(r.size, 0x10000) : 0;
+                    info = buffer_of(cb, p, copy_sz, want_min);
+                    if (shared && st < 2 && b.nvn.index >= 0 && b.nvn.index < 18 && r.address && p) {
+                        s_ubo_cache[st][b.nvn.index] = {r.address, p, copy_sz, r.size, want_min, cur_gen, false, info};
+                    }
                     break;
                 }
                 case NvnSource::StorageBuffer: {
+                    const Range& r = b.nvn.index >= 0 && b.nvn.index < 16 ? g_state.storage[st][b.nvn.index] : Range{};
+                    const uint64_t want_min = pad_min(0x10000);
+                    if (shared && s->stage != ShaderStage::Compute && st < 2 && b.nvn.index >= 0 && b.nvn.index < 16 && r.address) {
+                        SlotBufferCache& slot = s_ssbo_cache[st][b.nvn.index];
+                        if (slot.address == r.address && slot.size == r.size && slot.min_size == want_min &&
+                            slot.gen == cur_gen) {
+                            if (slot.overlaps) written_count_bind();
+                            info = slot.info;
+                            break;
+                        }
+                    }
                     const uint8_t* p;
                     uint64_t size;
                     bool written = storage(s, b, st, p, size);
-                    if (!written && s->stage != ShaderStage::Compute && written_overlaps(p, size)) written_count_bind();
+                    bool ov = !written && s->stage != ShaderStage::Compute && written_overlaps(p, size);
+                    if (ov) written_count_bind();
                     // At least 64 KB: Metal does not bound-check, and a shader writing past a small or missing
                     // buffer overwrote the next data in the upload buffer (garbage everywhere after a compute).
-                    info = buffer_of(cb, p, size, written ? 0x10000 : pad_min(0x10000), written);
+                    info = buffer_of(cb, p, size, want_min, written);
+                    if (shared && !written && s->stage != ShaderStage::Compute && st < 2 && b.nvn.index >= 0 && b.nvn.index < 16 && r.address && p) {
+                        s_ssbo_cache[st][b.nvn.index] = {r.address, p, size, r.size, want_min, cur_gen, ov, info};
+                    }
                     break;
                 }
                 case NvnSource::DriverConstants: {
-                    if (const uint8_t* block = shared ? constants_block(s->stage, st) : nullptr) {
-                        Upload u = dedup_upload(block, 0x1000, 0x1000, 256);
-                        info = {u.buffer, u.offset, 0x1000};
+                    if (ConstantsBlock* cb_blk = shared ? constants_block_obj(s->stage, st) : nullptr) {
+                        if (cb_blk->upload_gen != cur_gen) {
+                            Upload u = dedup_upload(cb_blk->bytes.data(), 0x1000, 0x1000, 256);
+                            cb_blk->upload_info = {u.buffer, u.offset, 0x1000};
+                            cb_blk->upload_gen = cur_gen;
+                        }
+                        info = cb_blk->upload_info;
                         break;
                     }
                     auto c0 = driver_constants(s->stage, st);
@@ -530,109 +832,289 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
             if (b.set == 0 && b.binding < 64 && layout.dynamic >> b.binding & 1) {  // the offset goes with the bind
                 d.dynamic |= 1ull << b.binding, d.dynamic_offset[b.binding] = uint32_t(info.offset);
                 info.offset = 0, type = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
+            } else if (b.set == 1 && b.binding < 64 && layout.dynamic_ssbo >> b.binding & 1) {
+                d.dynamic_ssbo |= 1ull << b.binding, d.dynamic_ssbo_offset[b.binding] = uint32_t(info.offset);
+                info.offset = 0, type = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC;
             }
-            buffers.push_back(info);
-            VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w.dstSet = set_of(b.set);
-            w.dstBinding = b.binding;
-            w.descriptorCount = 1;
-            w.descriptorType = type;
-            w.pBufferInfo = &buffers.back();
-            writes.push_back(w);
+            if (d.direct_keys && b.set < 4 && d.set_counts[b.set] < 64) {
+                d.set_keys[b.set][d.set_counts[b.set]++] = {
+                    b.binding, uint32_t(type), handle_bits(info.buffer), info.offset, info.range};
+            } else {
+                materialize_fallback();
+                buffers.push_back(info);
+                VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
+                w.dstSet = set_of(b.set);
+                w.dstBinding = b.binding;
+                w.descriptorCount = 1;
+                w.descriptorType = type;
+                w.pBufferInfo = &buffers.back();
+                writes.push_back(w);
+            }
         }
     }
-    const DrawTextures& t = g_textures;
-    for (size_t k = 0; k < t.bindings.size(); k++) {
-        auto [s, b] = t.bindings[k];
-        const ResolvedTexture r = k < t.resolved.size() ? t.resolved[k] : ResolvedTexture{};
-        VkDescriptorImageInfo ii{};
-        ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
-        ii.imageView = r.texture ? sampled_view(cb, r.texture, b->image, &r.view, &ii.imageLayout)
-                                 : dummy_view(cb, b->image);
-        ii.sampler = r.vk_sampler ? r.vk_sampler : sampler_for(r.sampler, b->image.depth, g_state.depth.depth_test);
-        images.push_back(ii);
-        VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-        w.dstSet = set_of(2);
-        w.dstBinding = b->binding;
-        w.descriptorCount = 1;
-        w.descriptorType = VkDescriptorType(b->type);
-        w.pImageInfo = &images.back();
-        writes.push_back(w);
-    }
-    for (const ShaderInfo* s : shaders) {
-        int st = api_stage(s->stage);
-        for (const DescriptorBinding& b : s->refl.bindings) {
-            if (b.set != 3) continue;
-            uint64_t handle = b.nvn.source == NvnSource::ImageBinding && b.nvn.index >= 0 && b.nvn.index < 16
-                                  ? g_state.images[st][b.nvn.index]
-                                  : 0;
-            uint64_t texture = 0;
-            SamplerInfo si;
-            ViewInfo view;
-            if (handle) texture_for(handle & 0xFFFFF, texture, si, &view);
-            VkDescriptorImageInfo ii{};
-            ii.imageView = storage_view(cb, texture, b.image, texture ? &view : nullptr);
-            ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+    auto push_image_write = [&](uint32_t set_k, uint32_t binding, VkDescriptorType type, const VkDescriptorImageInfo& ii) {
+        if (d.direct_keys && d.set_counts[set_k] < 64) {
+            d.set_keys[set_k][d.set_counts[set_k]++] = {
+                binding, uint32_t(type), handle_bits(ii.imageView), handle_bits(ii.sampler), uint64_t(ii.imageLayout)};
+        } else {
+            materialize_fallback();
             images.push_back(ii);
             VkWriteDescriptorSet w{VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET};
-            w.dstSet = set_of(3);
-            w.dstBinding = b.binding;
+            w.dstSet = set_of(set_k);
+            w.dstBinding = binding;
             w.descriptorCount = 1;
-            w.descriptorType = VkDescriptorType(b.type);
+            w.descriptorType = type;
             w.pImageInfo = &images.back();
             writes.push_back(w);
+        }
+    };
+    const DrawTextures& t = g_textures;
+    if (cached && !every_set && t.set2_unchanged && !t.bindings.empty() &&
+        s_last_set2 != VK_NULL_HANDLE && s_last_set2_layout == layout.sets[2] && s_last_set2_gen == g_set_generation &&
+        s_last_set2_serial == t.serial && !draw_slow(kSlowScratch)) {
+        d.sets[2] = s_last_set2;
+    } else {
+        const uint64_t vf_ser = view_forget_serial();
+        for (size_t k = 0; k < t.bindings.size(); k++) {
+            auto [s, b] = t.bindings[k];
+            ResolvedTexture& r = g_textures.resolved[k];
+            VkDescriptorImageInfo ii{};
+            GpuImage* cur = set2_reuse_on() && r.texture ? (r.gpu_image ? r.gpu_image : image_of(r.texture)) : nullptr;
+            const VkImageLayout want_now = cur ? (cur->rendered ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL)
+                                               : VK_IMAGE_LAYOUT_UNDEFINED;
+            if (cur && r.ready_cached && r.vk_view != VK_NULL_HANDLE && r.vk_image == cur->image &&
+                r.vk_view_serial == vf_ser && cur->layout == want_now) {
+                ii.imageView = r.vk_view;
+                ii.imageLayout = want_now;
+            } else {
+                ii.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                ii.imageView = r.texture ? sampled_view(cb, r.texture, b->image, &r.view, &ii.imageLayout)
+                                         : dummy_view(cb, b->image);
+                if (r.texture) {
+                    GpuImage* made = r.gpu_image ? r.gpu_image : image_of(r.texture);
+                    r.gpu_image = made;
+                    if (made && ii.imageView != VK_NULL_HANDLE) {
+                        r.vk_view = ii.imageView;
+                        r.vk_image = made->image;
+                        r.vk_layout = ii.imageLayout;
+                        r.vk_view_serial = view_forget_serial();
+                        r.ready_cached = true;
+                    } else {
+                        r.vk_view = VK_NULL_HANDLE;
+                        r.ready_cached = false;
+                    }
+                }
+            }
+            ii.sampler = r.vk_sampler ? r.vk_sampler : sampler_for(r.sampler, b->image.depth, g_state.depth.depth_test);
+            push_image_write(2, b->binding, VkDescriptorType(b->type), ii);
+        }
+    }
+    if (layout.sets[3] != VK_NULL_HANDLE) {
+        for (const ShaderInfo* s : shaders) {
+            int st = api_stage(s->stage);
+            for (const DescriptorBinding& b : s->refl.bindings) {
+                if (b.set != 3) continue;
+                uint64_t handle = b.nvn.source == NvnSource::ImageBinding && b.nvn.index >= 0 && b.nvn.index < 16
+                                      ? g_state.images[st][b.nvn.index]
+                                      : 0;
+                uint64_t texture = 0;
+                SamplerInfo si;
+                ViewInfo view;
+                if (handle) texture_for(handle & 0xFFFFF, texture, si, &view);
+                VkDescriptorImageInfo ii{};
+                ii.imageView = storage_view(cb, texture, b.image, texture ? &view : nullptr);
+                ii.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+                push_image_write(3, b.binding, VkDescriptorType(b.type), ii);
+            }
         }
     }
 }
 
 // A set with no binding in the layout is statically used by no shader, so nothing need be bound there: the runs of
 // sets build_sets allocated are bound, in ascending order (each bind leaves the lower sets, bound with this same
-// layout, undisturbed).
+// layout, undisturbed). Redundant binds of sets already in place under the same pipeline layout are skipped.
+struct BoundSets {
+    VkCommandBuffer cb = VK_NULL_HANDLE;
+    VkPipelineLayout layout = VK_NULL_HANDLE;
+    VkDescriptorSet sets[4] = {};
+    uint32_t dynamic_offsets[64] = {};
+    uint32_t dynamic_count = 0;
+    uint32_t dynamic_ssbo_offsets[64] = {};
+    uint32_t dynamic_ssbo_count = 0;
+};
+BoundSets g_bound_sets[2] = {};  // 0: graphics, 1: compute
+uint64_t g_sets_bind_calls = 0, g_sets_bound = 0, g_sets_bind_skipped = 0;
+
+void sets_invalidate_bound() {
+    g_bound_sets[0] = BoundSets{};
+    g_bound_sets[1] = BoundSets{};
+}
+
 void bind_sets(VkCommandBuffer cb, VkPipelineBindPoint point, const ProgramLayout& layout) {
     Descriptors& d = g_sets;
     if (set_cache_on()) resolve_sets(layout);
-    if (!d.writes.empty()) p_vkUpdateDescriptorSets(vk_device(), uint32_t(d.writes.size()), d.writes.data(), 0, nullptr);
-    // Set 0's dynamic offsets, in binding order (every dynamic binding of the layout; one no stage wrote: 0).
-    uint32_t offsets[64];
-    uint32_t noff = 0;
+    if (!d.writes.empty()) {
+        p_vkUpdateDescriptorSets(vk_device(), uint32_t(d.writes.size()), d.writes.data(), 0, nullptr);
+        d.writes.clear();
+    }
+    // Set 0 and Set 1 dynamic offsets, in binding order (every dynamic binding of the layout; one no stage wrote: 0).
+    uint32_t offsets[128];
+    uint32_t noff0 = 0;
     for (uint64_t m = layout.dynamic; m; m &= m - 1) {
         uint32_t b = uint32_t(__builtin_ctzll(m));
-        offsets[noff++] = d.dynamic >> b & 1 ? d.dynamic_offset[b] : 0;
+        offsets[noff0++] = d.dynamic >> b & 1 ? d.dynamic_offset[b] : 0;
     }
-    if (draw_slow(kSlowEmptySets)) {
-        p_vkCmdBindDescriptorSets(cb, point, layout.layout, 0, 4, d.sets, noff, offsets);
+    uint32_t noff1 = 0;
+    for (uint64_t m = layout.dynamic_ssbo; m; m &= m - 1) {
+        uint32_t b = uint32_t(__builtin_ctzll(m));
+        offsets[noff0 + noff1++] = d.dynamic_ssbo >> b & 1 ? d.dynamic_ssbo_offset[b] : 0;
+    }
+    if (draw_slow(kSlowEmptySets) || draw_slow(kSlowState)) {
+        p_vkCmdBindDescriptorSets(cb, point, layout.layout, 0, 4, d.sets, noff0 + noff1, offsets);
         return;
     }
-    for (uint32_t k = 0; k < 4;) {
+
+    const int pt = (point == VK_PIPELINE_BIND_POINT_COMPUTE ? 1 : 0);
+    BoundSets& b = g_bound_sets[pt];
+    if (b.cb != cb) {
+        b = BoundSets{};
+        b.cb = cb;
+    }
+    if (b.layout != layout.layout) {
+        b.layout = layout.layout;
+        for (int k = 0; k < 4; k++) b.sets[k] = VK_NULL_HANDLE;
+        b.dynamic_count = 0;
+        b.dynamic_ssbo_count = 0;
+    }
+
+    bool need[4] = {};
+    for (uint32_t k = 0; k < 4; k++) {
         if (!d.sets[k]) {
-            k++, g_sets_skipped++;
+            b.sets[k] = VK_NULL_HANDLE;
+            g_sets_skipped++;
+            continue;
+        }
+        if (k == 0) {
+            need[0] = (b.sets[0] != d.sets[0] || b.dynamic_count != noff0 ||
+                       std::memcmp(b.dynamic_offsets, offsets, noff0 * sizeof(uint32_t)) != 0);
+        } else if (k == 1) {
+            need[1] = (b.sets[1] != d.sets[1] || b.dynamic_ssbo_count != noff1 ||
+                       std::memcmp(b.dynamic_ssbo_offsets, offsets + noff0, noff1 * sizeof(uint32_t)) != 0);
+        } else {
+            need[k] = (b.sets[k] != d.sets[k]);
+        }
+        if (!need[k]) g_sets_bind_skipped++;
+    }
+
+    g_sets_bind_calls++;
+    for (uint32_t k = 0; k < 4;) {
+        if (!need[k]) {
+            k++;
             continue;
         }
         uint32_t n = 1;
-        while (k + n < 4 && d.sets[k + n]) n++;
-        p_vkCmdBindDescriptorSets(cb, point, layout.layout, k, n, d.sets + k, k == 0 ? noff : 0, offsets);
+        while (k + n < 4 && need[k + n]) n++;
+        uint32_t dyn_count = 0;
+        const uint32_t* dyn_ptr = nullptr;
+        if (k == 0) {
+            dyn_count = (n >= 2) ? (noff0 + noff1) : noff0;
+            dyn_ptr = offsets;
+        } else if (k == 1) {
+            dyn_count = noff1;
+            dyn_ptr = offsets + noff0;
+        }
+        p_vkCmdBindDescriptorSets(cb, point, layout.layout, k, n, d.sets + k, dyn_count, dyn_ptr);
         if (gpu_profile_on()) gpu_profile_count(2);
+        for (uint32_t i = 0; i < n; i++) {
+            b.sets[k + i] = d.sets[k + i];
+            g_sets_bound++;
+        }
+        if (k == 0) {
+            b.dynamic_count = noff0;
+            std::memcpy(b.dynamic_offsets, offsets, noff0 * sizeof(uint32_t));
+        }
+        if (k <= 1 && k + n > 1) {
+            b.dynamic_ssbo_count = noff1;
+            std::memcpy(b.dynamic_ssbo_offsets, offsets + noff0, noff1 * sizeof(uint32_t));
+        }
         k += n;
     }
 }
 
 // Texture bindings of a program's stages and their handles, into g_textures. kNeedBreak: one needs a transfer or a
 // layout change (so no render pass may be open while the sets are built); kSampledPending: one has a pending clear.
+static thread_local const ShaderInfo* s_cached_sh0 = nullptr;
+static thread_local const ShaderInfo* s_cached_sh1 = nullptr;
+static thread_local size_t s_cached_sh_count = 0;
+static thread_local uint32_t s_cached_need_break = 0;
+static thread_local bool s_cached_biased = false;
+static thread_local uint64_t s_cached_tex_pool = 0;
+static thread_local uint64_t s_cached_smp_pool = 0;
+static thread_local bool s_cached_has_uniform_handle = false;
+static thread_local bool s_cached_all_fast_ready = false;
+static thread_local uint64_t s_cached_fast_ready_frame = 0;
+static thread_local uint32_t s_cached_tex_version = 0;
+static thread_local uint64_t s_cached_pass_serial = UINT64_MAX;
+static thread_local uint32_t s_cached_pass_written = UINT32_MAX;
+static thread_local uint64_t s_cached_vf_serial = 0;
+
+// Set 2 reuse, cached image views and the fast readiness check (NX_SET2_REUSE=0 disables).
 uint32_t gather_textures(const std::vector<const ShaderInfo*>& shaders) {
     DrawTextures& t = g_textures;
+    const bool reuse = set2_reuse_on();
     if (draw_slow(kSlowScratch))
         t = DrawTextures{};
-    else
+
+    const size_t n_sh = shaders.size();
+    const ShaderInfo* sh0 = n_sh > 0 ? shaders[0] : nullptr;
+    const ShaderInfo* sh1 = n_sh > 1 ? shaders[1] : nullptr;
+    const bool biased = g_state.depth.depth_test;
+
+    const bool shaders_same = (n_sh == s_cached_sh_count && sh0 == s_cached_sh0 && sh1 == s_cached_sh1 && s_cached_sh_count > 0);
+    const bool pools_same = (g_state.texture_pool == s_cached_tex_pool && g_state.sampler_pool == s_cached_smp_pool);
+    const bool biased_changed = (biased != s_cached_biased);
+    const uint64_t pass_ser = current_pass_serial();
+    const uint32_t pass_wrt = current_pass_written();
+    const uint64_t vf_ser = view_forget_serial();
+    const uint64_t cur_frame_id = g_frame.load(std::memory_order_relaxed) + 1;
+
+    if (shaders_same && pools_same && !biased_changed && reuse && !draw_slow(kSlowScratch) &&
+        !s_cached_has_uniform_handle && s_cached_all_fast_ready && s_cached_fast_ready_frame == cur_frame_id &&
+        pass_open() && g_tex_state_version == s_cached_tex_version &&
+        pass_ser == s_cached_pass_serial && pass_wrt == s_cached_pass_written &&
+        vf_ser == s_cached_vf_serial) {
+        t.set2_unchanged = true;
+        return 0;
+    }
+
+    s_cached_tex_pool = g_state.texture_pool;
+    s_cached_smp_pool = g_state.sampler_pool;
+    s_cached_biased = biased;
+
+    if (!shaders_same || draw_slow(kSlowScratch)) {
         t.bindings.clear();
-    uint32_t out = 0;
-    for (const ShaderInfo* s : shaders)
-        for (const DescriptorBinding& b : s->refl.bindings) {
-            if (b.set == 2) t.bindings.push_back({s, &b});
-            if (b.set == 3) out |= kNeedBreak;  // storage images change layout
-        }
-    t.handles.assign(t.bindings.size(), 0);
-    t.resolved.assign(t.bindings.size(), ResolvedTexture{});
+        s_cached_need_break = 0;
+        s_cached_has_uniform_handle = false;
+        for (const ShaderInfo* s : shaders)
+            for (const DescriptorBinding& b : s->refl.bindings) {
+                if (b.set == 2) {
+                    t.bindings.push_back({s, &b});
+                    if (b.nvn.source == NvnSource::HandleInUniform) s_cached_has_uniform_handle = true;
+                }
+                if (b.set == 3) s_cached_need_break |= kNeedBreak;  // storage images change layout
+            }
+        s_cached_sh0 = sh0;
+        s_cached_sh1 = sh1;
+        s_cached_sh_count = n_sh;
+        t.handles.assign(t.bindings.size(), 0);
+        t.resolved.assign(t.bindings.size(), ResolvedTexture{});
+    }
+
+    uint32_t out = s_cached_need_break;
     const uint64_t submit_ns = submit_start_ns();
+    bool any_changed = !shaders_same || !pools_same || biased_changed;
+    bool all_fast_ready = (out == 0);
+
     for (size_t k = 0; k < t.bindings.size(); k++) {
         auto [s, b] = t.bindings[k];
         int st = api_stage(s->stage);
@@ -644,48 +1126,164 @@ uint32_t gather_textures(const std::vector<const ShaderInfo*>& shaders) {
             const uint8_t* p = r.address ? guest_bytes(r.address) : nullptr;
             if (p && uint64_t(b->nvn.word) * 4 + 4 <= r.size) handle = *reinterpret_cast<const uint32_t*>(p + b->nvn.word * 4);
         }
-        t.handles[k] = handle;
+
         ResolvedTexture& r = t.resolved[k];
-        uint64_t texture = 0;
-        // A pool entry naming a texture that no longer exists samples the dummy, like no texture: it ended the
-        // render pass at every draw (~1.4M times in a run, docs/nvn/DEBUG.md #34).
-        if (HandleSlot* slot = handle_slot(handle)) {
-            if (slot->object) texture = slot->texture, slot->object->last_sampled = submit_ns;
-            r.sampler = slot->sampler, r.view = slot->view;
-            // The same for every draw (a cache key built per binding otherwise, nvn_sampler.cpp). NX_LOD_BIAS applies
-            // to the 3D draws only: those that test depth.
-            const bool biased = g_state.depth.depth_test;
-            VkSampler& vk = slot->vk_sampler[(b->image.depth ? 1 : 0) + (biased ? 2 : 0)];
-            if (!vk) vk = sampler_for(slot->sampler, b->image.depth, biased);
-            r.vk_sampler = vk;
-        } else {
-            lookup_handle(handle, texture, r.sampler, &r.view);
-            if (Texture* sampled = texture ? get<Texture>(texture) : nullptr)
-                sampled->last_sampled = submit_ns;
-            else
-                texture = 0;
+        if (handle != t.handles[k] || !shaders_same || !pools_same || biased_changed) {
+            any_changed = true;
+            t.handles[k] = handle;
+            uint64_t texture = 0;
+            Texture* obj = nullptr;
+            // A pool entry naming a texture that no longer exists samples the dummy, like no texture: it ended the
+            // render pass at every draw (~1.4M times in a run, docs/nvn/DEBUG.md #34).
+            if (HandleSlot* slot = handle_slot(handle)) {
+                if (slot->object) {
+                    texture = slot->texture;
+                    obj = slot->object;
+                    obj->last_sampled.store(submit_ns, std::memory_order_relaxed);
+                }
+                r.sampler = slot->sampler, r.view = slot->view;
+                // The same for every draw (a cache key built per binding otherwise, nvn_sampler.cpp). NX_LOD_BIAS applies
+                // to the 3D draws only: those that test depth.
+                VkSampler& vk = slot->vk_sampler[(b->image.depth ? 1 : 0) + (biased ? 2 : 0)];
+                if (!vk) vk = sampler_for(slot->sampler, b->image.depth, biased);
+                r.vk_sampler = vk;
+            } else {
+                lookup_handle(handle, texture, r.sampler, &r.view);
+                if (Texture* sampled = texture ? get<Texture>(texture) : nullptr) {
+                    obj = sampled;
+                    sampled->last_sampled.store(submit_ns, std::memory_order_relaxed);
+                } else {
+                    texture = 0;
+                }
+                r.vk_sampler = VK_NULL_HANDLE;
+            }
+            r.texture = texture;
+            r.object = obj;
+            r.gpu_image = obj ? obj->image.get() : nullptr;
+            r.vk_view = VK_NULL_HANDLE;
+            r.ready_cached = false;
         }
-        r.texture = texture;
-        if (texture ? !sampled_ready(texture) : !dummy_ready(b->image)) out |= kNeedBreak;
-        if (!texture) continue;
-        GpuImage* img = image_of(texture);
-        // Sampling one of the open pass's targets (a depth buffer read back by the character lighting) needs what
-        // was rendered stored first: a fresh pass. SetRenderTargets used to end every pass, which did this by chance
-        // (docs/nvn/DEBUG.md #35). Only when a draw of this pass wrote it (pass_wrote, nvn_draw.cpp).
-        if (pass_wrote(img)) out |= kNeedBreak;
-        if (clears_pending_image(img)) out |= kNeedBreak | kSampledPending;
+
+        if (r.texture) {
+            Texture* tx = reuse ? (r.object ? r.object : get<Texture>(r.texture)) : nullptr;
+            GpuImage* img = tx ? tx->image.get() : nullptr;
+            auto check_tx_fast_ready = [&](Texture* t_obj, GpuImage* g_img) -> bool {
+                if (!t_obj || !g_img) return false;
+                if (t_obj->stride && !g_img->rendered && t_obj->hashed_submit != cur_frame_id) return false;
+                return !(t_obj->dirty.load(std::memory_order_relaxed) && !g_img->rendered) &&
+                       !t_obj->has_writes.load(std::memory_order_relaxed) &&
+                       (g_img->rendered ? g_img->layout == VK_IMAGE_LAYOUT_GENERAL
+                                        : (g_img->uploaded && g_img->layout == VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL));
+            };
+            bool fast_ready = check_tx_fast_ready(tx, img);
+            if (!fast_ready && !sampled_ready(r.texture)) {
+                out |= kNeedBreak;
+                r.ready_cached = false;
+                any_changed = true;
+                all_fast_ready = false;
+            } else {
+                r.ready_cached = true;
+                if (!fast_ready) {
+                    if (!img && tx) img = tx->image.get();
+                    if (!check_tx_fast_ready(tx, img)) all_fast_ready = false;
+                }
+            }
+            if (!img) img = image_of(r.texture);
+            r.gpu_image = img;
+            // Sampling one of the open pass's targets (a depth buffer read back by the character lighting) needs what
+            // was rendered stored first: a fresh pass. SetRenderTargets used to end every pass, which did this by chance
+            // (docs/nvn/DEBUG.md #35). Only when a draw of this pass wrote it (pass_wrote, nvn_draw.cpp).
+            // These need sampled_view's transition (and pending clear) in build_sets: never the cached view.
+            if (pass_wrote(img)) out |= kNeedBreak, any_changed = true, r.ready_cached = false, all_fast_ready = false;
+            if (clears_pending_image(img)) out |= kNeedBreak | kSampledPending, any_changed = true, r.ready_cached = false, all_fast_ready = false;
+            if (img) {
+                VkImageLayout want_layout = img->rendered ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                if (r.vk_view == VK_NULL_HANDLE || r.vk_layout != want_layout || r.vk_image != img->image ||
+                    r.vk_view_serial != vf_ser) {
+                    any_changed = true;
+                    all_fast_ready = false;
+                    if (r.vk_image != img->image || r.vk_view_serial != vf_ser) r.vk_view = VK_NULL_HANDLE;
+                }
+            }
+        } else {
+            if (!dummy_ready(b->image)) out |= kNeedBreak, any_changed = true, all_fast_ready = false;
+            r.ready_cached = false;
+            all_fast_ready = false;
+        }
     }
+    if (any_changed) t.serial++;
+    t.set2_unchanged = reuse && !any_changed && !(out & (kNeedBreak | kSampledPending));
+    s_cached_all_fast_ready = all_fast_ready && t.set2_unchanged;
+    s_cached_fast_ready_frame = cur_frame_id;
+    s_cached_tex_version = g_tex_state_version;
+    s_cached_pass_serial = pass_ser;
+    s_cached_pass_written = pass_wrt;
+    s_cached_vf_serial = vf_ser;
     return out;
 }
 
 // The zero stream (vertex binding 15): one per submit instead of 64 bytes per draw. Host bytes that never change, so
 // dedup may share them.
+static thread_local Upload s_cached_zero_stream{};
+static thread_local bool s_cached_zero_valid = false;
+
 Upload zero_stream() {
+    if (__builtin_expect(s_cached_zero_valid, 1)) return s_cached_zero_stream;
     static const uint8_t zeros[64] = {};
-    if (!draw_slow(kSlowUploads)) return dedup_upload(zeros, sizeof zeros, sizeof zeros, 16);
+    if (!draw_slow(kSlowUploads)) {
+        s_cached_zero_stream = dedup_upload(zeros, sizeof zeros, sizeof zeros, 16);
+        s_cached_zero_valid = true;
+        return s_cached_zero_stream;
+    }
     Upload z = upload_alloc(64, 16);
     std::memset(z.ptr, 0, 64);
     return z;
+}
+
+struct LastIndexEntry {
+    const uint8_t* host_p = nullptr;
+    uint64_t addr = 0;
+    uint64_t bytes = 0;
+    uint32_t mask = 0;
+    uint64_t gen = 0;
+    Upload upload{};
+};
+constexpr size_t kIndexCacheSlots = 4;
+static LastIndexEntry s_index_cache[kIndexCacheSlots];
+static size_t s_index_cursor = 0;
+
+void index_cache_invalidate(const uint8_t* p, uint64_t size) {
+    if (!p || !size) return;
+    const uint8_t* p_end = p + size;
+    for (size_t k = 0; k < kIndexCacheSlots; k++) {
+        if (s_index_cache[k].host_p &&
+            p < s_index_cache[k].host_p + s_index_cache[k].bytes &&
+            s_index_cache[k].host_p < p_end) {
+            s_index_cache[k].addr = 0;
+            s_index_cache[k].host_p = nullptr;
+        }
+    }
+}
+
+void sets_invalidate_range(const uint8_t* p, uint64_t size) {
+    if (!p || !size) return;
+    const uint8_t* p_end = p + size;
+    for (int st = 0; st < 2; st++) {
+        for (int i = 0; i < 18; i++) {
+            SlotBufferCache& s = s_ubo_cache[st][i];
+            if (s.host_p && p < s.host_p + s.copy_size && s.host_p < p_end) {
+                s.address = 0;
+                s.host_p = nullptr;
+            }
+        }
+        for (int i = 0; i < 16; i++) {
+            SlotBufferCache& s = s_ssbo_cache[st][i];
+            if (s.host_p && p < s.host_p + s.copy_size && s.host_p < p_end) {
+                s.address = 0;
+                s.host_p = nullptr;
+            }
+        }
+    }
 }
 
 // draw_inputs (nvn_written.cpp) with the indices shared: a mesh drawn in several passes of a submit (depth, shadows,
@@ -695,19 +1293,77 @@ bool draw_inputs_shared(VkCommandBuffer cb, const ShaderInfo* vs, bool indexed, 
     if (!indexed || draw_slow(kSlowUploads) || vk_index_type(c.mask) == VK_INDEX_TYPE_UINT8_EXT)
         return draw_inputs(cb, vs, indexed, c, in);
     draw_inputs(cb, vs, false, c, in);  // the vertex streams
-    const uint8_t* p = guest_bytes(c.a[0]);
-    if (!p) return false;
     in.index_type = vk_index_type(c.mask);
     uint64_t bytes = uint64_t(uint32_t(c.i[0])) * index_size(c.mask);
+    const uint64_t cur_gen = dedup_generation();
+
+    if (c.a[0]) {
+        for (size_t k = 0; k < kIndexCacheSlots; k++) {
+            const LastIndexEntry& e = s_index_cache[k];
+            if (e.addr == c.a[0] && e.bytes == bytes && e.mask == c.mask && e.gen == cur_gen) {
+                in.index = e.upload;
+                return true;
+            }
+        }
+    }
+    const uint8_t* p = guest_bytes(c.a[0]);
+    if (!p) return false;
     g_upload_kind = kUploadIndex;
-    if (!written_read(cb, p, bytes, bytes, index_size(c.mask), in.index)) in.index = dedup_upload(p, bytes, bytes, 16);
+    if (!written_read(cb, p, bytes, bytes, index_size(c.mask), in.index))
+        in.index = dedup_upload(p, bytes, bytes, 16);
     g_upload_kind = kUploadOther;
+    s_index_cache[s_index_cursor] = {p, c.a[0], bytes, c.mask, cur_gen, in.index};
+    s_index_cursor = (s_index_cursor + 1) & (kIndexCacheSlots - 1);
     return true;
 }
 
 void sets_begin_submit() {
-    handles_reset();
-    g_set_generation++, g_set_used = 0, g_set_arena.clear();
+    s_cached_zero_valid = false;
+    s_cached_sh_count = 0;
+    s_cached_sh0 = nullptr;
+    s_cached_sh1 = nullptr;
+    s_cached_need_break = 0;
+    s_cached_tex_pool = 0;
+    s_cached_smp_pool = 0;
+    s_cached_all_fast_ready = false;
+    s_cached_fast_ready_frame = 0;
+    s_cached_pass_serial = UINT64_MAX;
+    s_cached_pass_written = UINT32_MAX;
+    s_last_set2 = VK_NULL_HANDLE;
+    s_last_set2_layout = VK_NULL_HANDLE;
+    s_last_set2_gen = 0;
+    for (int k = 0; k < 4; k++) s_last_resolved[k].gen = 0, s_last_resolved[k].set = VK_NULL_HANDLE;
+    s_last_const_block[0] = s_last_const_block[1] = nullptr;
+    std::memset(s_ubo_cache, 0, sizeof s_ubo_cache);
+    std::memset(s_ssbo_cache, 0, sizeof s_ssbo_cache);
+    s_support_cache.gen = 0;
+    s_const_data_cache[0].gen = s_const_data_cache[1].gen = 0;
+    uint64_t mark = t_replay_mark, epoch = current_epoch();
+    if (!mark || mark != g_handle_mark || epoch != g_handle_epoch || g_handle_used > kHandleSlots / 2) {
+        handles_reset();
+        g_handle_mark = mark;
+        g_handle_epoch = epoch;
+    }
+    sets_invalidate_bound();
+    static uint64_t s_last_vf_serial = 0;
+    static uint64_t s_last_desc_epoch = 0;
+    static uint64_t s_last_ssbo_epoch = 0;
+    const uint64_t vf_ser = view_forget_serial();
+    const bool force_rotate = (vf_ser != s_last_vf_serial) || (g_set_used >= kSetSlots / 2);
+    const uint64_t desc_epoch = frame_descriptor_epoch(force_rotate);
+    if (desc_epoch != s_last_desc_epoch) {
+        if (g_set_arena.capacity() < 65536) g_set_arena.reserve(65536);
+        g_set_generation++, g_set_used = 0, g_set_arena.clear();
+        s_last_desc_epoch = desc_epoch;
+        s_last_vf_serial = vf_ser;
+    }
+    const bool force_ssbo_rotate = (g_set1_used >= kSet1Slots / 2);
+    const uint64_t ssbo_epoch = frame_ssbo_descriptor_epoch(force_ssbo_rotate);
+    if (ssbo_epoch != s_last_ssbo_epoch) {
+        if (g_set1_arena.capacity() < 32768) g_set1_arena.reserve(32768);
+        g_set1_generation++, g_set1_used = 0, g_set1_arena.clear();
+        s_last_ssbo_epoch = ssbo_epoch;
+    }
     g_support_used = g_constants_used = 0;
 }
 
@@ -718,7 +1374,12 @@ void sets_log() {
     if (g_set_hits + g_set_misses)
         log("nvn: descriptor sets: %llu reused from the submit's cache, %llu made", (unsigned long long)g_set_hits,
             (unsigned long long)g_set_misses);
+    if (g_sets_bound + g_sets_bind_skipped)
+        log("nvn: descriptor set binds: %llu calls, %llu sets bound, %llu redundant binds skipped",
+            (unsigned long long)g_sets_bind_calls, (unsigned long long)g_sets_bound,
+            (unsigned long long)g_sets_bind_skipped);
     g_handle_hits = g_handle_misses = g_sets_skipped = g_set_hits = g_set_misses = 0;
+    g_sets_bind_calls = g_sets_bound = g_sets_bind_skipped = 0;
 }
 
 }  // namespace nx::nvn::replay

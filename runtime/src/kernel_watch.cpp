@@ -203,7 +203,8 @@ void log_guest_threads() { dump_threads(); }
 
 void kernel_init() {
     plat::start_thread(watchdog, nullptr, 1ull << 20);
-    plat::start_thread(stall_sampler, nullptr, 1ull << 20);
+    if (std::getenv("NX_LOG") || std::getenv("NX_STALL_LOG") || std::getenv("NX_THREAD_DUMP_AT"))
+        plat::start_thread(stall_sampler, nullptr, 1ull << 20);
 }
 
 }  // namespace nx

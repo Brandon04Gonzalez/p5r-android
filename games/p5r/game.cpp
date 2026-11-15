@@ -2,6 +2,7 @@
 // game, and what only P5R needs. The game draws through NVN (Atlus' GFD engine); its shaders live in the GFD shader
 // caches BASE/GFDNXHHPRESET*.GSC of ALL_USEU.CPK (tools/gsc_shaders.py). Notes: games/p5r/PROGRESO.md.
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
@@ -155,7 +156,16 @@ int min_fps() {
 int paced_target(uint64_t period, int used) {
     const int cap = cap_fps(), lo = min_fps();
     static double debt = 0, expect = 0;
-    const double r = std::min(double(period) / kTicks, 1.0 / lo);
+    static int slow_streak = 0;
+    const double raw_s = double(period) / kTicks;
+    const bool is_slow = raw_s > 1.25 / double(cap);
+    slow_streak = is_slow ? (slow_streak + 1) : 0;
+    // Ignore isolated 1-2 frame asset/menu load hitches during field exploration so opening Quick Travel or entering
+    // a room does not falsely step the target frame rate from 30 down to 15 fps for a second.
+    if (g_field_scene && !g_scene && used >= cap && slow_streak > 0 && slow_streak < 3) {
+        return cap;
+    }
+    const double r = std::min(raw_s, 1.0 / lo);
     expect = expect > 0 ? expect + (r - expect) * 0.25 : r;
     if (used > 0) debt = std::clamp(debt + r - 1.0 / used, -0.15, 0.15);
     if (lo >= cap) debt = 0;  // pinned (outside scenes): a scene does not start by making up for it
@@ -221,7 +231,7 @@ uint64_t game_clock() {
         longest = std::max(longest, r);
     }
     last_start = start;
-    if (real < 10 * uint64_t(kTicks)) return r;
+    if (real < 3 * uint64_t(kTicks)) return r;
     // Logged when the game is off real time or the device under the cap (the target then moves).
     const double fps = double(frames) * kTicks / double(real);
     if (game * 100 < real * 97 || std::abs(steps / double(real) - 1.0) > 0.02 || fps < cap_fps() * 0.95)
@@ -268,12 +278,16 @@ bool name_starts(uint64_t name, uint32_t len, const char* want) {
     return true;
 }
 
+static std::string g_current_field_task;
+
 void scan_tasks() {
     static int calls = 0;
     static bool trace = false;
     if (calls % 64 == 0) {
         bool now = false;
-        if (FILE* f = plat::kDiagnostics ? plat::fopen_utf8(plat::data_root() + "/trace_tasks", "rb") : nullptr)
+        if (const char* env = std::getenv("NX_P5R_TRACE_TASKS"); env && (env[0] == '1' || std::strcmp(env, "true") == 0))
+            now = true;
+        else if (FILE* f = plat::kDiagnostics ? plat::fopen_utf8(plat::data_root() + "/trace_tasks", "rb") : nullptr)
             now = true, std::fclose(f);
         if (now != trace) log("p5r: task trace %s", now ? "on" : "off");
         trace = now;
@@ -294,6 +308,15 @@ void scan_tasks() {
         skip = skip || name_is(name, len, "EventSkip") || scenario_event(name, len) || name_starts(name, len, "General_") ||
                name_starts(name, len, "bustupLipAnim");
         movie = movie || name_is(name, len, "MOVIE_DRAW");
+        if (name_starts(name, len, "General_") || scenario_event(name, len)) {
+            std::string s;
+            if (name && len && len < 64)
+                for (uint32_t k = 0; k < len; k++) s += char(ld<uint8_t>(name + k));
+            if (!s.empty() && s != g_current_field_task) {
+                g_current_field_task = s;
+                log("p5r: active field map script: %s", g_current_field_task.c_str());
+            }
+        }
         if (!trace) continue;
         std::string str;
         if (name && len && len < 64)
@@ -303,7 +326,9 @@ void scan_tasks() {
     }
     const bool scene = (title || event) && !battle;
     static const bool field_on = env_int("NX_P5R_FIELD_SCENES", 1) != 0;
-    const bool field = field_on && skip && !event && !title && !battle;
+    // Restrict discrete step pacing (cap, cap/2, cap/3 = 30, 15, 10) strictly to scripted field scenes (with EventSkip/General_*)
+    // so free-roam palace exploration runs at full native 30 fps without artificial 15/10 fps clamping cliffs.
+    const bool field = field_on && skip && !event && !title && !battle && !movie;
     if (scene != g_scene)
         log("p5r: scene %s (%s%s%s): the target %s", scene ? "starts" : "ends", title ? "title " : "", event ? "event " : "",
             battle ? "battle" : "", scene ? "follows the device" : "stays at 30 or more");
@@ -344,6 +369,16 @@ void frame_origin() {
     frame_origin_ns(origin * 10000 / 192);  // ticks (19.2 MHz) -> monotonic ns (system_tick())
 }
 
+static std::atomic<uint64_t> g_cull_eval{0}, g_cull_hidden{0};
+
+struct MeshBoundsSlot {
+    uint64_t mesh = 0;
+    uint64_t node = 0;
+    uint32_t stamp = 0;
+    float cx = 0.0f, cy = 0.0f, cz = 0.0f, radius = 0.0f;
+    bool structural = false;
+};
+
 void interval_setter_hook(CPU& c) {
     scan_tasks();
     const uint64_t period = game_clock();
@@ -353,8 +388,17 @@ void interval_setter_hook(CPU& c) {
     const int interval = fps ? std::clamp(60 / fps, 1, 4) : 60 / cap_fps();
     if (!fps) fps = !auto_fps() ? cap_fps() : period ? paced_target(period, now) : now;
     if (fps > 0 && now > 0 && now != fps) {
-        static int logged = 0;  // the automatic target moves every frame: only the first changes
-        if (logged++ < 3) log("p5r: target frame rate %d -> %d%s", now, fps, auto_fps() && !forced_fps() ? " (follows the device)" : "");
+        static int last_logged_fps = 0;
+        static uint64_t last_log_ns = 0;
+        uint64_t now_ns = plat::monotonic_ns();
+        if (fps != last_logged_fps || (now_ns - last_log_ns > 2'000'000'000ull)) {
+            log("p5r: target frame rate %d -> %d%s (field=%d scene=%d frame=%.1f ms task=%s)",
+                now, fps, auto_fps() && !forced_fps() ? " (paced)" : "",
+                g_field_scene, g_scene, double(period) * 1e3 / kTicks,
+                g_current_field_task.c_str());
+            last_logged_fps = fps;
+            last_log_ns = now_ns;
+        }
         set_target_fps(c, fps);
     }
     c.x[1] = uint32_t(interval);
@@ -362,6 +406,25 @@ void interval_setter_hook(CPU& c) {
     if (std::getenv("NX_P5R_TRACE_INTERVAL") && traced++ < 40)
         log("p5r: frame interval set to %u on %llx from %s", uint32_t(c.x[1]), (unsigned long long)c.x[0], describe(c.x[30]).c_str());
     call(c, g_interval_setter);
+
+    static uint64_t last_cull_eval = 0, last_cull_hidden = 0;
+    static uint64_t cull_log_frame = 0;
+    if (++cull_log_frame % 300 == 0) {
+        uint64_t ev = g_cull_eval.load(std::memory_order_relaxed);
+        uint64_t hd = g_cull_hidden.load(std::memory_order_relaxed);
+        uint64_t d_ev = ev - last_cull_eval;
+        uint64_t d_hd = hd - last_cull_hidden;
+        last_cull_eval = ev;
+        last_cull_hidden = hd;
+        if (d_ev > 0) {
+            static const float s_log_scale = [] {
+                const char* e = std::getenv("NX_P5R_DIST_SCALE");
+                return e ? std::clamp(float(std::atof(e)), 0.5f, 3.0f) : 1.0f;
+            }();
+            log("p5r: distance culling: %llu of %llu visible meshes culled (%.1f%%, scale %.2fx) over 300 frames",
+                (unsigned long long)d_hd, (unsigned long long)d_ev, 100.0 * double(d_hd) / double(d_ev), s_log_scale);
+        }
+    }
 }
 
 // NX_P5R_CULL_CHECK=1 (PROGRESO 72): P5R's per-model culling job (main+ab0f50(job), job = {model, states}, run by
@@ -392,10 +455,12 @@ struct Planes {
     float p[6][4] = {};  // normal, distance
 };
 
-Planes read_planes() {
+Planes read_planes(bool all = false) {
     Planes pl;
     pl.ptr = ld<uint64_t>(g_main_base + 0x22cd268);
-    for (int k = 0; k < 6 && pl.ptr; k++)
+    if (!pl.ptr) return pl;
+    const int max_k = all ? 6 : 1;
+    for (int k = 0; k < max_k; k++)
         for (int j = 0; j < 4; j++) {
             const uint32_t w = ld<uint32_t>(pl.ptr + 32 * k + (j < 3 ? 4 * j : 16));
             std::memcpy(&pl.p[k][j], &w, 4);
@@ -420,13 +485,115 @@ int reject_plane(const Planes& pl, const float* b, float* dist = nullptr, float*
 }
 
 void cull_job_hook(CPU& c) {
-    const uint64_t job = c.x[0], model = ld<uint64_t>(job), states = ld<uint64_t>(job + 8);
+    const uint64_t job = c.x[0];
+    if (!job) return;
+    const uint64_t model = ld<uint64_t>(job), states = ld<uint64_t>(job + 8);
     const uint64_t sp = c.x[31];
-    const Planes before = read_planes();
+    static const bool trace_cull = std::getenv("NX_P5R_CULL_CHECK") != nullptr;
+    const Planes before = trace_cull ? read_planes(true) : Planes{};
     call(c, g_cull_job);
-    const Planes after = read_planes();
+    const Planes after = read_planes(trace_cull);
     const uint64_t list = model ? ld<uint64_t>(model + 0x38) : 0;
     if (!list || !states) return;
+
+    static const bool dist_cull_on = [] {
+        const char* e = std::getenv("NX_P5R_DIST_CULL");
+        return e && e[0] == '1';
+    }();
+    static const float dist_cull_scale = [] {
+        const char* e = std::getenv("NX_P5R_DIST_SCALE");
+        if (e) return std::clamp(float(std::atof(e)), 0.5f, 3.0f);
+        return 1.0f;  // Default 1.0x for lowend-r50 proven distance curve
+    }();
+
+    if (dist_cull_on && after.ptr) {
+        const int n = int(ld<uint32_t>(list + 8));
+        const int64_t stride = int32_t(ld<uint32_t>(list + 4)), sstride = int32_t(ld<uint32_t>(states + 4));
+        const uint64_t arr = ld<uint64_t>(list + 0x10), sarr = ld<uint64_t>(states + 0x10);
+        if (arr && sarr && stride > 0 && sstride > 0) {
+            const float* p = after.p[0];  // Near plane normal (p[0], p[1], p[2]) and distance (p[3])
+            const uint64_t box = (sp - 0x200) & ~uint64_t(15);
+            thread_local MeshBoundsSlot tl_bounds_cache[4096];
+            const uint64_t cur_p = nvn::presents_recorded();
+            const uint32_t cur_stamp = uint32_t(cur_p >> 4) + 1u;  // refreshes every 16 frames
+            uint64_t last_node = 0;
+            uint64_t last_matrix = 0;
+
+            for (int i = 0; i < n && i < 4096; i++) {
+                const uint64_t mesh = ld<uint64_t>(arr + stride * i);
+                if (!mesh) continue;
+                uint32_t flags = ld<uint32_t>(mesh + 0x20);
+                if ((flags >> 14) & 1) continue;  // Already hidden by engine frustum/occlusion culling
+
+                const uint64_t node = ld<uint64_t>(mesh + 8);
+                const uint64_t local_bounds = mesh + 0x90;
+                if (!node || !local_bounds) continue;
+
+                MeshBoundsSlot& slot = tl_bounds_cache[((mesh >> 5) ^ (mesh >> 17)) & 4095];
+                float b0, b1, b2, radius;
+                bool structural = false;
+                if (slot.mesh == mesh && slot.node == node && slot.stamp == cur_stamp) {
+                    b0 = slot.cx;
+                    b1 = slot.cy;
+                    b2 = slot.cz;
+                    radius = slot.radius;
+                    structural = slot.structural;
+                } else {
+                    CPU scratch = c;
+                    scratch.x[31] = sp;
+                    uint64_t matrix = (node == last_node) ? last_matrix : guest_fn(scratch, 0xfa9460, node);
+                    if (!matrix) continue;
+                    last_node = node;
+                    last_matrix = matrix;
+                    guest_fn(scratch, 0xa92c80, box, local_bounds, matrix);
+
+                    b0 = ld<float>(box);
+                    b1 = ld<float>(box + 4);
+                    b2 = ld<float>(box + 8);
+                    const float r16 = std::fabs(ld<float>(box + 16 * 4));
+                    const float r17 = std::fabs(ld<float>(box + 17 * 4));
+                    const float r18 = std::fabs(ld<float>(box + 18 * 4));
+                    if (!std::isfinite(r16) || !std::isfinite(r17) || !std::isfinite(r18)) continue;
+                    radius = std::sqrt(r16 * r16 + r17 * r17 + r18 * r18);
+                    const float max_e = std::max({r16, r17, r18});
+                    const float min_e = std::min({r16, r17, r18});
+                    structural = (max_e >= 6.5f) || (max_e >= 2.5f && max_e > 4.5f * std::max(min_e, 0.01f));
+                    slot = {mesh, node, cur_stamp, b0, b1, b2, radius, structural};
+                }
+
+                // Signed distance of box center and closest surface point from near plane along camera view axis
+                const float view_dist = p[0] * b0 + p[1] * b1 + p[2] * b2 - p[3];
+                const float near_dist = view_dist - radius;
+                if (!std::isfinite(view_dist) || view_dist <= 10.0f || near_dist <= 7.5f) continue;
+
+                // Protect planar structural geometry (walls, floors, ceilings, road slabs) and massive shells
+                const float struct_limit = (near_dist < 18.0f) ? 8.0f : (near_dist < 30.0f ? 14.0f : 18.0f);
+                if (structural || radius >= struct_limit) continue;
+
+                g_cull_eval.fetch_add(1, std::memory_order_relaxed);
+
+                const float ratio = radius / view_dist;
+                bool cull = false;
+                if (view_dist < 20.0f) {
+                    if (radius < 0.45f * dist_cull_scale || ratio < 0.025f * dist_cull_scale) cull = true;
+                } else if (view_dist < 40.0f) {
+                    if (radius < 0.85f * dist_cull_scale || ratio < 0.025f * dist_cull_scale) cull = true;
+                } else {
+                    if (radius < 2.0f * dist_cull_scale || ratio < 0.030f * dist_cull_scale) cull = true;
+                }
+
+                if (cull) {
+                    g_cull_hidden.fetch_add(1, std::memory_order_relaxed);
+                    flags |= (1u << 14);
+                    st<uint32_t>(mesh + 0x20, flags);
+                    st<uint8_t>(sarr + sstride * i + 0x10, 1);
+                }
+            }
+        }
+    }
+
+    if (!trace_cull) return;
+
     static std::mutex lock;
     static std::unordered_map<uint64_t, bool> hidden_before;
     static std::unordered_map<uint64_t, uint64_t> hidden_since;  // mesh -> frame it was hidden
@@ -525,6 +692,7 @@ NX_HLE("glslcGetDefaultOptions", glslc_nop);
 NX_HLE("glslcGetVersion", glslc_nop);
 
 void game::after_init() {
+    game::renderer_start();
     // P5R never binds a storage image: colour images without STORAGE keep Adreno's framebuffer compression
     // (nvn_image.cpp). config.txt's NX_IMAGE_STORAGE=1 brings it back.
     // In handheld mode (720p) the game draws its 3D at 960x540 and its post pass, HUD and menus into a 1280x720 target
@@ -553,13 +721,45 @@ void game::after_init() {
     const LoadedModule* m = module_at(find_symbol("nnMain"));
     if (m && (g_interval_setter = hook_function(m->base + 0x1048ee0, interval_setter_hook))) {
         g_main_base = m->base;
-        if (std::getenv("NX_P5R_CULL_CHECK") && !(g_cull_job = hook_function(m->base + 0xab0f50, cull_job_hook)))
-            log("p5r: the culling job could not be hooked: NX_P5R_CULL_CHECK off");
+        const char* dc = std::getenv("NX_P5R_DIST_CULL");
+        if ((std::getenv("NX_P5R_CULL_CHECK") || (dc && dc[0] == '1')) &&
+            !(g_cull_job = hook_function(m->base + 0xab0f50, cull_job_hook)))
+            log("p5r: the culling job could not be hooked");
     } else {
         log("p5r: nnMain or the frame interval setter not found: the game's own 30 fps");
     }
 }
-void game::renderer_start() {}
+static constexpr const char* kPerfBuildTag = "universal-nvn-opt";
+
+void game::renderer_start() {
+    static std::atomic<bool> started{false};
+    if (started.exchange(true)) return;
+    log("p5r perf build: %s (65K linear-probing dedup_upload, flat g_seen_slots + 64KB page churn filter, idle condition_variable movie pump)",
+        kPerfBuildTag);
+#if defined(__ANDROID__)
+    // Universal Android defaults:
+    // - Anisotropic filtering cap defaults in nvn_sampler.cpp (1x on Mali, 2x on Adreno/others unless overridden by NX_MAX_ANISO).
+    // - Enable per-image deferred clears (PROGRESO 77) so P5R's depth-only clears and dual
+    //   shadow-map clears fold into VK_ATTACHMENT_LOAD_OP_CLEAR instead of 12,000+ standalone
+    //   vkCmdClear*Image transfer clears.
+    setenv("NX_CLEARS_V2", "1", 0);
+    // - Skip redundant CPU write-backs of GPU compute skinning SSBOs (s.write_backs):
+    //   Submit 2 vertex shaders read Submit 1's compute-skinned buffers directly on the GPU
+    //   via g_regions (nvn_written.cpp), while CPU occlusion culling uses s.late_write_backs.
+    //   Saves ~3.0 ms/frame of r.before snapshot + write-combined readback on CPU.
+    setenv("NX_EXP_NO_WB", "1", 0);
+    // - NOTE: Keep default NX_SUBMIT_CHUNK_DRAWS=150 and frame_plan_split active on Mali!
+    //   Queuing 150-draw chunks at render-pass boundaries lets the Mali-G57 GPU execute
+    //   90%+ of the frame in parallel with the 25 ms CPU replay, keeping gpu_present() at
+    //   ~1.1 ms instead of stalling for ~13.7 ms waiting on an unchunked command buffer.
+    // - NOTE: Do NOT enable NX_MALI_FP16 globally in P5R! P5R shaders use packed bitfields,
+    //   integer-as-float encodings, and high-range lighting/skinning math in fragment shaders
+    //   that overflow IEEE754 fp16 (max 65504), causing severe black/corrupted screen glitches.
+    // - Do NOT force-clear color attachments on every new render pass without an explicit
+    //   NVN clear command; this avoids wiping UI/compositor targets updated across passes.
+    setenv("NX_LOAD_CLEAR", "0", 0);
+#endif
+}
 void game::first_frame() {}
 
 }  // namespace nx

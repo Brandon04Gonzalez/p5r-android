@@ -57,9 +57,10 @@ void BindProgram(CPU& c) {
     cmd.a[0] = c.x[1];
     cmd.mask = uint32_t(c.x[2]);
     record(c.x[0], cmd);
+    const auto* sh = program_shaders(c.x[1]);
     static const bool trace = std::getenv("NX_TRACE_PROGRAMS") != nullptr;  // binds of skinned programs (input 6)
     static int logged = 0;
-    if (const auto* sh = trace && logged < 40 ? program_shaders(c.x[1]) : nullptr)
+    if (trace && logged < 40 && sh)
         for (const ShaderInfo* s : *sh)
             for (const ShaderIo& in : s->refl.inputs)
                 if (s->stage == ShaderStage::Vertex && in.location == 6 && logged++ < 40)
@@ -118,7 +119,7 @@ void UpdateUniformBuffer(CPU& c) {  // the data is copied now: the game's buffer
 
 void BindVertexAttribState(CPU& c) {
     uint32_t n = std::min<uint32_t>(uint32_t(c.x[1]), 32);
-    std::vector<VertexAttrib> v(n);
+    VertexAttrib v[32]{};
     uint64_t tmp = scratch(c, 16);
     for (uint32_t k = 0; k < n; k++) {
         uint64_t state = c.x[2] + 4 * k;
@@ -126,16 +127,16 @@ void BindVertexAttribState(CPU& c) {
         v[k].format = ld<uint32_t>(tmp);
         v[k].offset = uint32_t(ld<uint64_t>(tmp + 8));
         v[k].stream = uint32_t(driver(c, "nvnVertexAttribStateGetStreamIndex", {state}));
+        log_state("attrib", v[k]);
     }
-    for (auto& a : v) log_state("attrib", a);
     Cmd cmd{Cmd::BindVertexAttribs};
     cmd.n = n;
-    record(c.x[0], cmd, v.data(), v.size() * sizeof(VertexAttrib));
+    record(c.x[0], cmd, v, n * sizeof(VertexAttrib));
 }
 
 void BindVertexStreamState(CPU& c) {
     uint32_t n = std::min<uint32_t>(uint32_t(c.x[1]), 32);
-    std::vector<VertexStream> v(n);
+    VertexStream v[32]{};
     for (uint32_t k = 0; k < n; k++) {
         uint64_t state = c.x[2] + 8 * k;
         v[k].stride = uint32_t(driver(c, "nvnVertexStreamStateGetStride", {state}));
@@ -143,7 +144,7 @@ void BindVertexStreamState(CPU& c) {
     }
     Cmd cmd{Cmd::BindVertexStreams};
     cmd.n = n;
-    record(c.x[0], cmd, v.data(), v.size() * sizeof(VertexStream));
+    record(c.x[0], cmd, v, n * sizeof(VertexStream));
 }
 
 void BindBlendState(CPU& c) {

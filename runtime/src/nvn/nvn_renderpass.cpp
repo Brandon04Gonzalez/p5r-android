@@ -34,6 +34,11 @@ struct FramebufferKey {
 };
 std::map<FramebufferKey, VkFramebuffer> g_framebuffers;
 uint64_t g_framebuffers_made = 0;
+FramebufferKey s_last_fk{};
+VkFramebuffer s_last_fb = VK_NULL_HANDLE;
+
+PassKey s_last_k{};
+VkRenderPass s_last_rp = VK_NULL_HANDLE;
 
 // The last passes begun, for the crash report (log_recent_passes): a driver crash inside vkCmdEndRenderPass names no
 // pass. Written without a lock (one recording thread at a time; a torn entry in a crash report is acceptable).
@@ -83,7 +88,7 @@ VkRenderPass make_pass(const PassKey& k, uint32_t count) {
         a.format = VkFormat(k[8]);
         a.samples = VK_SAMPLE_COUNT_1_BIT;
         a.loadOp = k[18] ? VkAttachmentLoadOp(k[18] - 1) : VK_ATTACHMENT_LOAD_OP_LOAD;
-        a.storeOp = k[9] & kNoStore ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
+        a.storeOp = (k[9] & kNoStore) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
         bool st = has_stencil(VkFormat(k[8]));
         a.stencilLoadOp = !st ? VK_ATTACHMENT_LOAD_OP_DONT_CARE
                               : k[19] ? VkAttachmentLoadOp(k[19] - 1) : VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -115,9 +120,17 @@ VkRenderPass pass_for(uint32_t count, const VkFormat* colors, VkFormat depth, co
         for (uint32_t c = 0; c < 10; c++) k[10 + c] = loads[c];
         if (exp_render_pass() & 2) k[9] |= kNoStore;
     }
+    if (s_last_rp && s_last_k == k) return s_last_rp;
     auto it = g_passes.find(k);
-    if (it != g_passes.end()) return it->second;
-    return g_passes[k] = make_pass(k, count);
+    if (it != g_passes.end()) {
+        s_last_k = k;
+        s_last_rp = it->second;
+        return it->second;
+    }
+    VkRenderPass rp = make_pass(k, count);
+    s_last_k = k;
+    s_last_rp = rp;
+    return g_passes[k] = rp;
 }
 
 }  // namespace
@@ -125,7 +138,12 @@ VkRenderPass pass_for(uint32_t count, const VkFormat* colors, VkFormat depth, co
 bool render_pass_objects() {
     static const bool on = [] {  // also on a device without dynamic rendering (before Vulkan 1.3; nvn_vk.cpp)
         const char* e = std::getenv("NX_RENDER_PASS_OBJECTS");
-        bool v = (e && e[0] == '1') || !vk_dynamic_rendering();
+#if defined(__ANDROID__)
+        bool def = true;
+#else
+        bool def = false;
+#endif
+        bool v = e ? e[0] == '1' : (def || !vk_dynamic_rendering());
         if (v) log("nvn/vk: render pass and framebuffer objects instead of dynamic rendering");
         return v;
     }();
@@ -167,8 +185,12 @@ void begin_render_pass(VkCommandBuffer cb, uint32_t count, const VkFormat* forma
     fk.pass = pass_for(count, fmt, depth_format, nullptr);
     fk.count = n, fk.width = extent.width, fk.height = extent.height;
     VkFramebuffer fb = VK_NULL_HANDLE;
-    if (auto it = g_framebuffers.find(fk); it != g_framebuffers.end()) {
+    if (s_last_fb && std::memcmp(&s_last_fk, &fk, sizeof(FramebufferKey)) == 0) {
+        fb = s_last_fb;
+    } else if (auto it = g_framebuffers.find(fk); it != g_framebuffers.end()) {
         fb = it->second;
+        s_last_fk = fk;
+        s_last_fb = fb;
     } else {
         VkFramebufferCreateInfo fi{VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO};
         fi.renderPass = fk.pass;
@@ -177,6 +199,8 @@ void begin_render_pass(VkCommandBuffer cb, uint32_t count, const VkFormat* forma
         fi.width = extent.width, fi.height = extent.height, fi.layers = 1;
         if (VkResult r = p_vkCreateFramebuffer(vk_device(), &fi, nullptr, &fb); r == VK_SUCCESS) {
             g_framebuffers[fk] = fb;
+            s_last_fk = fk;
+            s_last_fb = fb;
         } else {  // not kept: the next pass on these views tries again (a null one kept failed every later pass)
             log("nvn/vk: vkCreateFramebuffer failed (%d): %u attachments, %ux%u, colours %d %d %d %d, depth %d, "
                 "%zu framebuffers kept",
@@ -203,6 +227,7 @@ void begin_render_pass(VkCommandBuffer cb, uint32_t count, const VkFormat* forma
 
 // A view is being destroyed (its image freed after the submits that used it were retired): its framebuffers too.
 void forget_framebuffers(VkImageView view) {
+    s_last_fb = VK_NULL_HANDLE;
     if (!view || g_framebuffers.empty()) return;
     for (auto it = g_framebuffers.begin(); it != g_framebuffers.end();) {
         bool uses = false;

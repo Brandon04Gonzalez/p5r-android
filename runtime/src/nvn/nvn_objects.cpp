@@ -601,6 +601,10 @@ NX_TEXTURE_GETTER(TextureGetDepthStencilMode, depth_stencil_mode)
 
 // NVNboolean nvn{Texture,Sampler}PoolInitialize(pool, const NVNmemoryPool*, ptrdiff_t offset, int numDescriptors)
 void DescriptorPoolInitialize(CPU& c) {
+    {
+        std::lock_guard lk(objects_lock());
+        note_replaced(c.x[0]);
+    }
     auto& d = make<DescriptorPool>(c.x[0]);
     d.pool = c.x[1];
     d.offset = c.x[2];
@@ -608,7 +612,13 @@ void DescriptorPoolInitialize(CPU& c) {
     c.x[0] = 1;
 }
 
-void DescriptorPoolFinalize(CPU& c) { destroy(c.x[0]); }
+void DescriptorPoolFinalize(CPU& c) {
+    {
+        std::lock_guard lk(objects_lock());
+        note_replaced(c.x[0]);
+    }
+    destroy(c.x[0]);
+}
 
 // nvnTexturePoolRegisterTexture / RegisterImage(pool, int id, const NVNtexture*, const NVNtextureView*)
 void TexturePoolRegister(CPU& c) {

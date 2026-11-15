@@ -94,15 +94,28 @@ std::string virtual_key(const fs::path& p) {
     return s;
 }
 
-// The virtual file whose key the resolved path ends with, or nullptr.
-const std::string* find_virtual(const fs::path& resolved) {
-    if (g_virtual.empty() || resolved.empty()) return nullptr;
-    std::string k = virtual_key(resolved);
-    for (auto& [key, data] : g_virtual)
-        if (k.size() >= key.size() + 1 && k.compare(k.size() - key.size(), key.size(), key) == 0 &&
-            k[k.size() - key.size() - 1] == '/')
-            return &data;
+std::string utf8(const fs::path& p) {
+    auto s = p.u8string();
+    return std::string(s.begin(), s.end());
+}
+
+// The virtual file whose key matches the path or whose key the path ends with, or nullptr.
+const std::string* find_virtual_str(const std::string& path_str) {
+    if (g_virtual.empty() || path_str.empty()) return nullptr;
+    std::string k = virtual_key(fs::u8path(path_str));
+    for (const auto& [key, data] : g_virtual) {
+        if (k == key) return &data;
+        if (k.size() > key.size() && k.compare(k.size() - key.size(), key.size(), key) == 0) {
+            char prev = k[k.size() - key.size() - 1];
+            if (prev == '/' || prev == '\\' || prev == ':') return &data;
+        }
+    }
     return nullptr;
+}
+
+const std::string* find_virtual(const fs::path& resolved) {
+    if (resolved.empty()) return nullptr;
+    return find_virtual_str(utf8(resolved));
 }
 struct Dir {
     std::vector<fs::directory_entry> entries;
@@ -115,11 +128,6 @@ std::map<uint64_t, Dir> g_dirs;
 uint64_t g_next = 1;
 
 fs::path data_root() { return fs::u8path(plat::data_root()); }
-
-std::string utf8(const fs::path& p) {
-    auto s = p.u8string();
-    return std::string(s.begin(), s.end());
-}
 
 std::string cstr(uint64_t p) { return p ? std::string(reinterpret_cast<const char*>(p)) : std::string(); }
 
@@ -250,13 +258,45 @@ void scan_mods() {
     g_mod_roots = std::move(found);
     for (auto& r : g_mod_roots) log("fs: mod active: %s", r.string().c_str());
 
-    // Crowd removal option (NX_NO_CROWD=1): stub RESRCCROWDUNIT.BIN to prevent crowd spawning
+    // Crowd removal option (NX_NO_CROWD=1): stub RESRCCROWDUNIT.BIN and activate no-crowd assets
     if (const char* e = std::getenv("NX_NO_CROWD")) {
         if (e[0] == '1' || std::strcmp(e, "true") == 0) {
-            log("fs: crowd removal active (NX_NO_CROWD=1): stubbing RESRCCROWDUNIT.BIN");
-            add_virtual_file("resource/resrccrowdunit.bin", "");
-            add_virtual_file("base/resource/resrccrowdunit.bin", "");
-            add_virtual_file("cpk/patch1/base/resource/resrccrowdunit.bin", "");
+            log("fs: crowd removal active (NX_NO_CROWD=1): activating no-crowd assets");
+            std::string crowd_data;
+            // Check if _NoCrowdsAndroid mod folder exists on disk
+            fs::path nc_dir = root / "_NoCrowdsAndroid";
+            if (!fs::is_directory(nc_dir, ec)) nc_dir = root / "NoCrowdsAndroid";
+            if (fs::is_directory(nc_dir, ec)) {
+                fs::path nc_romfs = nc_dir / "romfs";
+                if (fs::is_directory(nc_romfs, ec)) {
+                    g_mod_roots.push_back(nc_romfs);
+                    log("fs: crowd removal: mounted %s", nc_romfs.string().c_str());
+                } else {
+                    g_mod_roots.push_back(nc_dir);
+                    log("fs: crowd removal: mounted %s", nc_dir.string().c_str());
+                }
+                // Try reading the mod's patched RESRCCROWDUNIT.BIN
+                fs::path bin = find_case_insensitive(nc_romfs, "CPK/PATCH1/BASE/RESOURCE/RESRCCROWDUNIT.BIN");
+                if (bin.empty()) bin = find_case_insensitive(nc_dir, "CPK/PATCH1/BASE/RESOURCE/RESRCCROWDUNIT.BIN");
+                if (!bin.empty() && fs::is_regular_file(bin, ec)) {
+                    if (FILE* f = plat::fopen_utf8(utf8(bin), "rb")) {
+                        char buf[4096];
+                        size_t n;
+                        while ((n = std::fread(buf, 1, sizeof buf, f)) > 0) crowd_data.append(buf, n);
+                        std::fclose(f);
+                        log("fs: crowd removal: loaded %zu bytes from %s", crowd_data.size(), bin.string().c_str());
+                    }
+                }
+            }
+            if (crowd_data.empty()) {
+                // Minimal valid RESRCCROWDUNIT.BIN header (magic 0x00290514, count 1000, 0 active entries)
+                crowd_data.assign("\x14\x05\x29\x00\x00\x00\x03\xe8\x00\x00\x00\x00\x00\x00\x00\x00", 16);
+            }
+            g_virtual[virtual_key(fs::u8path("resource/resrccrowdunit.bin"))] = crowd_data;
+            g_virtual[virtual_key(fs::u8path("base/resource/resrccrowdunit.bin"))] = crowd_data;
+            g_virtual[virtual_key(fs::u8path("cpk/patch1/base/resource/resrccrowdunit.bin"))] = crowd_data;
+            g_virtual[virtual_key(fs::u8path("patch1/base/resource/resrccrowdunit.bin"))] = crowd_data;
+            g_virtual[virtual_key(fs::u8path("resrccrowdunit.bin"))] = crowd_data;
         }
     }
 }
@@ -401,14 +441,15 @@ void CreateDirectory(CPU& c) {
 
 void GetEntryType(CPU& c) {  // (DirectoryEntryType* out, path)
     std::lock_guard lk(g_fs);
-    fs::path p = resolve(cstr(c.x[1]));
-    if (find_virtual(p)) {
+    std::string guest = cstr(c.x[1]);
+    fs::path p = resolve(guest);
+    if (find_virtual(p) || find_virtual_str(guest)) {
         st<uint32_t>(c.x[0], 1);
         c.x[0] = kOk;
         return;
     }
-    if (std::string rel; image_rel(cstr(c.x[1]), rel)) {
-        if (!mod_file(rel).empty()) {
+    if (std::string rel; image_rel(guest, rel)) {
+        if (find_virtual_str(rel) || !mod_file(rel).empty()) {
             st<uint32_t>(c.x[0], 1);
             c.x[0] = kOk;
             return;
@@ -433,7 +474,14 @@ void OpenFile(CPU& c) {  // (FileHandle* out, path, int mode: 1 read, 2 write, 4
     std::string guest = cstr(c.x[1]);
     fs::path p = resolve(guest);
     int mode = int(c.x[2]);
-    if (const std::string* v = find_virtual(p)) {  // served directly from memory (no std::tmpfile on Android)
+    const std::string* v = find_virtual(p);
+    if (!v) v = find_virtual_str(guest);
+    if (!v) {
+        if (std::string rel; image_rel(guest, rel)) {
+            v = find_virtual_str(rel);
+        }
+    }
+    if (v) {  // served directly from memory (no std::tmpfile on Android)
         uint64_t h = g_next++;
         g_files[h] = std::make_shared<File>(v, guest);
         st<uint64_t>(c.x[0], h);

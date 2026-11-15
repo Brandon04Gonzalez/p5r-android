@@ -229,7 +229,7 @@ VkPipeline pipeline(const Key& key) {
     ci.pDynamicState = &dy;
     ci.layout = layout();
     VkPipeline p = VK_NULL_HANDLE;
-    if (p_vkCreateGraphicsPipelines(vk_device(), VK_NULL_HANDLE, 1, &ci, nullptr, &p) != VK_SUCCESS) {
+    if (p_vkCreateGraphicsPipelines(vk_device(), pipeline_cache(), 1, &ci, nullptr, &p) != VK_SUCCESS) {
         log("nvn/vk: mask clear pipeline (slot %u mask %#x) failed", key.slot, key.mask);
         p = VK_NULL_HANDLE;
     }

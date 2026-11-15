@@ -13,6 +13,10 @@
 #include "vk_bridge_shared.h"
 #include "vk_present.h"
 
+namespace nx::nvn {
+VkPipelineCache pipeline_cache();
+}
+
 namespace nx::vk {
 
 namespace {
@@ -141,13 +145,18 @@ void adapt_to_surface(VkSwapchainCreateInfoKHR& ci) {
                 break;
             }
     if (!(caps.supportedTransforms & ci.preTransform)) ci.preTransform = caps.currentTransform;
-    ci.minImageCount = std::max(ci.minImageCount, caps.minImageCount);
+    ci.minImageCount = std::max(3u, std::max(ci.minImageCount, caps.minImageCount));
     if (caps.maxImageCount) ci.minImageCount = std::min(ci.minImageCount, caps.maxImageCount);
     uint32_t nm = 0;
     p_vkGetPhysicalDeviceSurfacePresentModesKHR(bridge::physical(), ci.surface, &nm, nullptr);
     std::vector<VkPresentModeKHR> modes(nm);
     p_vkGetPhysicalDeviceSurfacePresentModesKHR(bridge::physical(), ci.surface, &nm, modes.data());
-    if (std::find(modes.begin(), modes.end(), ci.presentMode) == modes.end()) ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    bool has_relaxed = std::find(modes.begin(), modes.end(), VK_PRESENT_MODE_FIFO_RELAXED_KHR) != modes.end();
+    if (has_relaxed) {
+        ci.presentMode = VK_PRESENT_MODE_FIFO_RELAXED_KHR;
+    } else if (std::find(modes.begin(), modes.end(), ci.presentMode) == modes.end()) {
+        ci.presentMode = VK_PRESENT_MODE_FIFO_KHR;
+    }
 }
 
 void get_host_images(SwapchainInfo& s) {
@@ -254,7 +263,7 @@ void w_vkCreateSwapchainKHR(CPU& c) {  // (device, const VkSwapchainCreateInfoKH
             if (std::strcmp(plat::vulkan_surface_extension(), "VK_KHR_android_surface") == 0) {
                 uint32_t sw = 0, sh = 0;
                 plat::screen_size(sw, sh);
-                if (s.pass.init(s.device, s.format, s.images, sw != s.extent.width || sh != s.extent.height)) {
+                if (s.pass.init(s.device, s.format, s.images, sw != s.extent.width || sh != s.extent.height, nx::nvn::pipeline_cache())) {
                     s.prerotate = true;
                     remake(s);  // again, in the display's orientation
                 } else {

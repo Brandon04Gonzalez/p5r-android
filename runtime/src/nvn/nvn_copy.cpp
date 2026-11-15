@@ -124,9 +124,9 @@ uint64_t g_same_image = 0, g_same_overlap = 0;
 void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
     static const bool off = std::getenv("NX_NO_COPY") != nullptr;  // debug: skip texture copies
     if (off) return;
-    if (c.blob >= list.blobs.size() || list.blobs[c.blob].size() != sizeof(CopyInfo)) return;
+    if (c.blob >= list.blobs.size() || list.blob_size(c.blob) != sizeof(CopyInfo)) return;
     CopyInfo info;
-    std::memcpy(&info, list.blobs[c.blob].data(), sizeof info);
+    std::memcpy(&info, list.blob_ptr(c.blob, sizeof(CopyInfo)), sizeof info);
     GpuImage* src = ensure_contents(cb, c.a[0]);
     GpuImage* dst = ensure_contents(cb, c.a[1]);
     if (!src || !dst) return;
@@ -138,6 +138,18 @@ void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
     };
     if (src->hud) hud_rect(info.src);
     if (dst->hud) hud_rect(info.dst);
+    auto low_3d_rect = [](int32_t* r) {
+        int32_t x0 = (r[0] * 3) / 4;
+        int32_t y0 = (r[1] * 3) / 4;
+        int32_t x1 = ((r[0] + r[3]) * 3 + 2) / 4;
+        int32_t y1 = ((r[1] + r[4]) * 3 + 2) / 4;
+        r[0] = x0;
+        r[1] = y0;
+        r[3] = std::max(1, x1 - x0);
+        r[4] = std::max(1, y1 - y0);
+    };
+    if (src->low_3d) low_3d_rect(info.src);
+    if (dst->low_3d) low_3d_rect(info.dst);
     bool same = src == dst;
     static const bool no_same = std::getenv("NX_COPY_NO_SAME_IMAGE") != nullptr;  // bisecting: the old way
     if (same && no_same) return;
@@ -213,14 +225,14 @@ void replay_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
 }
 
 void replay_buffer_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
-    if (c.blob >= list.blobs.size() || list.blobs[c.blob].size() != sizeof(BufferCopyInfo)) return;
+    if (c.blob >= list.blobs.size() || list.blob_size(c.blob) != sizeof(BufferCopyInfo)) return;
     BufferCopyInfo info;
-    std::memcpy(&info, list.blobs[c.blob].data(), sizeof info);
+    std::memcpy(&info, list.blob_ptr(c.blob, sizeof(BufferCopyInfo)), sizeof info);
     static uint64_t copies = 0, failed = 0;
     Texture* t = get<Texture>(c.a[1]);
     const uint8_t* src = replay::guest_bytes(c.a[0]);
     GpuImage* img = t && src ? fill_target(cb, c.a[1]) : nullptr;
-    if (img && img->hud) img = nullptr;  // NX_HUD_1080: texels at 1280x720 for a 1920x1080 image (never seen)
+    if (img && (img->hud || img->low_3d || img->shadow)) img = nullptr;  // unscaled texels for downscaled/upscaled targets
     if (!img || !upload_region(cb, *t, *img, info.dst_view.base_level, info.dst_view.min_layer, info.dst, src)) {
         if (++failed <= 10)
             log("nvn: buffer-to-texture copy %llx -> %llx not replayed (%s)", (unsigned long long)c.a[0],
@@ -236,9 +248,9 @@ void replay_buffer_copy(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
 }
 
 void replay_clear_texture(VkCommandBuffer cb, const Cmd& c, const CmdList& list) {
-    if (c.blob >= list.blobs.size() || list.blobs[c.blob].size() != sizeof(ClearTextureInfo)) return;
+    if (c.blob >= list.blobs.size() || list.blob_size(c.blob) != sizeof(ClearTextureInfo)) return;
     ClearTextureInfo info;
-    std::memcpy(&info, list.blobs[c.blob].data(), sizeof info);
+    std::memcpy(&info, list.blob_ptr(c.blob, sizeof(ClearTextureInfo)), sizeof info);
     Texture* t = get<Texture>(c.a[0]);
     GpuImage* img = t ? fill_target(cb, c.a[0]) : nullptr;
     if (!img) return;
@@ -249,21 +261,54 @@ void replay_clear_texture(VkCommandBuffer cb, const Cmd& c, const CmdList& list)
         info.region[0] = hud_up(info.region[0]), info.region[1] = hud_up(info.region[1]);
         info.region[3] = x1 - info.region[0], info.region[4] = y1 - info.region[1];
     }
+    if ((c.mask & 15) == 0) return;
     const int32_t* r = info.region;
     bool whole = r[0] <= 0 && r[1] <= 0 && r[0] + r[3] >= int32_t(lw) && r[1] + r[4] >= int32_t(lh);
     static int logged = 0;
-    if (img->aspect != VK_IMAGE_ASPECT_COLOR_BIT || compressed(img->format) || !whole || (c.mask & 15) != 15) {
+    if (img->aspect != VK_IMAGE_ASPECT_COLOR_BIT || compressed(img->format)) {
         if (logged++ < 10)
-            log("nvn: texture clear not replayed: %llx %ux%u f%#x level %u, rect %d,%d %dx%d, mask %x",
+            log("nvn: texture clear not replayed (unsupported format/aspect): %llx %ux%u f%#x level %u, rect %d,%d %dx%d, mask %x",
                 (unsigned long long)c.a[0], img->width, img->height, t->format, level, r[0], r[1], r[3], r[4], c.mask);
         return;
     }
-    bool is3d = img->view_type == VK_IMAGE_VIEW_TYPE_3D;
-    uint32_t layer = is3d ? 0 : std::min(uint32_t(std::max(r[2], 0)) + info.view.min_layer, img->layers - 1);
-    VkImageSubresourceRange range{img->aspect, level, 1, layer, is3d ? 1u : std::clamp<uint32_t>(uint32_t(r[5]), 1, img->layers - layer)};
-    VkClearColorValue v{{c.f[0], c.f[1], c.f[2], c.f[3]}};
-    transition(cb, *img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
-    p_vkCmdClearColorImage(cb, img->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+    if (whole && (c.mask & 15) == 15) {
+        bool is3d = img->view_type == VK_IMAGE_VIEW_TYPE_3D;
+        uint32_t layer = is3d ? 0 : std::min(uint32_t(std::max(r[2], 0)) + info.view.min_layer, img->layers - 1);
+        VkImageSubresourceRange range{img->aspect, level, 1, layer, is3d ? 1u : std::clamp<uint32_t>(uint32_t(r[5]), 1, img->layers - layer)};
+        VkClearColorValue v{{c.f[0], c.f[1], c.f[2], c.f[3]}};
+        transition(cb, *img, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL);
+        p_vkCmdClearColorImage(cb, img->image, VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &v, 1, &range);
+        img->texels = true;
+        sampled_layout(cb, *img);
+        return;
+    }
+    // Partial channel mask (e.g. mask 8: alpha only) or scissored sub-rectangle clear:
+    // Replay through a lightweight render pass with a masked fullscreen triangle.
+    draw_end_rendering(cb, 4);
+    Targets targets{};
+    targets.color_count = 1;
+    targets.colors[0] = c.a[0];
+    targets.views.level[0] = uint8_t(level);
+    targets.views.layer[0] = uint8_t(info.view.min_layer);
+    targets.views.format[0] = uint8_t(info.view.format);
+
+    int32_t rx = std::clamp<int32_t>(r[0], 0, int32_t(lw));
+    int32_t ry = std::clamp<int32_t>(r[1], 0, int32_t(lh));
+    int32_t rw = r[3] > 0 ? std::clamp<int32_t>(r[3], 0, int32_t(lw) - rx) : int32_t(lw);
+    int32_t rh = r[4] > 0 ? std::clamp<int32_t>(r[4], 0, int32_t(lh) - ry) : int32_t(lh);
+    if (rw <= 0 || rh <= 0) return;
+    VkRect2D rect{{rx, ry}, {uint32_t(rw), uint32_t(rh)}};
+
+    pass_begin(cb, targets);
+    if (mask_clear(cb, targets, 0, c.mask & 15, c.f, rect)) {
+        pass_mark_written(1);
+    } else {
+        static int mask_logged = 0;
+        if (mask_logged++ < 10)
+            log("nvn: masked texture clear failed: %llx %ux%u f%#x level %u, rect %d,%d %dx%d, mask %x",
+                (unsigned long long)c.a[0], img->width, img->height, t->format, level, r[0], r[1], r[3], r[4], c.mask);
+    }
+    draw_end_rendering(cb, 4);
     img->texels = true;
     sampled_layout(cb, *img);
 }
