@@ -416,13 +416,16 @@ bool present_pass_record(VkCommandBuffer cb, GpuImage& src, const int32_t* crop,
     uint32_t dyn_off = uint32_t(ubo.offset);
     p.off[3] = tw / th;
 
-    // Single-pass Mobile FSR 1.0: upscale and sharpen directly in the swapchain pass across all display orientations.
+    // Single-pass Mobile FSR 1.0: upscale and sharpen only when actually upscaling (matches upstream > 1.01x guard).
     uint32_t out_w = uint32_t(bw * tw + 0.5f), out_h = uint32_t(bh * th + 0.5f);
-    const bool use_fsr = fsr_on() && g.rcas != VK_NULL_HANDLE && out_w >= cw * 0.95f && out_h >= ch * 0.95f;
+    const bool use_fsr = fsr_on() && g.rcas != VK_NULL_HANDLE && out_w > cw * 1.01f && out_h > ch * 1.01f;
     p.off[2] = std::exp2(-fsr_sharpness());
     if (use_fsr && !g.fsr_logged) {
         log("nvn/vk: FSR 1 (single-pass mobile): %.0fx%.0f -> %ux%u (sharpness %.2f stops)",
             cw, ch, out_w, out_h, fsr_sharpness());
+        g.fsr_logged = true;
+    } else if (fsr_on() && g.rcas != VK_NULL_HANDLE && !g.fsr_logged) {
+        log("nvn/vk: FSR 1 skipped (not upscaling: %.0fx%.0f -> %ux%u)", cw, ch, out_w, out_h);
         g.fsr_logged = true;
     }
 
