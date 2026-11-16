@@ -163,6 +163,11 @@ struct HandleSlot {
     SamplerInfo sampler;
     ViewInfo view;
     VkSampler vk_sampler[4] = {};  // sampler_for(sampler, shadow, biased) by shadow + 2 * biased, once a binding asked
+    uint64_t last_sampled_ns = 0;
+    VkImage vk_image = VK_NULL_HANDLE;
+    VkImageView vk_view = VK_NULL_HANDLE;
+    uint64_t vk_view_serial = 0;
+    ImageShape vk_img_binding{};
 };
 constexpr uint32_t kHandleSlots = 8192;  // keeps handle slots across submits when epoch/mark are unchanged
 HandleSlot g_handle_slots[kHandleSlots];
@@ -894,11 +899,20 @@ void build_sets(VkCommandBuffer cb, const std::vector<const ShaderInfo*>& shader
                     GpuImage* made = r.gpu_image ? r.gpu_image : image_of(r.texture);
                     r.gpu_image = made;
                     if (made && ii.imageView != VK_NULL_HANDLE) {
+                        const uint64_t cur_vf = view_forget_serial();
                         r.vk_view = ii.imageView;
                         r.vk_image = made->image;
                         r.vk_layout = ii.imageLayout;
-                        r.vk_view_serial = view_forget_serial();
+                        r.vk_view_serial = cur_vf;
                         r.ready_cached = true;
+                        if (k < t.handles.size()) {
+                            if (HandleSlot* slot = handle_slot(t.handles[k])) {
+                                slot->vk_image = made->image;
+                                slot->vk_view = ii.imageView;
+                                slot->vk_view_serial = cur_vf;
+                                slot->vk_img_binding = b->image;
+                            }
+                        }
                     } else {
                         r.vk_view = VK_NULL_HANDLE;
                         r.ready_cached = false;
@@ -1092,17 +1106,42 @@ uint32_t gather_textures(const std::vector<const ShaderInfo*>& shaders) {
     s_cached_biased = biased;
 
     if (!shaders_same || draw_slow(kSlowScratch)) {
-        t.bindings.clear();
-        s_cached_need_break = 0;
-        s_cached_has_uniform_handle = false;
-        for (const ShaderInfo* s : shaders)
-            for (const DescriptorBinding& b : s->refl.bindings) {
-                if (b.set == 2) {
-                    t.bindings.push_back({s, &b});
-                    if (b.nvn.source == NvnSource::HandleInUniform) s_cached_has_uniform_handle = true;
+        struct ShaderTexBindingsSlot {
+            const ShaderInfo* sh0 = nullptr;
+            const ShaderInfo* sh1 = nullptr;
+            size_t n_sh = 0;
+            uint32_t need_break = 0;
+            bool has_uniform_handle = false;
+            std::vector<std::pair<const ShaderInfo*, const DescriptorBinding*>> bindings;
+        };
+        static thread_local ShaderTexBindingsSlot s_sh_cache[64];
+        const size_t c_idx = ((reinterpret_cast<uintptr_t>(sh0) >> 4) ^ (reinterpret_cast<uintptr_t>(sh1) >> 3) ^ n_sh) & 63;
+        ShaderTexBindingsSlot& cs = s_sh_cache[c_idx];
+        if (!draw_slow(kSlowScratch) && cs.n_sh == n_sh && cs.sh0 == sh0 && cs.sh1 == sh1 && n_sh <= 2) {
+            t.bindings = cs.bindings;
+            s_cached_need_break = cs.need_break;
+            s_cached_has_uniform_handle = cs.has_uniform_handle;
+        } else {
+            t.bindings.clear();
+            s_cached_need_break = 0;
+            s_cached_has_uniform_handle = false;
+            for (const ShaderInfo* s : shaders)
+                for (const DescriptorBinding& b : s->refl.bindings) {
+                    if (b.set == 2) {
+                        t.bindings.push_back({s, &b});
+                        if (b.nvn.source == NvnSource::HandleInUniform) s_cached_has_uniform_handle = true;
+                    }
+                    if (b.set == 3) s_cached_need_break |= kNeedBreak;  // storage images change layout
                 }
-                if (b.set == 3) s_cached_need_break |= kNeedBreak;  // storage images change layout
+            if (!draw_slow(kSlowScratch) && n_sh <= 2) {
+                cs.sh0 = sh0;
+                cs.sh1 = sh1;
+                cs.n_sh = n_sh;
+                cs.need_break = s_cached_need_break;
+                cs.has_uniform_handle = s_cached_has_uniform_handle;
+                cs.bindings = t.bindings;
             }
+        }
         s_cached_sh0 = sh0;
         s_cached_sh1 = sh1;
         s_cached_sh_count = n_sh;
@@ -1139,7 +1178,10 @@ uint32_t gather_textures(const std::vector<const ShaderInfo*>& shaders) {
                 if (slot->object) {
                     texture = slot->texture;
                     obj = slot->object;
-                    obj->last_sampled.store(submit_ns, std::memory_order_relaxed);
+                    if (slot->last_sampled_ns != submit_ns) {
+                        slot->last_sampled_ns = submit_ns;
+                        obj->last_sampled.store(submit_ns, std::memory_order_relaxed);
+                    }
                 }
                 r.sampler = slot->sampler, r.view = slot->view;
                 // The same for every draw (a cache key built per binding otherwise, nvn_sampler.cpp). NX_LOD_BIAS applies
@@ -1147,6 +1189,21 @@ uint32_t gather_textures(const std::vector<const ShaderInfo*>& shaders) {
                 VkSampler& vk = slot->vk_sampler[(b->image.depth ? 1 : 0) + (biased ? 2 : 0)];
                 if (!vk) vk = sampler_for(slot->sampler, b->image.depth, biased);
                 r.vk_sampler = vk;
+                r.texture = texture;
+                r.object = obj;
+                r.gpu_image = obj ? obj->image.get() : nullptr;
+                if (reuse && r.gpu_image && slot->vk_view != VK_NULL_HANDLE &&
+                    slot->vk_image == r.gpu_image->image && slot->vk_view_serial == vf_ser &&
+                    std::memcmp(&slot->vk_img_binding, &b->image, sizeof(ImageShape)) == 0) {
+                    r.vk_view = slot->vk_view;
+                    r.vk_image = slot->vk_image;
+                    r.vk_layout = r.gpu_image->rendered ? VK_IMAGE_LAYOUT_GENERAL : VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+                    r.vk_view_serial = vf_ser;
+                    r.ready_cached = true;
+                } else {
+                    r.vk_view = VK_NULL_HANDLE;
+                    r.ready_cached = false;
+                }
             } else {
                 lookup_handle(handle, texture, r.sampler, &r.view);
                 if (Texture* sampled = texture ? get<Texture>(texture) : nullptr) {
@@ -1156,12 +1213,12 @@ uint32_t gather_textures(const std::vector<const ShaderInfo*>& shaders) {
                     texture = 0;
                 }
                 r.vk_sampler = VK_NULL_HANDLE;
+                r.texture = texture;
+                r.object = obj;
+                r.gpu_image = obj ? obj->image.get() : nullptr;
+                r.vk_view = VK_NULL_HANDLE;
+                r.ready_cached = false;
             }
-            r.texture = texture;
-            r.object = obj;
-            r.gpu_image = obj ? obj->image.get() : nullptr;
-            r.vk_view = VK_NULL_HANDLE;
-            r.ready_cached = false;
         }
 
         if (r.texture) {

@@ -377,6 +377,7 @@ struct MeshBoundsSlot {
     uint32_t stamp = 0;
     float cx = 0.0f, cy = 0.0f, cz = 0.0f, radius = 0.0f;
     bool structural = false;
+    uint8_t static_streak = 0;
 };
 
 void interval_setter_hook(CPU& c) {
@@ -515,7 +516,6 @@ void cull_job_hook(CPU& c) {
             const uint64_t box = (sp - 0x200) & ~uint64_t(15);
             thread_local MeshBoundsSlot tl_bounds_cache[4096];
             const uint64_t cur_p = nvn::presents_recorded();
-            const uint32_t cur_stamp = uint32_t(cur_p >> 4) + 1u;  // refreshes every 16 frames
             uint64_t last_node = 0;
             uint64_t last_matrix = 0;
 
@@ -530,6 +530,8 @@ void cull_job_hook(CPU& c) {
                 if (!node || !local_bounds) continue;
 
                 MeshBoundsSlot& slot = tl_bounds_cache[((mesh >> 5) ^ (mesh >> 17)) & 4095];
+                const uint32_t shift = (slot.mesh == mesh && slot.node == node && slot.static_streak >= 2) ? 9u : 5u;
+                const uint32_t cur_stamp = uint32_t((cur_p + (mesh >> 6)) >> shift) + 1u;
                 float b0, b1, b2, radius;
                 bool structural = false;
                 if (slot.mesh == mesh && slot.node == node && slot.stamp == cur_stamp) {
@@ -558,7 +560,15 @@ void cull_job_hook(CPU& c) {
                     const float max_e = std::max({r16, r17, r18});
                     const float min_e = std::min({r16, r17, r18});
                     structural = (max_e >= 6.5f) || (max_e >= 2.5f && max_e > 4.5f * std::max(min_e, 0.01f));
-                    slot = {mesh, node, cur_stamp, b0, b1, b2, radius, structural};
+                    uint8_t streak = 0;
+                    if (slot.mesh == mesh && slot.node == node &&
+                        std::fabs(b0 - slot.cx) < 1e-3f && std::fabs(b1 - slot.cy) < 1e-3f &&
+                        std::fabs(b2 - slot.cz) < 1e-3f && std::fabs(radius - slot.radius) < 1e-3f) {
+                        streak = std::min<uint8_t>(slot.static_streak + 1, 10);
+                    }
+                    const uint32_t next_shift = (streak >= 2) ? 9u : 5u;
+                    const uint32_t next_stamp = uint32_t((cur_p + (mesh >> 6)) >> next_shift) + 1u;
+                    slot = {mesh, node, next_stamp, b0, b1, b2, radius, structural, streak};
                 }
 
                 // Signed distance of box center and closest surface point from near plane along camera view axis

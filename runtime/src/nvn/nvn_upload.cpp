@@ -105,7 +105,7 @@ bool staging_wanted(uint64_t size) {
         return e && e[0] == '0';
     }();
     uint64_t ring = frame_ring_size();
-    return always || !ring || frame_upload_used() + size > ring / 4 || size > ring / 8;
+    return always || !ring || frame_upload_used() + size > ring / 2 || size > ring / 4;
 }
 
 // Which uploads may get a staging buffer at all: 1 MB and up, and, once this submit has put a quarter of the ring

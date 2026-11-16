@@ -152,10 +152,68 @@ uint64_t g_ring_size = 0, g_head = 0, g_tail = 0, g_begin = 0;
 // Images of destroyed textures, with the serial of the last submit that may still use them.
 std::mutex g_grave_lock;
 std::vector<std::pair<uint64_t, std::shared_ptr<GpuImage>>> g_grave;
-std::vector<std::tuple<uint64_t, VkBuffer, VkDeviceMemory>> g_staging;  // staging_alloc's, freed like the grave's
+struct StagingEntry {
+    uint64_t serial = 0;
+    VkBuffer buffer = VK_NULL_HANDLE;
+    VkDeviceMemory memory = VK_NULL_HANDLE;
+    uint8_t* ptr = nullptr;
+    uint64_t cap = 0;
+};
+std::vector<StagingEntry> g_staging;       // active staging/spill buffers in flight
+std::vector<StagingEntry> g_staging_pool;  // retired staging/spill buffers kept mapped for reuse
+uint64_t g_staging_pool_bytes = 0;
+constexpr uint64_t kMaxStagingPoolBytes = 48ull << 20;
 VkBuffer g_spill_buf = VK_NULL_HANDLE;
 uint8_t* g_spill_ptr = nullptr;
 uint64_t g_spill_at = 0, g_spill_cap = 0;
+
+StagingEntry alloc_or_reuse_staging(uint64_t want_size, VkBufferUsageFlags usage) {
+    uint64_t chunk = std::max<uint64_t>(16ull << 20, (want_size + 0xFFFFFull) & ~0xFFFFFull);
+    {
+        std::lock_guard lk(g_grave_lock);
+        size_t best = SIZE_MAX;
+        for (size_t i = 0; i < g_staging_pool.size(); i++) {
+            if (g_staging_pool[i].cap >= chunk &&
+                (best == SIZE_MAX || g_staging_pool[i].cap < g_staging_pool[best].cap)) {
+                best = i;
+            }
+        }
+        if (best != SIZE_MAX) {
+            StagingEntry e = g_staging_pool[best];
+            g_staging_pool_bytes -= e.cap;
+            g_staging_pool.erase(g_staging_pool.begin() + best);
+            e.serial = g_submitted + 1;
+            g_staging.push_back(e);
+            return e;
+        }
+    }
+    VkDevice d = vk_device();
+    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
+    bi.size = chunk;
+    bi.usage = usage;
+    VkBuffer buf = VK_NULL_HANDLE;
+    if (p_vkCreateBuffer(d, &bi, nullptr, &buf) != VK_SUCCESS) return {};
+    VkMemoryRequirements req{};
+    p_vkGetBufferMemoryRequirements(d, buf, &req);
+    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
+    ai.allocationSize = req.size;
+    ai.memoryTypeIndex = upload_memory_type(req.memoryTypeBits);
+    VkDeviceMemory mem = VK_NULL_HANDLE;
+    void* p = nullptr;
+    if (p_vkAllocateMemory(d, &ai, nullptr, &mem) != VK_SUCCESS || p_vkBindBufferMemory(d, buf, mem, 0) ||
+        p_vkMapMemory(d, mem, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) {
+        p_vkDestroyBuffer(d, buf, nullptr);
+        if (mem) p_vkFreeMemory(d, mem, nullptr);
+        return {};
+    }
+    StagingEntry e{g_submitted + 1, buf, mem, static_cast<uint8_t*>(p), chunk};
+    {
+        std::lock_guard lk(g_grave_lock);
+        g_staging.push_back(e);
+    }
+    g_staging_count++, g_staging_bytes += chunk;
+    return e;
+}
 
 // GPU-written images of destroyed textures, kept a few submits for a new texture over the same memory with the same
 // shape. Wonder re-creates ~180 NVNtexture objects per frame over the same render-target memory: each got a new
@@ -686,37 +744,22 @@ Upload frame_upload_alloc(uint64_t size, uint64_t align) {
     auto try_spill = [&](uint64_t sz, uint64_t al) -> Upload {
         uint64_t s_at = (g_spill_at + al - 1) & ~(al - 1);
         if (!g_spill_buf || s_at + sz > g_spill_cap) {
-            uint64_t chunk = std::max<uint64_t>(16ull << 20, (sz + al + 0xFFFFFull) & ~0xFFFFFull);
-            VkDevice d = vk_device();
-            VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-            bi.size = chunk;
-            bi.usage = kUploadUsage;
-            VkBuffer buf = VK_NULL_HANDLE;
-            if (p_vkCreateBuffer(d, &bi, nullptr, &buf) != VK_SUCCESS) return {};
-            VkMemoryRequirements req{};
-            p_vkGetBufferMemoryRequirements(d, buf, &req);
-            VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-            ai.allocationSize = req.size;
-            ai.memoryTypeIndex =
-                memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-            VkDeviceMemory mem = VK_NULL_HANDLE;
-            void* p = nullptr;
-            if (p_vkAllocateMemory(d, &ai, nullptr, &mem) != VK_SUCCESS || p_vkBindBufferMemory(d, buf, mem, 0) ||
-                p_vkMapMemory(d, mem, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) {
-                p_vkDestroyBuffer(d, buf, nullptr);
-                if (mem) p_vkFreeMemory(d, mem, nullptr);
-                return {};
-            }
-            {
-                std::lock_guard lk(g_grave_lock);
-                g_staging.push_back({g_submitted + 1, buf, mem});
-            }
-            g_spill_buf = buf;
-            g_spill_ptr = static_cast<uint8_t*>(p);
-            g_spill_cap = chunk;
+            StagingEntry e = alloc_or_reuse_staging(sz + al, kUploadUsage);
+            if (!e.ptr) return {};
+            g_spill_buf = e.buffer;
+            g_spill_ptr = e.ptr;
+            g_spill_cap = e.cap;
             g_spill_at = 0;
             s_at = 0;
-            g_staging_count++, g_staging_bytes += chunk;
+        } else {
+            const uint64_t want_ser = g_submitted + 1;
+            std::lock_guard lk(g_grave_lock);
+            for (StagingEntry& se : g_staging) {
+                if (se.buffer == g_spill_buf) {
+                    se.serial = std::max(se.serial, want_ser);
+                    break;
+                }
+            }
         }
         g_spill_at = s_at + sz;
         return {g_spill_buf, s_at, g_spill_ptr + s_at};
@@ -892,14 +935,19 @@ void free_retired_images(uint64_t completed) {
     {
         std::lock_guard lk(g_grave_lock);
         auto done = std::stable_partition(g_staging.begin(), g_staging.end(),
-                                          [&](const auto& e) { return std::get<0>(e) > completed; });
+                                          [&](const StagingEntry& e) { return e.serial > completed; });
         for (auto it = done; it != g_staging.end(); ++it) {
-            if (std::get<1>(*it) == g_spill_buf) {
+            if (it->buffer == g_spill_buf) {
                 g_spill_buf = VK_NULL_HANDLE;
                 g_spill_ptr = nullptr;
                 g_spill_at = g_spill_cap = 0;
             }
-            staging.push_back({std::get<1>(*it), std::get<2>(*it)});
+            if (it->ptr && it->cap > 0 && g_staging_pool_bytes + it->cap <= kMaxStagingPoolBytes) {
+                g_staging_pool_bytes += it->cap;
+                g_staging_pool.push_back(*it);
+            } else {
+                staging.push_back({it->buffer, it->memory});
+            }
         }
         g_staging.erase(done, g_staging.end());
     }
@@ -935,30 +983,38 @@ Texture::~Texture() {
 // to RGBA8 staged 312 MB in one submit, wrapping over its own data before the GPU had copied it (DEBUG-2 #72). Freed
 // once the submit being recorded is retired (as images in the grave). Falls back to the ring if allocation fails.
 Upload staging_alloc(uint64_t size) {
-    g_staging_count++, g_staging_bytes += size;
-    VkDevice d = vk_device();
-    VkBufferCreateInfo bi{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
-    bi.size = size;
-    bi.usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
-    VkBuffer buffer = VK_NULL_HANDLE;
-    if (p_vkCreateBuffer(d, &bi, nullptr, &buffer) != VK_SUCCESS) return upload_alloc(size, 16);
-    VkMemoryRequirements req{};
-    p_vkGetBufferMemoryRequirements(d, buffer, &req);
-    VkMemoryAllocateInfo ai{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
-    ai.allocationSize = req.size;
-    ai.memoryTypeIndex =
-        memory_type(req.memoryTypeBits, VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
-    VkDeviceMemory memory = VK_NULL_HANDLE;
-    void* p = nullptr;
-    if (p_vkAllocateMemory(d, &ai, nullptr, &memory) != VK_SUCCESS || p_vkBindBufferMemory(d, buffer, memory, 0) ||
-        p_vkMapMemory(d, memory, 0, VK_WHOLE_SIZE, 0, &p) != VK_SUCCESS) {
-        p_vkDestroyBuffer(d, buffer, nullptr);
-        if (memory) p_vkFreeMemory(d, memory, nullptr);
+    if (async_gpu()) {
+        // Sub-allocate from g_spill_buf or recycle from g_staging_pool first before hitting the kernel allocator.
+        uint64_t s_at = (g_spill_at + 15) & ~15ull;
+        if (g_spill_buf && s_at + size <= g_spill_cap) {
+            const uint64_t want_ser = g_submitted + 1;
+            {
+                std::lock_guard lk(g_grave_lock);
+                for (StagingEntry& se : g_staging) {
+                    if (se.buffer == g_spill_buf) {
+                        se.serial = std::max(se.serial, want_ser);
+                        break;
+                    }
+                }
+            }
+            g_spill_at = s_at + size;
+            return {g_spill_buf, s_at, g_spill_ptr + s_at};
+        }
+        StagingEntry e = alloc_or_reuse_staging(size, kUploadUsage);
+        if (e.ptr) {
+            if (size <= e.cap / 2) {
+                g_spill_buf = e.buffer;
+                g_spill_ptr = e.ptr;
+                g_spill_cap = e.cap;
+                g_spill_at = size;
+            }
+            return {e.buffer, 0, e.ptr};
+        }
         return upload_alloc(size, 16);
     }
-    std::lock_guard lk(g_grave_lock);
-    g_staging.push_back({g_submitted + 1, buffer, memory});
-    return {buffer, 0, static_cast<uint8_t*>(p)};
+    StagingEntry e = alloc_or_reuse_staging(size, VK_BUFFER_USAGE_TRANSFER_SRC_BIT);
+    if (!e.ptr) return upload_alloc(size, 16);
+    return {e.buffer, 0, e.ptr};
 }
 
 std::shared_ptr<GpuImage> reuse_image(const Texture& t) {

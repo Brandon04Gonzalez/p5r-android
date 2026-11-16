@@ -24,6 +24,7 @@ bool g_started = false;
 
 void run() {
     plat::set_thread_name("nvn janitor");
+    plat::pin_current_thread_to_little_cores("nvn janitor");
     for (;;) {
         std::function<void()> job;
         {

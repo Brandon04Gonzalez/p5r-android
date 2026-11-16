@@ -225,9 +225,11 @@ void draw_command(VkCommandBuffer cb, const Cmd& c, const CmdList& list, const T
                     const uint8_t* b_ptr = list.blob_ptr(c.blob);
                     const size_t b_sz = list.blob_size(c.blob);
                     if (b_ptr && b_sz) {
-                        std::memcpy(p, b_ptr, b_sz);
-                        dedup_invalidate(p, b_sz);
-                        written_cpu_write(p, b_sz);
+                        if (std::memcmp(p, b_ptr, b_sz) != 0) {
+                            std::memcpy(p, b_ptr, b_sz);
+                            dedup_invalidate(p, b_sz);
+                            written_cpu_write(p, b_sz);
+                        }
                     }
                 }
             break;

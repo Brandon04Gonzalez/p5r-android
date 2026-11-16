@@ -109,7 +109,6 @@ static void* thread_entry(void* p) {
     if (const char* e = getenv("NX_MALLOC_TUNE"); !(e && e[0] == '0')) {
         mallopt(M_BIONIC_ZERO_INIT, 1);
     }
-    nx::plat::place_fast_cores();
     ThreadStart s = *static_cast<ThreadStart*>(p);
     delete static_cast<ThreadStart*>(p);
     s.fn(s.arg);
@@ -778,6 +777,7 @@ void crash(int sig, siginfo_t* info, void* uc) {
 }
 
 void game_thread(void*) {
+    nx::plat::place_fast_cores();
     nx::plat::set_thread_priority(-4);
     nx::plat::perf_hint_thread();
     try {
@@ -1061,19 +1061,18 @@ extern "C" void android_main(android_app* app) {
 
     nx::log("%s (Switch recomp) on Android, data at %s (own folder %s: %s)", nx::game::kInfo.title, g_root.c_str(),
             own.c_str(), has_data(own) ? "has the data" : kDataProbe);
-    nx::plat::place_fast_cores();
     static bool started = false;
     for (;;) {
         int events;
         android_poll_source* src;
-        while (ALooper_pollOnce(started ? 0 : 50, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0) {
+        while (ALooper_pollOnce(started ? 16 : 50, nullptr, &events, reinterpret_cast<void**>(&src)) >= 0) {
             if (src) src->process(app, src);
             if (app->destroyRequested) _exit(0);
         }
         if (!started && g_window) {
             started = true;
             start_thread(game_thread, nullptr, 256ull << 20);  // the guest main thread; deep host recursion
+            nx::plat::pin_current_thread_to_little_cores("android_main");
         }
-        if (started) sleep_ns(2'000'000);
     }
 }
