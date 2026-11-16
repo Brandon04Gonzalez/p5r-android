@@ -1,5 +1,6 @@
 // nn::hid at the API level: player 1's Npad state comes from the platform (XInput + keyboard on Windows, game
-// controllers + touch on Android). Vibration is accepted and dropped.
+// controllers + touch on Android). Vibration goes to plat::rumble: an external controller's or the device's motors
+// on Android.
 #include <array>
 #include <atomic>
 #include <deque>
@@ -12,6 +13,7 @@
 
 #include <nx/runtime.h>
 
+#include "ipc.h"
 #include "platform.h"
 
 namespace nx {
@@ -194,7 +196,148 @@ void BindNpadStyleSetUpdateEvent(CPU& c) {  // (const u32& id, SystemEventType*,
     log("hid: style set event bound for id %#x, signalled", id);
 }
 
-void GetVibrationDeviceHandles(CPU& c) { c.x[0] = 0; }  // no vibration devices
+// Vibration. Player 1's controller has two motors, like a Pro Controller: GetVibrationDeviceHandles(Handle* out,
+// int count, const u32& npad id, NpadStyleSet) -> number written. A VibrationDeviceHandle is a u32: style index (3
+// full key), npad id, device index (0 left, 1 right), padding. Each motor of No1 and Handheld keeps the last value the
+// game sent it (VibrationValue: amplitude and frequency of the low and high bands, floats), as on a Switch, and the
+// platform gets one strength, the strongest amplitude of them all (plat::rumble), or 0 while the game has vibration
+// turned off (PermitVibration).
+constexpr int kMotors = 2;  // per npad
+std::mutex g_vib_m;
+float g_vib_values[2 * kMotors][4] = {{0, 160.0f, 0, 320.0f}, {0, 160.0f, 0, 320.0f},
+                                      {0, 160.0f, 0, 320.0f}, {0, 160.0f, 0, 320.0f}};
+bool g_vib_permitted = true;
+
+int motor_of(uint32_t handle) { return std::min<int>(int(handle >> 16 & 0xFF), kMotors - 1); }
+// The value slot of a handle: No1's motors first, then Handheld's.
+float* slot_of(uint32_t handle) { return g_vib_values[((handle >> 8 & 0xFF) == 0x20 ? kMotors : 0) + motor_of(handle)]; }
+
+// Logs the first call of each vibration entry point (which of them the game uses).
+#define NX_VIB_FIRST_CALL(what)                                              \
+    do {                                                                     \
+        static std::once_flag once_;                                         \
+        std::call_once(once_, [] { log("hid: %s (first call)", what); }); \
+    } while (0)
+
+void vibration_apply() {  // under g_vib_m
+    float strongest = 0;
+    if (g_vib_permitted)
+        for (const auto& v : g_vib_values) strongest = std::max({strongest, v[0], v[2]});
+    rumble(std::clamp(strongest, 0.0f, 1.0f));
+}
+
+// Sets the motors of `count` handles (u32 each, at `handles`) to the values at `values` (16 bytes each).
+void send_values(uint64_t handles, uint64_t values, uint64_t count) {
+    if (!handles || !values) return;
+    std::lock_guard lk(g_vib_m);
+    for (uint64_t k = 0; k < count; k++) {
+        float* v = slot_of(ld<uint32_t>(handles + 4 * k));
+        for (int i = 0; i < 4; i++) v[i] = ld<float>(values + 16 * k + 4ull * i);
+    }
+    vibration_apply();
+}
+
+void get_value(uint32_t handle, float out[4]) {
+    std::lock_guard lk(g_vib_m);
+    std::copy_n(slot_of(handle), 4, out);
+}
+
+void permit_vibration(bool permitted) {
+    std::lock_guard lk(g_vib_m);
+    g_vib_permitted = permitted;
+    vibration_apply();
+}
+
+bool vibration_permitted() {
+    std::lock_guard lk(g_vib_m);
+    return g_vib_permitted;
+}
+
+void GetVibrationDeviceHandles(CPU& c) {
+    const uint64_t out = c.x[0];
+    const int count = std::min<int>(int(c.x[1]), kMotors);
+    const uint32_t id = c.x[2] ? ld<uint32_t>(c.x[2]) : 0;
+    NX_VIB_FIRST_CALL("GetVibrationDeviceHandles");
+    if (!out || count < 1 || (id != 0 && id != 0x20)) {  // player 1 and handheld only
+        c.x[0] = 0;
+        return;
+    }
+    for (int k = 0; k < count; k++) st<uint32_t>(out + 4ull * k, 3u | (id & 0xFF) << 8 | uint32_t(k) << 16);
+    c.x[0] = uint64_t(count);
+}
+
+// GetVibrationDeviceInfo(VibrationDeviceInfo* out, const Handle&): {u32 type (1 linear resonant actuator),
+// u32 position (1 left, 2 right)}.
+void GetVibrationDeviceInfo(CPU& c) {
+    NX_VIB_FIRST_CALL("GetVibrationDeviceInfo");
+    const uint32_t handle = c.x[1] ? ld<uint32_t>(c.x[1]) : 0;
+    if (c.x[0]) st<uint32_t>(c.x[0], 1), st<uint32_t>(c.x[0] + 4, motor_of(handle) == 0 ? 1u : 2u);
+    c.x[0] = 0;
+}
+
+void SendVibrationValue(CPU& c) {  // (const Handle&, const VibrationValue&)
+    NX_VIB_FIRST_CALL("SendVibrationValue");
+    send_values(c.x[0], c.x[1], 1);
+    c.x[0] = 0;
+}
+
+void SendVibrationValues(CPU& c) {  // (const Handle* handles, const VibrationValue* values, int count)
+    NX_VIB_FIRST_CALL("SendVibrationValues");
+    send_values(c.x[0], c.x[1], uint64_t(std::max<int64_t>(int64_t(int32_t(c.x[2])), 0)));
+    c.x[0] = 0;
+}
+
+void GetActualVibrationValue(CPU& c) {  // (VibrationValue* out, const Handle&)
+    NX_VIB_FIRST_CALL("GetActualVibrationValue");
+    float v[4];
+    get_value(c.x[1] ? ld<uint32_t>(c.x[1]) : 0, v);
+    for (int k = 0; k < 4 && c.x[0]; k++) st<float>(c.x[0] + 4ull * k, v[k]);
+    c.x[0] = 0;
+}
+
+void PermitVibration(CPU& c) {  // (bool)
+    NX_VIB_FIRST_CALL("PermitVibration");
+    permit_vibration((c.x[0] & 0xFF) != 0);
+    c.x[0] = 0;
+}
+
+void IsVibrationPermitted(CPU& c) { c.x[0] = vibration_permitted() ? 1 : 0; }
+
+// The hid service, for what the SDK sends itself: its VibrationTarget (P5R plays its rumble through
+// VibrationWriter -> VibrationMixer -> VibrationTarget, SDK code that runs as is) opens "hid" and sends each motor's
+// value over IPC. Raw arguments as in IHidServer: 201 {u32 handle; VibrationValue value; u32 pad; u64 aruid},
+// 202 {u32 handle; u32 pad; u64 aruid} -> VibrationValue, 204 {bool permitted} (PermitVibration), 205 -> bool
+// (IsVibrationPermitted), 206 {u64 aruid} with the handles and values in the first two input buffers, 211 {u32 handle}
+// -> bool. Everything else succeeds with no output (the npad itself is HLE above).
+ServiceRegistrar r_hid("hid", [] {
+    auto s = std::make_shared<Service>("hid");
+    s->cmds[201] = [](IpcCtx& c) {  // SendVibrationValue
+        NX_VIB_FIRST_CALL("hid 201 SendVibrationValue");
+        if (c.in_size >= 20) send_values(reinterpret_cast<uint64_t>(c.in), reinterpret_cast<uint64_t>(c.in + 4), 1);
+        return 0u;
+    };
+    s->cmds[202] = [](IpcCtx& c) {  // GetActualVibrationValue
+        float v[4];
+        get_value(c.arg<uint32_t>(0), v);
+        for (float f : v) c.push(f);
+        return 0u;
+    };
+    s->cmds[204] = [](IpcCtx& c) {  // PermitVibration
+        NX_VIB_FIRST_CALL("hid 204 PermitVibration");
+        permit_vibration(c.arg<uint8_t>(0) != 0);
+        return 0u;
+    };
+    s->cmds[205] = [](IpcCtx& c) { c.push<uint8_t>(vibration_permitted() ? 1 : 0); return 0u; };  // IsVibrationPermitted
+    s->cmds[206] = [](IpcCtx& c) {  // SendVibrationValues
+        NX_VIB_FIRST_CALL("hid 206 SendVibrationValues");
+        const Buffer handles = c.in_buf(0), values = c.in_buf(1);
+        send_values(handles.addr, values.addr, std::min(handles.size / 4, values.size / 16));
+        return 0u;
+    };
+    s->cmds[211] = [](IpcCtx& c) { c.push<uint8_t>(1); return 0u; };  // IsVibrationDeviceMounted
+    return s;
+});
+
 void ShowControllerSupport(CPU& c) {                     // (ControllerSupportResultInfo*, const Arg&)
     st<int8_t>(c.x[0], 1);        // player count
     st<uint32_t>(c.x[0] + 4, 0);  // selected npad id: No1
@@ -293,7 +436,7 @@ NX_HLE("_ZN2nn3hid12GetNpadStateEPNS0_16NpadJoyDualStateERKj", GetNpadState);
 NX_HLE("_ZN2nn3hid12GetNpadStateEPNS0_17NpadHandheldStateERKj", GetNpadState);
 NX_HLE("_ZN2nn3hid25GetVibrationDeviceHandlesEPNS0_21VibrationDeviceHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", GetVibrationDeviceHandles);
 NX_HLE("_ZN2nn3hid25InitializeVibrationDeviceERKNS0_21VibrationDeviceHandleE", noop);
-NX_HLE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", noop);
+NX_HLE("_ZN2nn3hid22GetVibrationDeviceInfoEPNS0_19VibrationDeviceInfoERKNS0_21VibrationDeviceHandleE", GetVibrationDeviceInfo);
 NX_HLE("_ZN2nn3hid21ShowControllerSupportEPNS0_27ControllerSupportResultInfoERKNS0_20ControllerSupportArgE", ShowControllerSupport);
 // SDK 16 (Super Mario Bros. Wonder)
 NX_HLE("_ZN2nn3hid13GetNpadStatesEPNS0_16NpadFullKeyStateEiRKj", GetNpadStatesFullKey);
@@ -311,8 +454,11 @@ NX_HLE("_ZN2nn3hid30SetNpadJoyAssignmentModeSingleERKj", noop);
 NX_HLE("_ZN2nn3hid21StartLrAssignmentModeEv", noop);
 NX_HLE("_ZN2nn3hid20StopLrAssignmentModeEv", noop);
 NX_HLE("_ZN2nn3hid20GetNpadJoyAssignmentERKj", zero);  // dual
-NX_HLE("_ZN2nn3hid20IsVibrationPermittedEv", one);
-NX_HLE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", noop);
+NX_HLE("_ZN2nn3hid20IsVibrationPermittedEv", IsVibrationPermitted);
+NX_HLE("_ZN2nn3hid18SendVibrationValueERKNS0_21VibrationDeviceHandleERKNS0_14VibrationValueE", SendVibrationValue);
+NX_HLE("_ZN2nn3hid19SendVibrationValuesEPKNS0_21VibrationDeviceHandleEPKNS0_14VibrationValueEi", SendVibrationValues);
+NX_HLE("_ZN2nn3hid23GetActualVibrationValueEPNS0_14VibrationValueERKNS0_21VibrationDeviceHandleE", GetActualVibrationValue);
+NX_HLE("_ZN2nn3hid15PermitVibrationEb", PermitVibration);
 NX_HLE("_ZN2nn3hid23GetSixAxisSensorHandlesEPNS0_19SixAxisSensorHandleEiRKjNS_4util10BitFlagSetILi32ENS0_12NpadStyleTagEEE", GetSixAxisSensorHandles);
 NX_HLE("_ZN2nn3hid18StartSixAxisSensorERKNS0_19SixAxisSensorHandleE", noop);
 NX_HLE("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19SixAxisSensorHandleE", GetSixAxisSensorStates);
