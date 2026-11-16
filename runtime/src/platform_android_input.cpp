@@ -199,20 +199,27 @@ int32_t on_input(android_app*, AInputEvent* e) {
     if ((src & AINPUT_SOURCE_JOYSTICK) == AINPUT_SOURCE_JOYSTICK) {
         g_gamepad = true;
         note_controller(AInputEvent_getDeviceId(e));
-        auto axis = [&](int32_t a) {
-            float v = AMotionEvent_getAxisValue(e, a, 0);
+        // Radial 2D deadzone so circular physical sticks still reach 100% magnitude on diagonals.
+        auto stick_axes = [&](int32_t ax, int32_t ay, int32_t& out_x, int32_t& out_y) {
+            float x = AMotionEvent_getAxisValue(e, ax, 0);
+            float y = -AMotionEvent_getAxisValue(e, ay, 0);
             constexpr float kDeadzone = 0.12f;
-            if (std::fabs(v) < kDeadzone) return 0;
-            float sign = v > 0 ? 1.f : -1.f;
-            float scaled = (v - sign * kDeadzone) / (1.f - kDeadzone);
-            return int32_t(std::clamp(scaled, -1.f, 1.f) * kStickMax);
+            constexpr float kOuter = 0.95f;
+            float mag = std::hypot(x, y);
+            if (mag <= kDeadzone) {
+                out_x = 0;
+                out_y = 0;
+                return;
+            }
+            float scaled = std::min(1.0f, (mag - kDeadzone) / (kOuter - kDeadzone));
+            float inv = scaled / mag;
+            out_x = int32_t(std::clamp(x * inv, -1.f, 1.f) * kStickMax);
+            out_y = int32_t(std::clamp(y * inv, -1.f, 1.f) * kStickMax);
         };
-        g_pad_buttons.lx = axis(AMOTION_EVENT_AXIS_X);
-        g_pad_buttons.ly = -axis(AMOTION_EVENT_AXIS_Y);
-        int32_t rx = axis(AMOTION_EVENT_AXIS_Z);
-        if (!rx) rx = axis(AMOTION_EVENT_AXIS_RX);
-        int32_t ry = -axis(AMOTION_EVENT_AXIS_RZ);
-        if (!ry) ry = -axis(AMOTION_EVENT_AXIS_RY);
+        stick_axes(AMOTION_EVENT_AXIS_X, AMOTION_EVENT_AXIS_Y, g_pad_buttons.lx, g_pad_buttons.ly);
+        int32_t rx = 0, ry = 0;
+        stick_axes(AMOTION_EVENT_AXIS_Z, AMOTION_EVENT_AXIS_RZ, rx, ry);
+        if (!rx && !ry) stick_axes(AMOTION_EVENT_AXIS_RX, AMOTION_EVENT_AXIS_RY, rx, ry);
         g_pad_buttons.rx = rx;
         g_pad_buttons.ry = ry;
         float hx = AMotionEvent_getAxisValue(e, AMOTION_EVENT_AXIS_HAT_X, 0);

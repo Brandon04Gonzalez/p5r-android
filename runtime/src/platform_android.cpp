@@ -823,16 +823,19 @@ void on_cmd(android_app* app, int32_t cmd) {
             g_window = app->window;
             g_window_gen++;
             g_visible = true;
-            uint32_t rw = 0, rh = 0;
-            window_size(rw, rh);
-            if (rw && rh && app->window) {
-                int32_t sw = ANativeWindow_getWidth(app->window);
-                int32_t sh = ANativeWindow_getHeight(app->window);
-                bool portrait = sw > 0 && sh > 0 && sw < sh;
-                int32_t bw = int32_t(portrait ? std::min(rw, rh) : std::max(rw, rh));
-                int32_t bh = int32_t(portrait ? std::max(rw, rh) : std::min(rw, rh));
-                ANativeWindow_setBuffersGeometry(app->window, bw, bh, 0);
-                nx::log("android: ANativeWindow buffer geometry set to %dx%d (screen %dx%d)", bw, bh, sw, sh);
+            const char* fsr = std::getenv("NX_FSR");
+            if (!(fsr && fsr[0] == '1')) {
+                uint32_t rw = 0, rh = 0;
+                window_size(rw, rh);
+                if (rw && rh && app->window) {
+                    int32_t sw = ANativeWindow_getWidth(app->window);
+                    int32_t sh = ANativeWindow_getHeight(app->window);
+                    bool portrait = sw > 0 && sh > 0 && sw < sh;
+                    int32_t bw = int32_t(portrait ? std::min(rw, rh) : std::max(rw, rh));
+                    int32_t bh = int32_t(portrait ? std::max(rw, rh) : std::min(rw, rh));
+                    ANativeWindow_setBuffersGeometry(app->window, bw, bh, 0);
+                    nx::log("android: ANativeWindow buffer geometry set to %dx%d (screen %dx%d)", bw, bh, sw, sh);
+                }
             }
             request_frame_rate(app->window);
             request_immersive();
@@ -884,20 +887,36 @@ void hide_system_bars(JNIEnv* env, jobject activity) {
         return;
     }
     jclass winc = env->GetObjectClass(window);
-    jmethodID get_ctl = env->GetMethodID(winc, "getInsetsController", "()Landroid/view/WindowInsetsController;");
-    if (env->ExceptionCheck()) env->ExceptionClear();
-    jobject ctl = get_ctl ? env->CallObjectMethod(window, get_ctl) : nullptr;
-    if (env->ExceptionCheck()) env->ExceptionClear(), ctl = nullptr;
-    if (ctl) {  // Android 11+
-        jclass cc = env->GetObjectClass(ctl);
-        jclass types = env->FindClass("android/view/WindowInsets$Type");
-        jint bars = env->CallStaticIntMethod(types, env->GetStaticMethodID(types, "systemBars", "()I"));
-        env->CallVoidMethod(ctl, env->GetMethodID(cc, "setSystemBarsBehavior", "(I)V"), 2);  // show transient by swipe
-        env->CallVoidMethod(ctl, env->GetMethodID(cc, "hide", "(I)V"), bars);
-    } else {  // Android 10: immersive sticky | hide navigation | fullscreen | layout stable/hide navigation/fullscreen
-        jobject decor = env->CallObjectMethod(window, env->GetMethodID(winc, "getDecorView", "()Landroid/view/View;"));
-        if (decor)
-            env->CallVoidMethod(decor, env->GetMethodID(env->GetObjectClass(decor), "setSystemUiVisibility", "(I)V"), 0x1706);
+    bool hid = false;
+    // InsetsController.setSystemBarsBehavior() was added in API 30; some Android 10 (API 29) ROMs expose an internal
+    // getInsetsController() without that method, causing NoSuchMethodError / CheckJNI abort if called unconditionally.
+    if (android_get_device_api_level() >= 30) {
+        jmethodID get_ctl = env->GetMethodID(winc, "getInsetsController", "()Landroid/view/WindowInsetsController;");
+        if (env->ExceptionCheck()) env->ExceptionClear(), get_ctl = nullptr;
+        jobject ctl = get_ctl ? env->CallObjectMethod(window, get_ctl) : nullptr;
+        if (env->ExceptionCheck()) env->ExceptionClear(), ctl = nullptr;
+        if (ctl) {  // Android 11+
+            jclass cc = env->GetObjectClass(ctl);
+            jclass types = env->FindClass("android/view/WindowInsets$Type");
+            jmethodID sys_bars = types ? env->GetStaticMethodID(types, "systemBars", "()I") : nullptr;
+            jmethodID set_beh = cc ? env->GetMethodID(cc, "setSystemBarsBehavior", "(I)V") : nullptr;
+            jmethodID hide = cc ? env->GetMethodID(cc, "hide", "(I)V") : nullptr;
+            if (!env->ExceptionCheck() && types && sys_bars && set_beh && hide) {
+                jint bars = env->CallStaticIntMethod(types, sys_bars);
+                env->CallVoidMethod(ctl, set_beh, 2);  // show transient by swipe
+                env->CallVoidMethod(ctl, hide, bars);
+                if (!env->ExceptionCheck()) hid = true;
+            }
+            if (env->ExceptionCheck()) env->ExceptionClear();
+        }
+    }
+    if (!hid) {  // Android 10: immersive sticky | hide navigation | fullscreen | layout stable/hide navigation/fullscreen
+        jmethodID get_decor = env->GetMethodID(winc, "getDecorView", "()Landroid/view/View;");
+        jobject decor = get_decor && !env->ExceptionCheck() ? env->CallObjectMethod(window, get_decor) : nullptr;
+        if (decor && !env->ExceptionCheck()) {
+            jmethodID set_vis = env->GetMethodID(env->GetObjectClass(decor), "setSystemUiVisibility", "(I)V");
+            if (set_vis && !env->ExceptionCheck()) env->CallVoidMethod(decor, set_vis, 0x1706);
+        }
     }
     if (env->ExceptionCheck()) env->ExceptionClear();
 }
