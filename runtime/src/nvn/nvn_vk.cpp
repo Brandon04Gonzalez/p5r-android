@@ -590,7 +590,7 @@ void end_and_wait(VkSemaphore wait, VkSemaphore signal) {
     uint64_t t0 = plat::monotonic_ns();
     gpu_busy_part_end(0, 0, g_cb);
     p_vkEndCommandBuffer(g_cb);
-    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &g_cb;

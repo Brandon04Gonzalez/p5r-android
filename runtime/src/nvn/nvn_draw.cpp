@@ -657,6 +657,10 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         }
         begin_rendering(cb, tt);
     }
+    if ((indexed ? c.i[0] : c.i[1]) == 0) {
+        g_stats.empty++;
+        return true;
+    }
 
     // Pipeline.
     PipelineKey key;
@@ -1032,9 +1036,10 @@ void draw_log_stats() {
         (unsigned long long)g_pass_ends[7]);
     Stats& t = g_stats;
     log("nvn draws: %llu recorded, %llu replayed:", (unsigned long long)recorded_draws(), (unsigned long long)t.total);
-    log("nvn draws: %llu total, %llu done, %llu no program, %llu no vertex shader, %llu no pipeline, %llu no indices",
+    log("nvn draws: %llu total, %llu done, %llu no program, %llu no vertex shader, %llu no pipeline, %llu no indices, %llu empty",
         (unsigned long long)t.total, (unsigned long long)t.done, (unsigned long long)t.no_program,
-        (unsigned long long)t.no_vertex, (unsigned long long)t.no_pipeline, (unsigned long long)t.no_indices);
+        (unsigned long long)t.no_vertex, (unsigned long long)t.no_pipeline, (unsigned long long)t.no_indices,
+        (unsigned long long)t.empty);
     log("nvn passes: %llu ended by a draw's texture uploads or layout changes, %llu by new targets, %llu dispatches",
         (unsigned long long)t.breaks_textures, (unsigned long long)t.breaks_targets, (unsigned long long)t.dispatches);
 }

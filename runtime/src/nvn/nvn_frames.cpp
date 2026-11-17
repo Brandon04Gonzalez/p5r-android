@@ -165,7 +165,7 @@ uint64_t g_reuse_clock = 0, g_reused = 0;
 void wait_fences(const VkFence* fences, uint32_t n) {
     if (!n) return;
     uint64_t t0 = plat::monotonic_ns();
-    VkResult r = p_vkWaitForFences(vk_device(), n, fences, VK_TRUE, kFenceTimeout);
+    VkResult r = p_vkWaitForFences(vk_device(), 1, &fences[n - 1], VK_TRUE, kFenceTimeout);
     if (r == VK_TIMEOUT) gpu_hung("a submit did not finish in 2 s");
     if (r == VK_ERROR_DEVICE_LOST) gpu_hung("vkWaitForFences");
     if (r != VK_SUCCESS) log("nvn/vk: vkWaitForFences failed (%d)", int(r));
@@ -326,7 +326,7 @@ bool submit_part(VkCommandBuffer cb, VkFence fence, VkSemaphore wait, VkSemaphor
     p_vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_HOST_BIT, 0, 1, &mb, 0, nullptr, 0,
                            nullptr);
     p_vkEndCommandBuffer(cb);
-    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+    VkPipelineStageFlags stage = VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     VkSubmitInfo si{VK_STRUCTURE_TYPE_SUBMIT_INFO};
     si.commandBufferCount = 1;
     si.pCommandBuffers = &cb;

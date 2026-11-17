@@ -1,14 +1,17 @@
 // A VkPipelineCache kept on disk (<data root>/pipelines_<vendor>_<device>.bin), and the cost of what the replay
 // creates on the fly. Pipelines are compiled the first time a draw needs them, inside the replay: the course's
 // stutters when new objects come in (16-42 ms replays on the RTX 3050). The driver checks the cache header itself
-// (vendor, device, driver build): a stale file is ignored. Saved every 600 presents when it grew.
+// (vendor, device, driver build): a stale file is ignored. Saved in the background after it grew.
 // NX_PIPELINE_CACHE=0: no cache (bisecting, or to measure first-run stutter).
 #include <cstdio>
 #include <cstdlib>
 #include <vector>
 
 #include <atomic>
+#include <condition_variable>
+#include <cstring>
 #include <mutex>
+#include <thread>
 #include <unordered_set>
 
 #include "nvn_pipeline.h"
@@ -28,9 +31,52 @@ std::string g_path;
 uint64_t g_alias = 0, g_modules = 0, g_module_ns = 0, g_astc = 0, g_astc_ns = 0;
 std::atomic<uint64_t> g_pipelines{0}, g_pipeline_ns{0}, g_worker_pipelines{0}, g_worker_ns{0};  // also counted from the compile worker threads
 uint64_t g_waited = 0, g_waited_ns = 0, g_skipped = 0, g_prewarmed = 0;
+std::mutex g_warm_lock;
 std::unordered_set<uint64_t> g_known;  // hashes of the records in the .keys file or already queued to it
 std::vector<WarmRec> g_new_recs;
 constexpr uint32_t kKeysMagic = 0x314b5750;  // "PWK1"
+
+std::mutex g_save_lock;
+std::condition_variable g_save_cv;
+bool g_save_requested = false, g_save_running = false, g_save_thread_started = false;
+std::atomic<bool> g_cache_dirty{false};
+
+static void warm_save();
+
+bool valid_cache_blob(const std::vector<uint8_t>& data, const VkPhysicalDeviceProperties& p) {
+    if (data.size() < sizeof(VkPipelineCacheHeaderVersionOne)) return false;
+    const auto* h = reinterpret_cast<const VkPipelineCacheHeaderVersionOne*>(data.data());
+    return h->headerSize >= sizeof(VkPipelineCacheHeaderVersionOne) &&
+           h->headerVersion == VK_PIPELINE_CACHE_HEADER_VERSION_ONE && h->vendorID == p.vendorID &&
+           h->deviceID == p.deviceID &&
+           std::memcmp(h->pipelineCacheUUID, p.pipelineCacheUUID, VK_UUID_SIZE) == 0;
+}
+
+void cache_save_worker() {
+    plat::set_thread_name("cache-saver");
+    std::unique_lock lk(g_save_lock);
+    for (;;) {
+        g_save_cv.wait(lk, [] { return g_save_requested; });
+        g_save_requested = false, g_save_running = true;
+        lk.unlock();
+        pipeline_cache_save();
+        lk.lock();
+        g_save_running = false;
+    }
+}
+
+bool request_cache_save() {
+    std::lock_guard lk(g_save_lock);
+    if (g_save_running || g_save_requested) return false;
+    g_save_requested = true;
+    g_cache_dirty.store(false, std::memory_order_release);
+    if (!g_save_thread_started) {
+        g_save_thread_started = true;
+        std::thread(cache_save_worker).detach();
+    }
+    g_save_cv.notify_one();
+    return true;
+}
 
 }  // namespace
 
@@ -48,8 +94,13 @@ VkPipelineCache pipeline_cache() {
         plat::fseek64(f, 0, SEEK_END);
         int64_t n = plat::ftell64(f);
         plat::fseek64(f, 0, SEEK_SET);
-        if (n > 0) data.resize(size_t(n)), data.resize(std::fread(data.data(), 1, data.size(), f));
+        if (n > 0 && n <= 256ll * 1024 * 1024)
+            data.resize(size_t(n)), data.resize(std::fread(data.data(), 1, data.size(), f));
         std::fclose(f);
+    }
+    if (!data.empty() && !valid_cache_blob(data, p)) {
+        log("nvn/vk: pipeline cache %s has a mismatched header, starting empty", g_path.c_str());
+        data.clear();
     }
     VkPipelineCacheCreateInfo ci{VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO};
     ci.initialDataSize = data.size();
@@ -65,6 +116,7 @@ VkPipelineCache pipeline_cache() {
 
 void pipeline_cache_save() {
     if (!g_cache) return;
+    warm_save();
     size_t n = 0;
     if (p_vkGetPipelineCacheData(vk_device(), g_cache, &n, nullptr) != VK_SUCCESS || n <= g_saved_size) return;
     std::vector<uint8_t> data(n);
@@ -80,6 +132,7 @@ void pipeline_cache_save() {
 
 void note_pipeline_created(uint64_t ns, bool worker) {
     (worker ? g_worker_pipelines : g_pipelines)++, (worker ? g_worker_ns : g_pipeline_ns) += ns;
+    g_cache_dirty.store(true, std::memory_order_release);
 }
 void note_pipeline_waited(uint64_t ns) { g_waited++, g_waited_ns += ns; }
 void note_pipeline_skipped() { g_skipped++; }
@@ -97,6 +150,7 @@ static uint64_t rec_hash(const WarmRec& r) { return hash_bytes(reinterpret_cast<
 
 bool warm_load(std::vector<WarmRec>& out) {
     if (!pipeline_cache()) return false;
+    std::lock_guard lk(g_warm_lock);
     FILE* f = plat::fopen_utf8(keys_path(), "rb");
     if (!f) return false;
     uint32_t head[2] = {};
@@ -118,11 +172,20 @@ void warm_record(const PipelineKey& k) {
     if (k.fs) std::memcpy(r.fs, k.fs->hash.c_str(), k.fs->hash.size());
     r.key = k;
     r.key.vs = nullptr, r.key.fs = nullptr;
-    if (g_known.size() < 16384 && g_known.insert(rec_hash(r)).second) g_new_recs.push_back(r);  // ~700 bytes each
+    std::lock_guard lk(g_warm_lock);
+    if (g_known.size() < 16384 && g_known.insert(rec_hash(r)).second) {
+        g_new_recs.push_back(r);  // ~700 bytes each
+        g_cache_dirty.store(true, std::memory_order_release);
+    }
 }
 
 static void warm_save() {
-    if (g_new_recs.empty() || !g_cache) return;
+    std::vector<WarmRec> recs;
+    {
+        std::lock_guard lk(g_warm_lock);
+        if (g_new_recs.empty() || !g_cache) return;
+        recs.swap(g_new_recs);
+    }
     std::string path = keys_path();
     bool fresh = true;
     if (FILE* t = plat::fopen_utf8(path, "rb")) {
@@ -135,9 +198,8 @@ static void warm_save() {
             uint32_t head[2] = {kKeysMagic, uint32_t(sizeof(WarmRec))};
             std::fwrite(head, 4, 2, f);
         }
-        std::fwrite(g_new_recs.data(), sizeof(WarmRec), g_new_recs.size(), f);
+        std::fwrite(recs.data(), sizeof(WarmRec), recs.size(), f);
         std::fclose(f);
-        g_new_recs.clear();
     }
 }
 void note_pipeline_alias() { g_alias++; }
@@ -162,8 +224,11 @@ void creation_log(uint64_t frames) {
     g_worker_pipelines = 0, g_worker_ns = 0;
     g_prewarmed = g_waited = g_waited_ns = g_skipped = 0;
     g_pipelines = 0, g_pipeline_ns = 0, g_astc = g_astc_ns = 0;
-    static uint64_t windows = 0;
-    if (++windows % 10 == 0) pipeline_cache_save(), warm_save();
+    static uint64_t last_save_ns = 0;
+    const uint64_t now_ns = plat::monotonic_ns();
+    if (g_cache && g_cache_dirty.load(std::memory_order_acquire) && now_ns - last_save_ns >= 15'000'000'000ull &&
+        request_cache_save())
+        last_save_ns = now_ns;
 }
 
 }  // namespace nx::nvn
