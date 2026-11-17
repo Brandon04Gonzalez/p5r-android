@@ -70,10 +70,12 @@ std::vector<uint8_t> read_cache_file(const std::string& path) {
         }
         std::fclose(f);
     }
-    return data;
+        return data;
 }
 
 }  // namespace
+
+static void warm_save();
 
 VkPipelineCache pipeline_cache() {
     if (g_tried) return g_cache;
