@@ -38,7 +38,7 @@ std::unordered_set<uint64_t> g_known;
 std::vector<WarmRec> g_new_recs;
 constexpr uint32_t kKeysMagic = 0x314b5750;
 
-void warm_save();
+
 
 bool valid_cache_blob(const std::vector<uint8_t>& data, const VkPhysicalDeviceProperties& p) {
     struct CacheHeader {
