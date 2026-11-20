@@ -1,5 +1,8 @@
 # Persona 5 Royal for Android (native port)
 
+> [!WARNING]
+> **Maintenance of this port has been stopped.** This repository is no longer actively maintained.
+
 An Android app that runs **your own copy** of Persona 5 Royal (Nintendo Switch, version 1.0.0) natively on an arm64
 phone or tablet. The Switch's operating system services, its audio, video and input, and NVN (the Switch's graphics
 API) are reimplemented on Android, with Vulkan for the graphics. The game's own code runs directly on the phone's CPU:
@@ -17,12 +20,9 @@ prepare the game once (a few minutes), and play. The game is read from your file
 Persona 5 Royal is © ATLUS / © SEGA. This is an unofficial fan project, not affiliated with or endorsed by ATLUS,
 SEGA or Nintendo.
 
-## Community and support
+## Community
 
 - **Discord** (English and Spanish channels), for news, help and testing: https://discord.gg/rMgRneBTCe
-- **Support the developer (optional):** [GitHub Sponsors](https://github.com/sponsors/Brandon04Gonzalez). These ports
-  are free and made for preservation. Donating is entirely voluntary and helps with the costs of making them (test
-  devices, hardware, servers). Nothing is locked behind a donation.
 
 ## Install
 
@@ -126,13 +126,13 @@ the report needs.
 
 ## En español
 
+> [!WARNING]
+> **Se ha detenido el mantenimiento de este port.** Este repositorio ya no recibe mantenimiento activo.
+
 Una app de Android que ejecuta **tu propia copia** de Persona 5 Royal (Switch, versión 1.0.0) de forma nativa en un
 móvil o tablet arm64. **No hace falta PC.** El APK no lleva nada del juego: lo lee de tu propio archivo.
 
 - **Discord** (canales en español e inglés), para novedades, ayuda y pruebas: https://discord.gg/rMgRneBTCe
-- **Apoyar al desarrollador (opcional):** [GitHub Sponsors](https://github.com/sponsors/Brandon04Gonzalez). Los ports
-  son gratis y se hacen para preservación. Donar es totalmente voluntario y ayuda con los gastos que conlleva hacerlos
-  (dispositivos de prueba, equipo, servidores). No hay nada de pago.
 
 1. Copia al móvil tu `.nsp` (o `.xci`) de Persona 5 Royal 1.0.0 (el juego base, sin la actualización) y tu `prod.keys`
    (por ejemplo a Descargas).
