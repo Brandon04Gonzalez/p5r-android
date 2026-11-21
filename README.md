@@ -1,7 +1,4 @@
-# Persona 5 Royal for Android (native port)
-
-> [!WARNING]
-> **Maintenance of this port has been stopped.** This repository is no longer actively maintained.
+# Persona 5 Royal for Android (native port
 
 An Android app that runs **your own copy** of Persona 5 Royal (Nintendo Switch, version 1.0.0) natively on an arm64
 phone or tablet. The Switch's operating system services, its audio, video and input, and NVN (the Switch's graphics
