@@ -20,7 +20,7 @@
     <uses-feature android:name="android.hardware.touchscreen" android:required="false" />
 
     <application
-        android:label="P5R"
+        android:label="itel City 100"
         android:requestLegacyExternalStorage="true"
         android:hasCode="true"
         android:extractNativeLibs="true"
