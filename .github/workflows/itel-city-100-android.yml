@@ -1,0 +1,57 @@
+name: Build itel City 100 APK
+
+on:
+  push:
+    branches:
+      - itel-city-100-optimized
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  android-apk:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository and submodules
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK components
+        run: sdkmanager "platforms;android-35" "build-tools;35.0.0" "ndk;28.2.13676358" "platform-tools"
+
+      - name: Fetch Vulkan headers
+        uses: actions/checkout@v4
+        with:
+          repository: KhronosGroup/Vulkan-Headers
+          ref: v1.4.357
+          path: private/third_party/Vulkan-Headers-1.4.357
+
+      - name: Build shader translator
+        run: docker run --rm -v "${{ github.workspace }}:/src" -w /src mcr.microsoft.com/dotnet/sdk:10.0 sh games/p5r/tools/build_harness_android.sh
+
+      - name: Create Android debug signing key
+        run: |
+          mkdir -p "$HOME/.android"
+          keytool -genkeypair -v -keystore "$HOME/.android/debug.keystore" -storepass android -alias androiddebugkey -keypass android -keyalg RSA -keysize 2048 -validity 10000 -dname "CN=Android Debug,O=Android,C=US"
+
+      - name: Build APK
+        run: bash games/p5r/tools/build_android.sh
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: itel-city-100-p5r-apk
+          path: private/p5r/apk_nce/p5r.apk
+          if-no-files-found: error
+          retention-days: 14
