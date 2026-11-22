@@ -25,6 +25,7 @@
 #include "nvn_pipeline.h"
 #include "nvn_ultrawide.h"
 #include "platform.h"
+#include "vk_fpenv.h"
 
 namespace nx::nvn {
 
@@ -137,7 +138,11 @@ VkShaderModule module_of(const ShaderInfo* s, const uint8_t* kinds = nullptr, ui
         VkShaderModuleCreateInfo ci{VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO};
         ci.codeSize = code.size() * 4;
         ci.pCode = code.data();
-        if (p_vkCreateShaderModule(vk_device(), &ci, nullptr, &m) != VK_SUCCESS) log("nvn/vk: shader %s rejected", s->hash.c_str());
+        {
+            ScopedHostFpcr fpcr;
+            if (p_vkCreateShaderModule(vk_device(), &ci, nullptr, &m) != VK_SUCCESS)
+                log("nvn/vk: shader %s rejected", s->hash.c_str());
+        }
         note_module_created(plat::monotonic_ns() - module_t0);
         static int logged = 0;
         if (is_patched && logged++ < 20) log("nvn/vk: shader %s: integer vertex inputs", s->hash.c_str());
@@ -403,7 +408,11 @@ thread_local bool t_worker = false;
 VkPipeline compile(PipeBuild& b) {
     VkPipeline p = VK_NULL_HANDLE;
     const uint64_t t0 = plat::monotonic_ns();
-    VkResult made = p_vkCreateGraphicsPipelines(vk_device(), b.cache, 1, &b.ci, nullptr, &p);
+    VkResult made;
+    {
+        ScopedHostFpcr fpcr;
+        made = p_vkCreateGraphicsPipelines(vk_device(), b.cache, 1, &b.ci, nullptr, &p);
+    }
     note_pipeline_created(plat::monotonic_ns() - t0, t_worker);
     if (made != VK_SUCCESS) {
         log("nvn/vk: pipeline for %s + %s failed", b.vs_hash.c_str(), b.fs_hash.c_str());
@@ -442,12 +451,15 @@ struct PipeTask {
     }
 };
 
+// 3-tier priority condvar queue (TOTKDroid v34): 0 = urgent/live draw, 1 = async live draw, 2 = prewarm.
+// Prewarm jobs never starve live draws on Mali worker threads.
 struct Pool {
     std::mutex m;
     std::condition_variable cv;
-    std::deque<std::shared_ptr<PipeTask>> q;
+    std::deque<std::shared_ptr<PipeTask>> q[3];
     std::atomic<unsigned> active{0};
     unsigned threads = 0;
+    bool empty_locked() const { return q[0].empty() && q[1].empty() && q[2].empty(); }
 };
 
 std::atomic<bool> g_pool_ready{false};
@@ -463,6 +475,7 @@ Pool& pool() {
         for (unsigned i = 0; i < pl->threads; i++)
             std::thread([pl] {
                 t_worker = true;
+                vk_fp_thread();
                 plat::set_thread_name("pipe-worker");
                 plat::reset_current_thread_affinity("pipe-worker");
                 plat::set_thread_priority(6);
@@ -470,9 +483,10 @@ Pool& pool() {
                     std::shared_ptr<PipeTask> t;
                     {
                         std::unique_lock lk(pl->m);
-                        pl->cv.wait(lk, [&] { return !pl->q.empty(); });
-                        t = std::move(pl->q.front());
-                        pl->q.pop_front();
+                        pl->cv.wait(lk, [&] { return !pl->empty_locked(); });
+                        int prio = !pl->q[0].empty() ? 0 : !pl->q[1].empty() ? 1 : 2;
+                        t = std::move(pl->q[prio].front());
+                        pl->q[prio].pop_front();
                         pl->active.fetch_add(1, std::memory_order_release);
                     }
                     t->run();
@@ -485,11 +499,12 @@ Pool& pool() {
     return *p;
 }
 
-void enqueue(const std::shared_ptr<PipeTask>& t) {
+void enqueue(const std::shared_ptr<PipeTask>& t, int prio = 1) {
     Pool& pl = pool();
+    const int p = prio < 0 ? 0 : prio > 2 ? 2 : prio;
     {
         std::lock_guard lk(pl.m);
-        pl.q.push_back(t);
+        pl.q[p].push_back(t);
     }
     pl.cv.notify_one();
 }
@@ -637,7 +652,7 @@ VkPipeline pipeline_for(const PipelineKey& canon, const ProgramLayout& layout, b
         auto t = std::make_shared<PipeTask>();
         t->build = std::move(build);
         g_inflight.emplace(ck, t);
-        enqueue(t);
+        enqueue(t, 1);  // live async draw (higher priority than prewarm)
         return *pending = true, VK_NULL_HANDLE;
     }
     VkPipeline p = compile(*build);
@@ -651,7 +666,7 @@ bool pipeline_workers_busy() {
     if (!g_pool_ready.load(std::memory_order_acquire)) return false;
     Pool& pl = pool();
     std::lock_guard lk(pl.m);
-    return !pl.q.empty() || pl.active.load(std::memory_order_acquire) > 0;
+    return !pl.empty_locked() || pl.active.load(std::memory_order_acquire) > 0;
 }
 
 VkPipeline graphics_pipeline(const PipelineKey& key, const ProgramLayout& layout, bool allow_async) {
@@ -726,6 +741,7 @@ void pipeline_warm_step() {
             }
             if (!hashes.empty()) {
                 std::thread([hashes = std::move(hashes)] {
+                    vk_fp_thread();
                     plat::set_thread_name("shader-prewarm");
                     plat::reset_current_thread_affinity("shader-prewarm");
                     plat::set_thread_priority(8);
@@ -772,7 +788,7 @@ void pipeline_warm_step() {
         auto t = std::make_shared<PipeTask>();
         t->build = prepare_graphics_pipeline(key, program_layout(stages));
         g_inflight.emplace(ck, t);
-        enqueue(t);
+        enqueue(t, 2);  // prewarm: lowest priority
         g_prewarm_inflight++;
         note_pipeline_prewarmed();
     }
@@ -798,20 +814,30 @@ PipelineKey canonical_key(const PipelineKey& in) {
         for (const ShaderIo& io : in.vs->refl.inputs) {
             if (io.location >= 16 || io.location >= in.attrib_count) continue;
             const VertexAttrib& va = in.attribs[io.location];
-            k.attribs[io.location].format = va.format;  // also the integer-input kind of the vertex module
-            max_loc = std::max(max_loc, io.location + 1);
-            if (vk_vertex_format(va.format) != VK_FORMAT_UNDEFINED && va.stream < 15) {
-                k.attribs[io.location] = va;
-                used_streams |= 1u << va.stream;
+            if (dc.vertex_input) {
+                // Only integer attribute kind (0=float, 1=uint, 2=sint) affects SPIR-V module specialization;
+                // stream/offset/stride/divisor are all bound dynamically via vkCmdSetVertexInputEXT.
+                const uint32_t kind = vertex_int_kind(va.format);
+                k.attribs[io.location].format = (kind == 1) ? 0x27u : (kind == 2) ? 0x28u : 0u;
+                if (kind) max_loc = std::max(max_loc, io.location + 1);
+            } else {
+                k.attribs[io.location].format = va.format;  // also the integer-input kind of the vertex module
+                max_loc = std::max(max_loc, io.location + 1);
+                if (vk_vertex_format(va.format) != VK_FORMAT_UNDEFINED && va.stream < 15) {
+                    k.attribs[io.location] = va;
+                    used_streams |= 1u << va.stream;
+                }
             }
         }
     k.attrib_count = max_loc;
-    for (uint32_t s = 0; s < 15; s++)
-        if (used_streams >> s & 1) {
-            k.streams[s] = in.streams[s];
-            if (dc.vertex_stride) k.streams[s].stride = 0;
-            k.stream_count = s + 1;
-        }
+    if (!dc.vertex_input) {
+        for (uint32_t s = 0; s < 15; s++)
+            if (used_streams >> s & 1) {
+                k.streams[s] = in.streams[s];
+                if (dc.vertex_stride) k.streams[s].stride = 0;
+                k.stream_count = s + 1;
+            }
+    }
     const uint32_t n = std::min<uint32_t>(in.color_count, 8);
     k.color_count = in.color_count;
     for (uint32_t i = 0; i < n; i++) {
@@ -906,39 +932,41 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
         }
     }
 
-    // Vertex input: each shader input location reads the attribute of the same index. Locations with no attribute
-    // (or an unknown format) read a zero vec4 from binding 15.
+    // Vertex input: when VK_EXT_vertex_input_dynamic_state is active, vertex bindings & attributes are set
+    // dynamically via vkCmdSetVertexInputEXT (pVertexInputState is ignored by Vulkan).
+    const DynamicStateCaps& dc = vk_dynamic_caps();
     std::vector<VkVertexInputAttributeDescription>& attrs = B.attrs;
     std::vector<VkVertexInputBindingDescription>& binds = B.binds;
-    bool streams_used[16] = {}, zero_used = false;
-    if (key.vs)
-        for (const ShaderIo& in : key.vs->refl.inputs) {
-            VkVertexInputAttributeDescription a{in.location, 15, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
-            if (in.location < key.attrib_count) {
-                const VertexAttrib& va = key.attribs[in.location];
-                VkFormat f = vk_vertex_format(va.format);
-                if (f != VK_FORMAT_UNDEFINED && va.stream < 15) {
-                    a.binding = va.stream, a.format = f, a.offset = va.offset;
-                    streams_used[va.stream] = true;
-                }
-            }
-            if (a.binding == 15) zero_used = true;
-            attrs.push_back(a);
-        }
-    const DynamicStateCaps& dc = vk_dynamic_caps();
-    for (uint32_t s = 0; s < 15; s++)
-        if (streams_used[s]) {
-            const VertexStream& vs = key.streams[s];
-            binds.push_back({s, dc.vertex_stride ? 0u : vs.stride,
-                             vs.divisor ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX});
-        }
-    if (zero_used) binds.push_back({15, 0, VK_VERTEX_INPUT_RATE_INSTANCE});
     VkPipelineVertexInputStateCreateInfo& vi = B.vi;
     vi = {VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO};
-    vi.vertexBindingDescriptionCount = uint32_t(binds.size());
-    vi.pVertexBindingDescriptions = binds.data();
-    vi.vertexAttributeDescriptionCount = uint32_t(attrs.size());
-    vi.pVertexAttributeDescriptions = attrs.data();
+    if (!dc.vertex_input) {
+        bool streams_used[16] = {}, zero_used = false;
+        if (key.vs)
+            for (const ShaderIo& in : key.vs->refl.inputs) {
+                VkVertexInputAttributeDescription a{in.location, 15, VK_FORMAT_R32G32B32A32_SFLOAT, 0};
+                if (in.location < key.attrib_count) {
+                    const VertexAttrib& va = key.attribs[in.location];
+                    VkFormat f = vk_vertex_format(va.format);
+                    if (f != VK_FORMAT_UNDEFINED && va.stream < 15) {
+                        a.binding = va.stream, a.format = f, a.offset = va.offset;
+                        streams_used[va.stream] = true;
+                    }
+                }
+                if (a.binding == 15) zero_used = true;
+                attrs.push_back(a);
+            }
+        for (uint32_t s = 0; s < 15; s++)
+            if (streams_used[s]) {
+                const VertexStream& vs = key.streams[s];
+                binds.push_back({s, dc.vertex_stride ? 0u : vs.stride,
+                                 vs.divisor ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX});
+            }
+        if (zero_used) binds.push_back({15, 0, VK_VERTEX_INPUT_RATE_INSTANCE});
+        vi.vertexBindingDescriptionCount = uint32_t(binds.size());
+        vi.pVertexBindingDescriptions = binds.data();
+        vi.vertexAttributeDescriptionCount = uint32_t(attrs.size());
+        vi.pVertexAttributeDescriptions = attrs.data();
+    }
 
     VkPipelineInputAssemblyStateCreateInfo& ia = B.ia;
     ia = {VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO};
@@ -1027,7 +1055,8 @@ std::unique_ptr<PipeBuild> prepare_graphics_pipeline(const PipelineKey& key, con
     if (dc.depth_compare_op) add_dyn(VK_DYNAMIC_STATE_DEPTH_COMPARE_OP);
     if (dc.stencil_test_enable) add_dyn(VK_DYNAMIC_STATE_STENCIL_TEST_ENABLE);
     if (dc.stencil_op) add_dyn(VK_DYNAMIC_STATE_STENCIL_OP);
-    if (dc.vertex_stride) add_dyn(VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE);
+    if (dc.vertex_input) add_dyn(VK_DYNAMIC_STATE_VERTEX_INPUT_EXT);
+    else if (dc.vertex_stride) add_dyn(VK_DYNAMIC_STATE_VERTEX_INPUT_BINDING_STRIDE);
     if (dc.depth_bias_enable) add_dyn(VK_DYNAMIC_STATE_DEPTH_BIAS_ENABLE);
     if (dc.primitive_restart_enable) add_dyn(VK_DYNAMIC_STATE_PRIMITIVE_RESTART_ENABLE);
     if (dc.rasterizer_discard_enable) add_dyn(VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE);
@@ -1348,6 +1377,7 @@ VkPipeline compute_pipeline(const ShaderInfo* cs, const ProgramLayout& layout) {
         sg.requiredSubgroupSize = 32;
         if (gpu_require_subgroup32()) ci.stage.pNext = &sg;
         ci.layout = layout.layout;
+        ScopedHostFpcr fpcr;
         if (p_vkCreateComputePipelines(vk_device(), pipeline_cache(), 1, &ci, nullptr, &p) != VK_SUCCESS) {
             log("nvn/vk: compute pipeline for %s failed", cs->hash.c_str());
             p = VK_NULL_HANDLE;

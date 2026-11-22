@@ -65,6 +65,8 @@ bool vk_depth_clip_control();
 bool vk_indirect_count();  // VK_KHR_draw_indirect_count enabled (nvn_occlusion.cpp)
 bool vk_list_restart();  // VK_EXT_primitive_topology_list_restart enabled (nvn_draw.cpp)
 bool vk_dynamic_rendering();  // core 1.3 dynamic rendering; without it, render pass objects (nvn_renderpass.cpp)
+bool vk_load_store_op_none();  // VK_EXT_load_store_op_none / VK_KHR_load_store_op_none
+bool vk_astc_decode_mode();    // VK_EXT_astc_decode_mode (UNORM8 decode on Mali-G925)
 // The core features the device was created with (all the GPU has): depthClamp, depthBiasClamp, depthBounds, ...
 const VkPhysicalDeviceFeatures& vk_features();
 struct DynamicStateCaps {
@@ -77,6 +79,7 @@ struct DynamicStateCaps {
     bool stencil_test_enable = false;
     bool stencil_op = false;
     bool vertex_stride = false;
+    bool vertex_input = false;  // VK_EXT_vertex_input_dynamic_state (TOTKDroid v34)
 
     bool depth_bias_enable = false;
     bool primitive_restart_enable = false;
@@ -98,6 +101,7 @@ struct DynamicStateCaps {
     PFN_vkCmdSetStencilTestEnable set_stencil_test_enable = nullptr;
     PFN_vkCmdSetStencilOp set_stencil_op = nullptr;
     PFN_vkCmdBindVertexBuffers2 bind_vertex_buffers2 = nullptr;
+    PFN_vkCmdSetVertexInputEXT set_vertex_input = nullptr;
 
     PFN_vkCmdSetDepthBiasEnable set_depth_bias_enable = nullptr;
     PFN_vkCmdSetPrimitiveRestartEnable set_primitive_restart_enable = nullptr;
@@ -113,9 +117,12 @@ struct DynamicStateCaps {
 const DynamicStateCaps& vk_dynamic_caps();
 bool is_xclipse();
 bool is_mali();
+bool is_mali_flagship();    // Immortalis / Mali-G925 / Mali-G710+ (Find X8)
+int mali_driver_release();  // e.g. 49 for r49p1 (0 if unknown / non-Mali)
 bool is_adreno();
 bool is_adreno_8xx();
 bool is_powervr();
+bool is_high_ram_device();  // >= 10 GB system RAM (e.g. Find X8 16 GB)
 bool gpu_require_subgroup32();  // compute pipelines pin the subgroup size to 32 (nvn_pipeline.cpp)
 bool gpu_is_integrated();  // the device in use is an integrated GPU (set when the device is made)
 VkPhysicalDevice vk_physical();

@@ -182,7 +182,7 @@ GpuImage* image_of(uint64_t guest) {
         const char* e = std::getenv("NX_MALI_LOW_SHADOWS");
         if (e) return e[0] != '0';
 #if defined(__ANDROID__)
-        return is_mali();
+        return is_mali() && !is_mali_flagship();
 #else
         return false;
 #endif

@@ -117,9 +117,17 @@ int affinity_mode() {
     static const int m = [] {
         const char* e = std::getenv("NX_AFFINITY");
         if (e) return std::atoi(e);
-        return 2;  // Default on Android: run on all fast cores (cl > 0, avoiding little/efficiency cluster)
+        return 2;  // Default on Android: run on fast cores (preferring X4 cluster on 3-tier SoCs like Dimensity 9400)
     }();
     return m;
+}
+
+bool use_prime_cluster() {
+    static const bool on = [] {
+        const char* e = std::getenv("NX_USE_PRIME");
+        return e && e[0] == '1';
+    }();
+    return on;
 }
 
 void place(int role) {
@@ -129,14 +137,20 @@ void place(int role) {
     cpu_set_t set;
     CPU_ZERO(&set);
     int top = c.clusters - 1;
+    int mid_count = 0;
+    if (c.clusters >= 3) {
+        for (int cl : c.cluster)
+            if (cl > 0 && cl < top) mid_count++;
+    }
+    const bool prefer_x4 = (c.clusters >= 3 && mid_count >= 2 && !use_prime_cluster());
     for (size_t k = 0; k < c.cluster.size(); k++) {
         int cl = c.cluster[k];
-        bool in = mode == 2 ? cl > 0 : role == 0 ? cl == top : (c.clusters > 2 ? cl > 0 && cl < top : cl == top);
+        bool in = prefer_x4 ? (cl > 0 && cl < top)
+                            : (mode == 2 ? cl > 0 : role == 0 ? cl == top : (c.clusters > 2 ? cl > 0 && cl < top : cl == top));
         if (in) CPU_SET(int(k), &set);
     }
     if (sched_setaffinity(0, sizeof set, &set) == 0) return;
-    // The prime core paused (Android takes it offline when the phone is hot): every big core instead, not wherever
-    // the scheduler left the thread (the little ones included).
+    // Fallback to all non-efficiency cores
     CPU_ZERO(&set);
     for (size_t k = 0; k < c.cluster.size(); k++)
         if (c.cluster[k] > 0) CPU_SET(int(k), &set);
@@ -195,10 +209,18 @@ void place_fast_cores() {
     const Cpus& c = cpus();
     int mode = affinity_mode();
     if (!mode || c.clusters < 2) return;
+    int top = c.clusters - 1;
+    int mid_count = 0;
+    if (c.clusters >= 3) {
+        for (int cl : c.cluster)
+            if (cl > 0 && cl < top) mid_count++;
+    }
+    const bool prefer_x4 = (c.clusters >= 3 && mid_count >= 2 && !use_prime_cluster());
     cpu_set_t set;
     CPU_ZERO(&set);
     for (size_t k = 0; k < c.cluster.size(); k++) {
-        if (c.cluster[k] > 0) CPU_SET(int(k), &set);
+        int cl = c.cluster[k];
+        if (prefer_x4 ? (cl > 0 && cl < top) : (cl > 0)) CPU_SET(int(k), &set);
     }
     sched_setaffinity(0, sizeof set, &set);
 #endif

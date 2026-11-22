@@ -85,7 +85,7 @@ VkSampler sampler_for(const SamplerInfo& s, bool shadow, bool biased) {
     static const float aniso_cap = [] {
         const char* e = std::getenv("NX_MAX_ANISO");
 #if defined(__ANDROID__)
-        float def = is_mali() ? 1.0f : 2.0f;
+        float def = is_mali_flagship() ? 4.0f : is_mali() ? 1.0f : 2.0f;
 #else
         float def = 16.0f;
 #endif

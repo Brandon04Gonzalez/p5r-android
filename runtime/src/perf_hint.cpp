@@ -33,14 +33,32 @@ using GetManager = void* (*)();
 using CreateSession = void* (*)(void*, const int32_t*, size_t, int64_t);
 using ReportActual = int (*)(void*, int64_t);
 using UpdateTarget = void (*)(void*, int64_t);
+using SetThreads = int (*)(void*, const int32_t*, size_t);
 using CloseSession = void (*)(void*);
+using WdCreate = void* (*)();
+using WdSetNs = void (*)(void*, int64_t);
+using ReportActual2 = int (*)(void*, void*);
+using ThermalAcquire = void* (*)();
+using ThermalStatus = int (*)(void*);
+using ThermalHeadroom = float (*)(void*, int);
 
 struct Api {
     GetManager get_manager = nullptr;
     CreateSession create = nullptr;
     ReportActual report = nullptr;
     UpdateTarget update_target = nullptr;
+    SetThreads set_threads = nullptr;
     CloseSession close = nullptr;
+    WdCreate wd_create = nullptr;
+    WdSetNs wd_start = nullptr;
+    WdSetNs wd_total = nullptr;
+    WdSetNs wd_cpu = nullptr;
+    WdSetNs wd_gpu = nullptr;
+    ReportActual2 report2 = nullptr;
+    void* wd = nullptr;
+    void* thermal_mgr = nullptr;
+    ThermalStatus thermal_status = nullptr;
+    ThermalHeadroom thermal_headroom = nullptr;
     bool ok = false;
 };
 
@@ -66,10 +84,23 @@ const Api& api() {
         x.create = reinterpret_cast<CreateSession>(find_sym("APerformanceHint_createSession", "APerformanceHintManager_createSession"));
         x.report = reinterpret_cast<ReportActual>(find_sym("APerformanceHint_reportActualWorkDuration", "APerformanceHintManager_reportActualWorkDuration"));
         x.update_target = reinterpret_cast<UpdateTarget>(find_sym("APerformanceHint_updateTargetWorkDuration", "APerformanceHintManager_updateTargetWorkDuration"));
+        x.set_threads = reinterpret_cast<SetThreads>(find_sym("APerformanceHint_setThreads", "APerformanceHintManager_setThreads"));
         x.close = reinterpret_cast<CloseSession>(find_sym("APerformanceHint_closeSession", "APerformanceHintManager_closeSession"));
+        x.wd_create = reinterpret_cast<WdCreate>(dlsym(lib, "AWorkDuration_create"));
+        x.wd_start = reinterpret_cast<WdSetNs>(dlsym(lib, "AWorkDuration_setWorkPeriodStartTimestampNanos"));
+        x.wd_total = reinterpret_cast<WdSetNs>(dlsym(lib, "AWorkDuration_setActualTotalDurationNanos"));
+        x.wd_cpu = reinterpret_cast<WdSetNs>(dlsym(lib, "AWorkDuration_setActualCpuDurationNanos"));
+        x.wd_gpu = reinterpret_cast<WdSetNs>(dlsym(lib, "AWorkDuration_setActualGpuDurationNanos"));
+        x.report2 = reinterpret_cast<ReportActual2>(dlsym(lib, "APerformanceHint_reportActualWorkDuration2"));
+        if (x.wd_create && x.wd_start && x.wd_total && x.wd_cpu && x.wd_gpu && x.report2) x.wd = x.wd_create();
+        auto tacq = reinterpret_cast<ThermalAcquire>(dlsym(lib, "AThermal_acquireManager"));
+        x.thermal_status = reinterpret_cast<ThermalStatus>(dlsym(lib, "AThermal_getCurrentThermalStatus"));
+        x.thermal_headroom = reinterpret_cast<ThermalHeadroom>(dlsym(lib, "AThermal_getThermalHeadroom"));
+        if (tacq && (x.thermal_status || x.thermal_headroom)) x.thermal_mgr = tacq();
         x.ok = x.get_manager && x.create && x.report && x.close;
         if (x.ok) {
-            __android_log_print(ANDROID_LOG_INFO, "P5R-ADPF", "ADPF dynamic symbols resolved successfully");
+            __android_log_print(ANDROID_LOG_INFO, "P5R-ADPF", "ADPF active (API35 report2=%d, thermal=%d)",
+                                x.wd ? 1 : 0, x.thermal_mgr ? 1 : 0);
         } else {
             __android_log_print(ANDROID_LOG_WARN, "P5R-ADPF", "ADPF symbols not available on this Android version");
         }
@@ -78,10 +109,31 @@ const Api& api() {
     return a;
 }
 
+int read_batt_deci_c() {
+    static const char* paths[] = {
+        "/sys/class/power_supply/battery/temp",
+        "/sys/class/power_supply/bms/temp",
+    };
+    for (const char* p : paths) {
+        if (FILE* f = std::fopen(p, "r")) {
+            int t = 0;
+            if (std::fscanf(f, "%d", &t) == 1 && t > 0) {
+                std::fclose(f);
+                return t > 100 ? t : t * 10;  // tenths of deg C
+            }
+            std::fclose(f);
+        }
+    }
+    return 0;
+}
+
 std::mutex g_lock;
 std::vector<int32_t> g_tids;
 void* g_session = nullptr;
 bool g_dirty = false;
+int64_t g_last_target = 0;
+int g_thermal_level = 0;
+uint64_t g_next_thermal_ns = 0;
 
 }  // namespace
 
@@ -129,17 +181,63 @@ void perf_hint_frame(int64_t ns) {
     if (!a.ok || ns <= 0) return;
     std::lock_guard lk(g_lock);
     const char* cap = std::getenv("NX_FPS_CAP");
-    int64_t target = cap && std::atoi(cap) > 0 && std::atoi(cap) <= 30 ? 28'000'000 : 16'666'667;
-    if (g_dirty && !g_tids.empty()) {  // a new thread made part of the frame: a session with all of them
-        if (g_session) a.close(g_session);
-        g_session = a.create(a.get_manager(), g_tids.data(), g_tids.size(), target);
-        g_dirty = false;
-        log("adpf: %s for %zu threads", g_session ? "session made" : "no session", g_tids.size());
-        __android_log_print(ANDROID_LOG_INFO, "P5R-ADPF", "ADPF hint session %s for %zu threads (target %lld ns)",
-                            g_session ? "created" : "failed to create", g_tids.size(), (long long)target);
+    int64_t target = cap && std::atoi(cap) > 0 && std::atoi(cap) <= 30 ? 33'333'333 : 16'666'667;
+
+    // 1 Hz thermal check (ColorOS SKIN cliff / BatteryManager temp guard from TOTKDroid v34)
+    const uint64_t now_ns = monotonic_ns();
+    if (now_ns >= g_next_thermal_ns) {
+        g_next_thermal_ns = now_ns + 1'000'000'000ull;
+        int ts = (a.thermal_mgr && a.thermal_status) ? a.thermal_status(a.thermal_mgr) : 0;
+        float hr = (a.thermal_mgr && a.thermal_headroom) ? a.thermal_headroom(a.thermal_mgr, 0) : -1.0f;
+        int batt = read_batt_deci_c();
+        bool hot2 = (ts >= 3) || (ts >= 2 && (batt <= 0 || batt >= 380 || hr >= 0.70f)) || (batt >= 390);
+        bool warm1 = (ts >= 1) || (batt >= 383);
+        int new_lvl = hot2 ? 2 : warm1 ? 1 : 0;
+        if (new_lvl != g_thermal_level) {
+            g_thermal_level = new_lvl;
+            log("adpf: thermal level -> %d (status %d, headroom %.2f, batt %.1fC)",
+                g_thermal_level, ts, double(hr), batt / 10.0);
+        }
+    }
+    if (g_thermal_level >= 2 && target < 25'000'000) target = 25'000'000;
+    else if (g_thermal_level == 1 && target < 20'000'000) target = 20'000'000;
+
+    if (g_dirty && !g_tids.empty()) {
+        if (g_session && a.set_threads) {
+            if (a.set_threads(g_session, g_tids.data(), g_tids.size()) == 0) {
+                g_dirty = false;
+            }
+        }
+        if (g_dirty) {
+            if (g_session) a.close(g_session);
+            g_session = a.create(a.get_manager(), g_tids.data(), g_tids.size(), target);
+            g_last_target = target;
+            g_dirty = false;
+            log("adpf: %s for %zu threads", g_session ? "session made" : "no session", g_tids.size());
+        }
     }
     if (g_session) {
-        a.report(g_session, ns);
+        if (a.update_target && target != g_last_target) {
+            a.update_target(g_session, target);
+            g_last_target = target;
+        }
+        // Anti-death-spiral guard while warm/hot: cap spike reports to 1.05x target so ADPF PID doesn't slam clocks
+        int64_t rep_ns = ns;
+        if (g_thermal_level >= 2 && target > 0) {
+            int64_t lim = target * 105 / 100;
+            if (rep_ns > lim) rep_ns = lim;
+        }
+        if (a.wd && a.report2) {
+            a.wd_start(a.wd, int64_t(now_ns) - rep_ns);
+            a.wd_total(a.wd, rep_ns);
+            a.wd_cpu(a.wd, rep_ns);
+            a.wd_gpu(a.wd, rep_ns / 2);
+            a.report2(g_session, a.wd);
+        } else {
+            a.report(g_session, rep_ns);
+        }
+        // ColorOS ADPF resets cpus_allowed to 0..7 on report/setThreads; re-pin presenting thread to X4 cluster.
+        place_fast_cores();
     }
 }
 #else

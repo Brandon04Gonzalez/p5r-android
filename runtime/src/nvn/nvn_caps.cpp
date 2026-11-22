@@ -98,9 +98,10 @@ bool native_r11g11b10() {
     if (s >= 0) return s == 1;
 #if defined(__ANDROID__)
     if (!vk_physical()) return false;  // asked before the device exists: not decided yet
-    // Mali and Xclipse GPUs produce NaNs and green/purple flickering with B10G11R11_UFLOAT; keep RGBA16F
-    if (is_mali() || is_xclipse()) {
-        log("nvn/vk: Mali/Xclipse GPU detected: R11G11B10F kept as RGBA16F to prevent green/purple/grey flickering");
+    // Older Mali (G57/Bifrost) and Xclipse GPUs can produce NaNs/flickering with B10G11R11_UFLOAT;
+    // Flagship Mali-G925/Immortalis >= r49 (Find X8) runs B10G11R11_UFLOAT cleanly at half the bandwidth of RGBA16F.
+    if ((is_mali() && !(is_mali_flagship() && mali_driver_release() >= 49)) || is_xclipse()) {
+        log("nvn/vk: Mali/Xclipse GPU detected: R11G11B10F kept as RGBA16F to prevent flickering");
         state.store(0, std::memory_order_release);
         return false;
     }

@@ -109,6 +109,11 @@ struct Bound {
     VkBool32 blend_enable[8]{};
     VkColorBlendEquationEXT blend_eq[8]{};
     VkColorComponentFlags write_mask[8]{};
+    bool has_vtx_input = false;
+    const ShaderInfo* vtx_vs = nullptr;
+    uint32_t vtx_nattrib = 0, vtx_nstream = 0;
+    VertexAttrib vtx_attribs[16]{};
+    VertexStream vtx_streams[16]{};
 } g_bound;
 uint64_t g_state_set = 0, g_state_kept = 0;  // state commands recorded and left out, for the log
 VkPipeline g_last_compute_pipeline = VK_NULL_HANDLE;
@@ -1367,6 +1372,71 @@ bool draw(VkCommandBuffer cb, const Targets& t, uint32_t mode, bool indexed, con
         g_state_kept++;
     }
     bind_sets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, layout);
+
+    if (dc.vertex_input) {
+        const uint32_t na = uint32_t(std::min<size_t>(g_state.attribs.size(), 16));
+        const uint32_t ns = uint32_t(std::min<size_t>(g_state.streams.size(), 15));
+        const bool same = g_bound.has_vtx_input && g_bound.vtx_vs == vs && g_bound.vtx_nattrib == na &&
+                          g_bound.vtx_nstream == ns &&
+                          std::memcmp(g_bound.vtx_attribs, g_state.attribs.data(), na * sizeof(VertexAttrib)) == 0 &&
+                          std::memcmp(g_bound.vtx_streams, g_state.streams.data(), ns * sizeof(VertexStream)) == 0;
+        if (same) {
+            g_state_kept++;
+        } else {
+            VkVertexInputAttributeDescription2EXT attrs[16]{};
+            VkVertexInputBindingDescription2EXT binds[16]{};
+            uint32_t nattr = 0, nbind = 0;
+            bool streams_used[16] = {}, zero_used = false;
+            if (vs) {
+                for (const ShaderIo& io : vs->refl.inputs) {
+                    if (nattr >= 16) break;
+                    VkVertexInputAttributeDescription2EXT& a = attrs[nattr++];
+                    a.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_ATTRIBUTE_DESCRIPTION_2_EXT;
+                    a.location = io.location;
+                    a.binding = 15;
+                    a.format = VK_FORMAT_R32G32B32A32_SFLOAT;
+                    a.offset = 0;
+                    if (io.location < na) {
+                        const VertexAttrib& va = g_state.attribs[io.location];
+                        VkFormat f = vk_vertex_format(va.format);
+                        if (f != VK_FORMAT_UNDEFINED && va.stream < 15) {
+                            a.binding = va.stream;
+                            a.format = f;
+                            a.offset = va.offset;
+                            streams_used[va.stream] = true;
+                        }
+                    }
+                    if (a.binding == 15) zero_used = true;
+                }
+            }
+            for (uint32_t s = 0; s < 15; s++) {
+                if (!streams_used[s]) continue;
+                const VertexStream st_s = s < ns ? g_state.streams[s] : VertexStream{};
+                VkVertexInputBindingDescription2EXT& b = binds[nbind++];
+                b.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT;
+                b.binding = s;
+                b.stride = st_s.stride;
+                b.inputRate = st_s.divisor ? VK_VERTEX_INPUT_RATE_INSTANCE : VK_VERTEX_INPUT_RATE_VERTEX;
+                b.divisor = st_s.divisor ? st_s.divisor : 1;
+            }
+            if (zero_used) {
+                VkVertexInputBindingDescription2EXT& b = binds[nbind++];
+                b.sType = VK_STRUCTURE_TYPE_VERTEX_INPUT_BINDING_DESCRIPTION_2_EXT;
+                b.binding = 15;
+                b.stride = 0;
+                b.inputRate = VK_VERTEX_INPUT_RATE_INSTANCE;
+                b.divisor = 1;
+            }
+            dc.set_vertex_input(cb, nbind, binds, nattr, attrs);
+            g_bound.has_vtx_input = true;
+            g_bound.vtx_vs = vs;
+            g_bound.vtx_nattrib = na;
+            g_bound.vtx_nstream = ns;
+            if (na) std::memcpy(g_bound.vtx_attribs, g_state.attribs.data(), na * sizeof(VertexAttrib));
+            if (ns) std::memcpy(g_bound.vtx_streams, g_state.streams.data(), ns * sizeof(VertexStream));
+            g_state_set++;
+        }
+    }
 
     // The vertex buffers resolved above, plus the zero stream (binding 15), batched in contiguous runs.
     bind_vertex_streams(cb, in.used, in.vertex);

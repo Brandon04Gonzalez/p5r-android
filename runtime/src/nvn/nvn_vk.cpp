@@ -63,6 +63,9 @@ struct PresentOrigin { uint32_t id = 0; uint64_t origin = 0; };
 PresentOrigin g_present_origins[64];
 std::atomic<uint64_t> g_picture_latency{0};  // ns, smoothed
 bool g_dynamic_rendering = true;  // vkCmdBeginRendering (core 1.3); else render pass objects
+bool g_load_store_op_none = false;
+bool g_astc_decode_mode = false;
+int g_mali_release = 0;
 bool g_integrated = false;
 bool g_require_sg32 = false;  // compute pipelines are made with a required subgroup size of 32 (Maxwell's warp)  // the chosen GPU is an integrated one (unified memory, the GPU is the long side)
 VkPhysicalDeviceProperties g_device_props{};
@@ -159,7 +162,19 @@ bool init() {
     p_vkGetPhysicalDeviceProperties(g_physical, &props);
     g_device_props = props;
     if (is_xclipse()) log("nvn/vk: Samsung Xclipse GPU detected (forcing CPU BC texture decode for compatibility)");
-    if (is_mali()) log("nvn/vk: ARM Mali GPU detected");
+    if (is_mali()) {
+        VkPhysicalDeviceDriverProperties dp{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p2{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2};
+        p2.pNext = (props.apiVersion >= VK_API_VERSION_1_2) ? &dp : nullptr;
+        if (p2.pNext) {
+            p_vkGetPhysicalDeviceProperties2(g_physical, &p2);
+            const char* r = std::strstr(dp.driverInfo, ".r");
+            if (!r) r = std::strstr(dp.driverInfo, " r");
+            if (r) g_mali_release = std::atoi(r + 2);
+        }
+        log("nvn/vk: ARM Mali GPU detected (%s, release r%d, flagship=%d)", props.deviceName, g_mali_release,
+            is_mali_flagship() ? 1 : 0);
+    }
     if (is_adreno_8xx()) log("nvn/vk: Qualcomm Adreno 8xx GPU detected (disabling chunked submits to avoid battle hang)");
     if (is_powervr()) log("nvn/vk: PowerVR GPU detected (pipelines with an unused colour slot skip the pipeline cache)");
     p_vkGetPhysicalDeviceMemoryProperties(g_physical, &g_memory);
@@ -338,6 +353,51 @@ bool init() {
         }
     }
 
+    // TOTKDroid Find X8 / Mali-G925 extensions:
+    // 1. VK_EXT_load_store_op_none (avoids unnecessary tile writebacks on read-only depth/stencil passes)
+    if (has_extension(dext, "VK_KHR_load_store_op_none")) {
+        dexts.push_back("VK_KHR_load_store_op_none");
+        g_load_store_op_none = true;
+    } else if (has_extension(dext, "VK_EXT_load_store_op_none")) {
+        dexts.push_back("VK_EXT_load_store_op_none");
+        g_load_store_op_none = true;
+    }
+    // 2. VK_EXT_astc_decode_mode (UNORM8 decode halves ASTC texture cache bandwidth on Mali-G925)
+    VkPhysicalDeviceASTCDecodeFeaturesEXT fastc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ASTC_DECODE_FEATURES_EXT};
+    const bool has_astc_decode = has_extension(dext, "VK_EXT_astc_decode_mode") &&
+                                 !(std::getenv("NX_ASTC_DECODE_MODE") && std::getenv("NX_ASTC_DECODE_MODE")[0] == '0');
+    if (has_astc_decode) {
+        VkPhysicalDeviceFeatures2 qastc{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+        qastc.pNext = &fastc;
+        p_vkGetPhysicalDeviceFeatures2(g_physical, &qastc);
+        if (fastc.decodeModeSharedExponent) {
+            fastc.pNext = nullptr;
+            *tail = &fastc, tail = &fastc.pNext;
+            dexts.push_back("VK_EXT_astc_decode_mode");
+            g_astc_decode_mode = true;
+        }
+    }
+    // 3. VK_EXT_vertex_input_dynamic_state (TOTKDroid v34: strips vertex layout from PipelineKey on Mali >= r48)
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT fvids{
+        VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
+    bool use_vids_ext = false;
+    {
+        const bool mali_ok = !is_mali() || g_mali_release >= 48;
+        const char* ve = std::getenv("NX_DYN_VTX");
+        const bool want_vids = want_dyn && !is_powervr() && (ve ? (ve[0] != '0') : mali_ok);
+        if (want_vids && has_extension(dext, "VK_EXT_vertex_input_dynamic_state")) {
+            VkPhysicalDeviceFeatures2 qv{VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
+            qv.pNext = &fvids;
+            p_vkGetPhysicalDeviceFeatures2(g_physical, &qv);
+            if (fvids.vertexInputDynamicState) {
+                fvids.pNext = nullptr;
+                *tail = &fvids, tail = &fvids.pNext;
+                dexts.push_back("VK_EXT_vertex_input_dynamic_state");
+                use_vids_ext = true;
+            }
+        }
+    }
+
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qci{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
     qci.queueFamilyIndex = g_family;
@@ -427,9 +487,16 @@ bool init() {
             g_dyn_caps.color_blend_equation = g_dyn_caps.set_color_blend_equation != nullptr;
             g_dyn_caps.color_write_mask = g_dyn_caps.set_color_write_mask != nullptr;
         }
+        if (use_vids_ext) {
+            g_dyn_caps.set_vertex_input =
+                reinterpret_cast<PFN_vkCmdSetVertexInputEXT>(gdpa(g_device, "vkCmdSetVertexInputEXT"));
+            g_dyn_caps.vertex_input = g_dyn_caps.set_vertex_input != nullptr;
+            // Per Vulkan spec, VK_DYNAMIC_STATE_VERTEX_INPUT_EXT supersedes VERTEX_INPUT_BINDING_STRIDE.
+            if (g_dyn_caps.vertex_input) g_dyn_caps.vertex_stride = false;
+        }
     }
     log("nvn/vk: dynamic state: eds1(cull=%u front=%u topo=%u dtest=%u dwrite=%u dcmp=%u stest=%u sop=%u stride=%u) "
-        "eds2(dbias=%u prst=%u rdisc=%u) eds3(poly=%u dclamp=%u a2c=%u cbe=%u cbeq=%u cwm=%u)",
+        "eds2(dbias=%u prst=%u rdisc=%u) eds3(poly=%u dclamp=%u a2c=%u cbe=%u cbeq=%u cwm=%u) vids=%u lsn=%u astc8=%u",
         g_dyn_caps.cull_mode ? 1u : 0u, g_dyn_caps.front_face ? 1u : 0u, g_dyn_caps.primitive_topology ? 1u : 0u,
         g_dyn_caps.depth_test_enable ? 1u : 0u, g_dyn_caps.depth_write_enable ? 1u : 0u,
         g_dyn_caps.depth_compare_op ? 1u : 0u, g_dyn_caps.stencil_test_enable ? 1u : 0u,
@@ -438,7 +505,8 @@ bool init() {
         g_dyn_caps.rasterizer_discard_enable ? 1u : 0u, g_dyn_caps.polygon_mode ? 1u : 0u,
         g_dyn_caps.depth_clamp_enable ? 1u : 0u, g_dyn_caps.alpha_to_coverage_enable ? 1u : 0u,
         g_dyn_caps.color_blend_enable ? 1u : 0u, g_dyn_caps.color_blend_equation ? 1u : 0u,
-        g_dyn_caps.color_write_mask ? 1u : 0u);
+        g_dyn_caps.color_write_mask ? 1u : 0u, g_dyn_caps.vertex_input ? 1u : 0u,
+        g_load_store_op_none ? 1u : 0u, g_astc_decode_mode ? 1u : 0u);
     pipeline_cache();
     if (display_timing) {
         g_past_timing = gdpa ? reinterpret_cast<PFN_vkGetPastPresentationTimingGOOGLE>(
@@ -479,7 +547,7 @@ bool init() {
     // spills bigger uploads to staging buffers in proportion to the ring).
     {
 #if defined(__ANDROID__)
-        uint64_t ring_mb = 64;
+        uint64_t ring_mb = is_high_ram_device() ? 128 : 64;
 #else
         uint64_t ring_mb = 256;
 #endif
@@ -633,6 +701,8 @@ bool vk_depth_clip_control() { return g_depth_clip_control; }
 bool vk_indirect_count() { return g_indirect_count; }
 bool vk_list_restart() { return g_list_restart; }
 bool vk_dynamic_rendering() { return g_dynamic_rendering; }
+bool vk_load_store_op_none() { return g_load_store_op_none; }
+bool vk_astc_decode_mode() { return g_astc_decode_mode; }
 const VkPhysicalDeviceFeatures& vk_features() { return g_features; }
 const DynamicStateCaps& vk_dynamic_caps() { return g_dyn_caps; }
 bool is_xclipse() {
@@ -640,9 +710,33 @@ bool is_xclipse() {
 }
 bool is_mali() {
     return std::strstr(g_device_props.deviceName, "Mali") != nullptr ||
+           std::strstr(g_device_props.deviceName, "Immortalis") != nullptr ||
            std::strstr(g_device_props.deviceName, "Panfrost") != nullptr ||
            std::strstr(g_device_props.deviceName, "PanVK") != nullptr ||
            g_device_props.vendorID == 0x13b5;
+}
+bool is_mali_flagship() {
+    if (!is_mali()) return false;
+    if (std::strstr(g_device_props.deviceName, "Immortalis") != nullptr) return true;
+    if (const char* g = std::strstr(g_device_props.deviceName, "Mali-G")) {
+        int num = std::atoi(g + 6);
+        if (num >= 710) return true;
+    }
+    return false;
+}
+int mali_driver_release() { return g_mali_release; }
+bool is_high_ram_device() {
+    static const bool high = [] {
+#if defined(_WIN32)
+        return true;
+#else
+        long pages = sysconf(_SC_PHYS_PAGES);
+        long psize = sysconf(_SC_PAGE_SIZE);
+        if (pages <= 0 || psize <= 0) return false;
+        return uint64_t(pages) * uint64_t(psize) >= (10ull << 30);
+#endif
+    }();
+    return high;
 }
 bool is_adreno() {
     return std::strstr(g_device_props.deviceName, "Adreno") != nullptr || g_device_props.vendorID == 0x5143;

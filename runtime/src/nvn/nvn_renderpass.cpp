@@ -88,11 +88,13 @@ VkRenderPass make_pass(const PassKey& k, uint32_t count) {
         a.format = VkFormat(k[8]);
         a.samples = VK_SAMPLE_COUNT_1_BIT;
         a.loadOp = k[18] ? VkAttachmentLoadOp(k[18] - 1) : VK_ATTACHMENT_LOAD_OP_LOAD;
-        a.storeOp = (k[9] & kNoStore) ? VK_ATTACHMENT_STORE_OP_DONT_CARE : VK_ATTACHMENT_STORE_OP_STORE;
         bool st = has_stencil(VkFormat(k[8]));
+        const VkAttachmentStoreOp no_store =
+            vk_load_store_op_none() ? VK_ATTACHMENT_STORE_OP_NONE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a.storeOp = (k[9] & kNoStore) ? no_store : VK_ATTACHMENT_STORE_OP_STORE;
         a.stencilLoadOp = !st ? VK_ATTACHMENT_LOAD_OP_DONT_CARE
                               : k[19] ? VkAttachmentLoadOp(k[19] - 1) : VK_ATTACHMENT_LOAD_OP_LOAD;
-        a.stencilStoreOp = st && !(k[9] & kNoStore) ? VK_ATTACHMENT_STORE_OP_STORE : VK_ATTACHMENT_STORE_OP_DONT_CARE;
+        a.stencilStoreOp = st && !(k[9] & kNoStore) ? VK_ATTACHMENT_STORE_OP_STORE : no_store;
         a.initialLayout = a.finalLayout = VK_IMAGE_LAYOUT_GENERAL;
         dref = {n++, VK_IMAGE_LAYOUT_GENERAL};
         sp.pDepthStencilAttachment = &dref;
