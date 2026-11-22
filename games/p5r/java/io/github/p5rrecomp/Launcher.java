@@ -321,7 +321,7 @@ public class Launcher extends Activity {
         options.add(new Option("RESOLUTION", "Resolución", "Resolution",
                 new String[] {"360p", "480p", "720p", "1080p"},
                 new String[] {"360p", "480p", "720p", "1080p"},
-                new String[] {"360p", "480p", "720p", "1080p"}, 2));
+                new String[] {"360p", "480p", "720p", "1080p"}, 1));
         options.add(new Option("NX_STRETCH", "Pantalla completa (estirar)", "Fullscreen (stretch)",
                 new String[] {"0", "1"},
                 new String[] {"Desactivada", "Activada"},
@@ -358,11 +358,11 @@ public class Launcher extends Activity {
         options.add(new Option("NX_NO_CROWD", "Gente / Multitudes de NPCs", "Crowd NPCs",
                 new String[] {"0", "1"},
                 new String[] {"Activada (normal)", "Desactivada (más FPS)"},
-                new String[] {"Enabled (normal)", "Disabled (more FPS)"}, 0));
+                new String[] {"Enabled (normal)", "Disabled (more FPS)"}, 1));
         options.add(new Option("NX_DISABLE_BLOOM", "Post-procesado (bloom/brillo)", "Post-processing (bloom)",
                 new String[] {"0", "1"},
                 new String[] {"Activado (normal)", "Desactivado (más FPS)"},
-                new String[] {"Enabled (normal)", "Disabled (more FPS)"}, 0));
+                new String[] {"Enabled (normal)", "Disabled (more FPS)"}, 1));
         options.add(new Option("NX_GAMEPAD_LAYOUT", "Botones del mando físico", "Physical gamepad buttons",
                 new String[] {"0", "1"},
                 new String[] {"Nintendo (A dcha, B abajo)", "Xbox / PC (A abajo, B dcha)"},
@@ -392,7 +392,7 @@ public class Launcher extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("PERSONA 5 ROYAL");
+        title.setText("ITEL CITY 100  •  PERSONA 5 ROYAL");
         title.setTextColor(Color.rgb(230, 0, 18));
         title.setTextSize(30);
         title.setTypeface(Typeface.DEFAULT_BOLD);
